@@ -36,8 +36,26 @@ export default function Home() {
   const [realPredictions, setRealPredictions] = useState<Record<string, Prediction>>({});
 
   useEffect(() => {
-    const config = loadApiConfig();
-    loadMatchesWithFallback(config);
+    const refresh = () => {
+      const config = loadApiConfig();
+      loadMatchesWithFallback(config);
+    };
+
+    refresh();
+
+    const onStorage = (e: StorageEvent) => {
+      if (!e.key || e.key === 'apiConfig') refresh();
+    };
+
+    window.addEventListener('storage', onStorage);
+    window.addEventListener('focus', refresh);
+    window.addEventListener('apiConfigChanged' as any, refresh as any);
+
+    return () => {
+      window.removeEventListener('storage', onStorage);
+      window.removeEventListener('focus', refresh);
+      window.removeEventListener('apiConfigChanged' as any, refresh as any);
+    };
   }, []);
 
   const toMatchStatus = (status: string): MatchStatus => {

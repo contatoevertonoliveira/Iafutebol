@@ -16,6 +16,9 @@ export const API_ENDPOINTS = {
 // Salvar configurações no localStorage
 export function saveApiConfig(config: ApiConfig): void {
   localStorage.setItem('apiConfig', JSON.stringify(config));
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new Event('apiConfigChanged'));
+  }
 }
 
 function parseBooleanEnv(value: unknown): boolean | undefined {
@@ -49,22 +52,20 @@ export function loadApiConfig(): ApiConfig | null {
   const stored = localStorage.getItem('apiConfig');
   const storedConfig = stored ? (JSON.parse(stored) as ApiConfig) : null;
 
-  if (import.meta.env.DEV) {
-    const envConfig = getEnvApiConfig();
-    if (envConfig) {
-      const merged = {
-        footballDataApiKey: '',
-        apiFootballKey: '',
-        openLigaDbEnabled: true,
-        kaggleUsername: '',
-        kaggleApiKey: '',
-        agentTrainingEnabled: false,
-        ...envConfig,
-        ...(storedConfig ?? {}),
-      } satisfies ApiConfig;
+  const envConfig = getEnvApiConfig();
+  if (envConfig) {
+    const merged = {
+      footballDataApiKey: '',
+      apiFootballKey: '',
+      openLigaDbEnabled: true,
+      kaggleUsername: '',
+      kaggleApiKey: '',
+      agentTrainingEnabled: false,
+      ...envConfig,
+      ...(storedConfig ?? {}),
+    } satisfies ApiConfig;
 
-      return merged;
-    }
+    return merged;
   }
 
   return storedConfig;

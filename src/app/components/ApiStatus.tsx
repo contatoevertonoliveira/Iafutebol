@@ -9,10 +9,28 @@ export function ApiStatus() {
   const [hasOpenLigaDb, setHasOpenLigaDb] = useState(false);
 
   useEffect(() => {
-    const config = loadApiConfig();
-    setHasFootballDataApi(!!config?.footballDataApiKey);
-    setHasApiFootball(!!config?.apiFootballKey);
-    setHasOpenLigaDb(!!config?.openLigaDbEnabled);
+    const refresh = () => {
+      const config = loadApiConfig();
+      setHasFootballDataApi(Boolean(config?.footballDataApiKey?.trim()));
+      setHasApiFootball(Boolean(config?.apiFootballKey?.trim()));
+      setHasOpenLigaDb(config?.openLigaDbEnabled ?? true);
+    };
+
+    refresh();
+
+    const onStorage = (e: StorageEvent) => {
+      if (!e.key || e.key === 'apiConfig') refresh();
+    };
+
+    window.addEventListener('storage', onStorage);
+    window.addEventListener('focus', refresh);
+    window.addEventListener('apiConfigChanged' as any, refresh as any);
+
+    return () => {
+      window.removeEventListener('storage', onStorage);
+      window.removeEventListener('focus', refresh);
+      window.removeEventListener('apiConfigChanged' as any, refresh as any);
+    };
   }, []);
 
   if (!hasApiFootball && !hasFootballDataApi && !hasOpenLigaDb) {
