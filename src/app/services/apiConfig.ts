@@ -18,11 +18,56 @@ export function saveApiConfig(config: ApiConfig): void {
   localStorage.setItem('apiConfig', JSON.stringify(config));
 }
 
-// Carregar configurações do localStorage
+function parseBooleanEnv(value: unknown): boolean | undefined {
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  return undefined;
+}
+
+function getEnvApiConfig(): Partial<ApiConfig> | null {
+  const env = import.meta.env as unknown as Record<string, string | boolean | undefined>;
+
+  const apiFootballKey = (env.VITE_API_FOOTBALL_KEY || env.VITE_API_FOOTBALL_API_KEY || '') as string;
+  const footballDataApiKey = (env.VITE_FOOTBALL_DATA_API_KEY || env.VITE_FOOTBALL_DATA_KEY || '') as string;
+  const openLigaDbEnabled = parseBooleanEnv(env.VITE_OPENLIGADB_ENABLED);
+
+  const hasAny =
+    Boolean(apiFootballKey.trim()) ||
+    Boolean(footballDataApiKey.trim()) ||
+    openLigaDbEnabled !== undefined;
+
+  if (!hasAny) return null;
+
+  return {
+    apiFootballKey: apiFootballKey.trim(),
+    footballDataApiKey: footballDataApiKey.trim(),
+    openLigaDbEnabled: openLigaDbEnabled ?? true,
+  };
+}
+
 export function loadApiConfig(): ApiConfig | null {
   const stored = localStorage.getItem('apiConfig');
-  if (!stored) return null;
-  return JSON.parse(stored);
+  const storedConfig = stored ? (JSON.parse(stored) as ApiConfig) : null;
+
+  if (import.meta.env.DEV) {
+    const envConfig = getEnvApiConfig();
+    if (envConfig) {
+      const merged = {
+        footballDataApiKey: '',
+        apiFootballKey: '',
+        openLigaDbEnabled: true,
+        kaggleUsername: '',
+        kaggleApiKey: '',
+        agentTrainingEnabled: false,
+        ...envConfig,
+        ...(storedConfig ?? {}),
+      } satisfies ApiConfig;
+
+      return merged;
+    }
+  }
+
+  return storedConfig;
 }
 
 // Validar API key do football-data.org
