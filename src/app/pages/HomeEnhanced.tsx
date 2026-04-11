@@ -6,12 +6,13 @@ import { FilterBar } from '../components/FilterBar';
 import { PremiumCarousel } from '../components/PremiumCarousel';
 import { AgentAnalysis } from '../components/AgentAnalysis';
 import { ApiStatus } from '../components/ApiStatus';
-import { TrendingUp, Brain, Loader2 } from 'lucide-react';
+import { TrendingUp, Brain, Loader2, RefreshCw } from 'lucide-react';
 import { AI_AGENTS, AgentEnsemble, AgentPrediction } from '../services/aiAgents';
 import { loadApiConfig } from '../services/apiConfig';
 import { FootballDataService, FootballMatch } from '../services/footballDataService';
 import { ApiFootballService, ApiFootballMatch } from '../services/apiFootballService';
 import { OpenLigaDbService, OpenLigaMatch } from '../services/openLigaDbService';
+import { Button } from '../components/ui/button';
 import { toast } from 'sonner';
 
 type MatchStatus = 'scheduled' | 'live' | 'finished';
@@ -34,29 +35,7 @@ export default function Home() {
   const [isLoadingMatches, setIsLoadingMatches] = useState(false);
   const [apiSource, setApiSource] = useState<ApiSource>('mock');
   const [realPredictions, setRealPredictions] = useState<Record<string, Prediction>>({});
-
-  useEffect(() => {
-    const refresh = () => {
-      const config = loadApiConfig();
-      loadMatchesWithFallback(config);
-    };
-
-    refresh();
-
-    const onStorage = (e: StorageEvent) => {
-      if (!e.key || e.key === 'apiConfig') refresh();
-    };
-
-    window.addEventListener('storage', onStorage);
-    window.addEventListener('focus', refresh);
-    window.addEventListener('apiConfigChanged' as any, refresh as any);
-
-    return () => {
-      window.removeEventListener('storage', onStorage);
-      window.removeEventListener('focus', refresh);
-      window.removeEventListener('apiConfigChanged' as any, refresh as any);
-    };
-  }, []);
+  const [lastUpdatedAt, setLastUpdatedAt] = useState<Date | null>(null);
 
   const toMatchStatus = (status: string): MatchStatus => {
     const normalized = String(status || '').toUpperCase();
@@ -259,6 +238,7 @@ export default function Home() {
       console.log(`📅 Período: ${dateFrom} a ${dateTo}`);
 
       setRealPredictions({});
+      let successfulSource: ApiSource | null = null;
 
       const apiFootballKey = config?.apiFootballKey?.trim();
       const footballDataApiKey = config?.footballDataApiKey?.trim();
@@ -269,12 +249,14 @@ export default function Home() {
           const service = new ApiFootballService(apiFootballKey);
           const fixtures = await service.getFixtures({ from: dateFrom, to: dateTo, timezone: 'UTC' });
           const matches = fixtures.map(convertApiFootballMatchToFootballMatch);
+          successfulSource = successfulSource ?? 'api-football';
           if (matches.length > 0) {
             const processedMatches = processCrests(matches);
             setApiSource('api-football');
             setRealMatches(processedMatches);
             const predictionsById = await generatePredictionsForMatches(processedMatches);
             setRealPredictions(predictionsById);
+            setLastUpdatedAt(new Date());
             toast.success(`${matches.length} partidas carregadas (API-Football)`);
             return;
           }
@@ -287,12 +269,14 @@ export default function Home() {
         try {
           const service = new FootballDataService(footballDataApiKey);
           const matches = await service.getMatches(undefined, dateFrom, dateTo);
+          successfulSource = successfulSource ?? 'football-data';
           if (matches.length > 0) {
             const processedMatches = processCrests(matches);
             setApiSource('football-data');
             setRealMatches(processedMatches);
             const predictionsById = await generatePredictionsForMatches(processedMatches);
             setRealPredictions(predictionsById);
+            setLastUpdatedAt(new Date());
             toast.success(`${matches.length} partidas carregadas (Football-Data)`);
             return;
           }
@@ -306,18 +290,28 @@ export default function Home() {
           const service = new OpenLigaDbService();
           const openLigaMatches = await service.getMatchesByDateRange({ dateFrom, dateTo });
           const matches = openLigaMatches.map(convertOpenLigaMatchToFootballMatch);
+          successfulSource = successfulSource ?? 'openligadb';
           if (matches.length > 0) {
             const processedMatches = processCrests(matches);
             setApiSource('openligadb');
             setRealMatches(processedMatches);
             const predictionsById = await generatePredictionsForMatches(processedMatches);
             setRealPredictions(predictionsById);
+            setLastUpdatedAt(new Date());
             toast.success(`${matches.length} partidas carregadas (OpenLigaDB)`);
             return;
           }
         } catch (error) {
           console.warn('⚠️ OpenLigaDB falhou, usando fallback...', error);
         }
+      }
+
+      if (successfulSource) {
+        setApiSource(successfulSource);
+        setRealMatches([]);
+        setLastUpdatedAt(new Date());
+        toast.info('Nenhuma partida encontrada para o período selecionado');
+        return;
       }
 
       setApiSource('mock');
@@ -397,7 +391,7 @@ export default function Home() {
   // Filtrar partidas - usa realMatches se disponível, senão mockMatches
   const filteredMatches = useMemo(() => {
     // Converte realMatches (FootballMatch) para formato Match se disponível
-    const matchesToUse: DisplayMatch[] = realMatches.length > 0 ?
+    const matchesToUse: DisplayMatch[] = apiSource !== 'mock' ?
       realMatches.map((footballMatch) => {
         const matchDate = new Date(footballMatch.utcDate);
         return {
@@ -457,7 +451,7 @@ export default function Home() {
 
       return true;
     });
-  }, [realMatches, selectedDate, selectedCountry, selectedLeague]);
+  }, [apiSource, realMatches, selectedDate, selectedCountry, selectedLeague]);
 
   // Agrupar partidas por liga
   const groupedMatches = useMemo(() => {
@@ -477,7 +471,7 @@ export default function Home() {
   // Jogos premium (alta confiança + melhor retorno)
   const premiumMatches = useMemo(() => {
     const pickPrediction = (matchId: string) => {
-      return realMatches.length > 0 ? realPredictions[matchId] : mockPredictions.find((p) => p.matchId === matchId);
+      return apiSource !== 'mock' ? realPredictions[matchId] : mockPredictions.find((p) => p.matchId === matchId);
     };
 
     const sourceMatches = filteredMatches;
@@ -514,12 +508,12 @@ export default function Home() {
       .filter((m): m is NonNullable<typeof m> => !!m)
       .filter((m) => m.aiConfidence >= 80)
       .slice(0, 5);
-  }, [filteredMatches, realMatches.length, realPredictions]);
+  }, [apiSource, filteredMatches, realPredictions]);
 
   const predictionByMatchId = useMemo(() => {
-    if (realMatches.length > 0) return realPredictions;
+    if (apiSource !== 'mock') return realPredictions;
     return Object.fromEntries(mockPredictions.map((p) => [p.matchId, p]));
-  }, [realMatches.length, realPredictions]);
+  }, [apiSource, realPredictions]);
 
   const selectedMatch = selectedMatchId ? filteredMatches.find((m) => m.id === selectedMatchId) ?? null : null;
   const selectedPrediction = selectedMatchId ? predictionByMatchId[selectedMatchId] ?? null : null;
@@ -593,6 +587,11 @@ export default function Home() {
     loadAgentAnalysis(matchId);
   };
 
+  const handleManualRefreshMatches = () => {
+    const config = loadApiConfig();
+    loadMatchesWithFallback(config);
+  };
+
   return (
     <div className="min-h-screen bg-gray-50">
       <FilterBar
@@ -609,15 +608,34 @@ export default function Home() {
       <div className="p-6">
         {/* Header */}
         <div className="mb-6">
-          <div className="flex items-center gap-3 mb-2">
-            <Brain className="w-8 h-8 text-purple-600" />
-            <h1 className="text-3xl font-bold text-gray-900">
-              Previsões de Futebol com IA
-            </h1>
+          <div className="flex items-start justify-between gap-4 mb-2">
+            <div className="flex items-center gap-3">
+              <Brain className="w-8 h-8 text-purple-600" />
+              <h1 className="text-3xl font-bold text-gray-900">
+                Previsões de Futebol com IA
+              </h1>
+            </div>
+            <Button
+              onClick={handleManualRefreshMatches}
+              disabled={isLoadingMatches}
+              className="shrink-0"
+            >
+              {isLoadingMatches ? (
+                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+              ) : (
+                <RefreshCw className="w-4 h-4 mr-2" />
+              )}
+              Atualizar partidas
+            </Button>
           </div>
           <p className="text-gray-600">
             Análises detalhadas geradas por 5 agentes de IA especializados em diferentes aspectos do futebol
           </p>
+          {lastUpdatedAt && (
+            <p className="text-sm text-gray-500 mt-2">
+              Última atualização: {lastUpdatedAt.toLocaleString('pt-BR')}
+            </p>
+          )}
         </div>
 
         {/* API Status */}

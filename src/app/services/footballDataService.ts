@@ -113,13 +113,6 @@ export class FootballDataService {
       
     } catch (error) {
       console.error('❌ Erro na requisição:', error);
-      
-      // Fallback: retorna dados mock para desenvolvimento
-      if (import.meta.env.DEV) {
-        console.log('🔄 Usando dados mock para desenvolvimento');
-        return this.getMockData(endpoint, params) as T;
-      }
-      
       throw error;
     }
   }
