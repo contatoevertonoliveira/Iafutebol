@@ -43,6 +43,34 @@ export class FootballDataService {
     this.apiKey = apiKey;
   }
 
+  private async fetchViaServerProxy<T>(url: string): Promise<T> {
+    const { projectId, publicAnonKey } = await import('/utils/supabase/info');
+
+    const response = await fetch(
+      `https://${projectId}.supabase.co/functions/v1/make-server-1119702f/proxy/football-data`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${publicAnonKey}`,
+        },
+        body: JSON.stringify({
+          url,
+          apiKey: this.apiKey,
+        }),
+      },
+    );
+
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => '');
+      throw new Error(
+        `Proxy error: ${response.status} ${response.statusText}${errorText ? ` - ${errorText}` : ''}`,
+      );
+    }
+
+    return response.json();
+  }
+
   private async fetch<T>(endpoint: string, params?: Record<string, string>): Promise<T> {
     try {
       // Constrói a URL completa
@@ -57,22 +85,27 @@ export class FootballDataService {
 
       console.log('🌐 Fazendo requisição para:', url.toString());
 
-      // Tenta requisição direta primeiro
+      try {
+        const data = await this.fetchViaServerProxy<T>(url.toString());
+        console.log('✅ Requisição via servidor bem-sucedida');
+        return data;
+      } catch (proxyError) {
+        console.warn('⚠️ Proxy via servidor falhou, tentando requisição direta...', proxyError);
+      }
+
       const response = await fetch(url.toString(), {
         headers: {
           'X-Auth-Token': this.apiKey,
         },
       });
 
-      if (response.ok) {
-        const data = await response.json();
-        console.log('✅ Requisição bem-sucedida');
-        return data;
+      if (!response.ok) {
+        throw new Error(`API Error: ${response.status} ${response.statusText}`);
       }
 
-      // Se falhou, pode ser CORS - tenta abordagem alternativa
-      console.warn('⚠️ Requisição falhou, tentando abordagem alternativa...');
-      throw new Error(`API Error: ${response.status} ${response.statusText}`);
+      const data = await response.json();
+      console.log('✅ Requisição direta bem-sucedida');
+      return data;
       
     } catch (error) {
       console.error('❌ Erro na requisição:', error);
@@ -138,7 +171,7 @@ export class FootballDataService {
       if (matchDate > endDate) break;
       
       const homeTeam = teams[Math.floor(Math.random() * teams.length)];
-      const awayTeam = teams[Math.floor(Math.random() * teams.length)];
+      let awayTeam = teams[Math.floor(Math.random() * teams.length)];
       const competition = competitions[Math.floor(Math.random() * competitions.length)];
       
       // Garante que os times sejam diferentes
