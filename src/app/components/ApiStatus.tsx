@@ -5,15 +5,17 @@ import { loadApiConfig } from '../services/apiConfig';
 
 export function ApiStatus() {
   const [hasFootballDataApi, setHasFootballDataApi] = useState(false);
+  const [hasApiFootball, setHasApiFootball] = useState(false);
   const [hasOpenLigaDb, setHasOpenLigaDb] = useState(false);
 
   useEffect(() => {
     const config = loadApiConfig();
     setHasFootballDataApi(!!config?.footballDataApiKey);
+    setHasApiFootball(!!config?.apiFootballKey);
     setHasOpenLigaDb(!!config?.openLigaDbEnabled);
   }, []);
 
-  if (!hasFootballDataApi && !hasOpenLigaDb) {
+  if (!hasApiFootball && !hasFootballDataApi && !hasOpenLigaDb) {
     return (
       <div className="bg-yellow-50 border-l-4 border-yellow-400 p-4 mb-6">
         <div className="flex items-start">
@@ -43,6 +45,12 @@ export function ApiStatus() {
             APIs Ativas
           </h3>
           <div className="flex flex-wrap gap-2">
+            {hasApiFootball && (
+              <Badge className="bg-orange-100 text-orange-800 border-orange-300">
+                <Wifi className="w-3 h-3 mr-1" />
+                API-Football.com
+              </Badge>
+            )}
             {hasFootballDataApi && (
               <Badge className="bg-green-100 text-green-800 border-green-300">
                 <Wifi className="w-3 h-3 mr-1" />

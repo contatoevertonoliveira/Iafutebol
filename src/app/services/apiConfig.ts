@@ -8,7 +8,7 @@ export interface ApiConfig {
 }
 
 export const API_ENDPOINTS = {
-  footballData: 'https://api.football-data.org/v4',
+  footballData: 'https://api.football-data.org/v4/',
   apiFootball: 'https://v3.football.api-sports.io',
   openLigaDb: 'https://api.openligadb.de',
 };

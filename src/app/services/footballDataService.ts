@@ -74,7 +74,11 @@ export class FootballDataService {
   private async fetch<T>(endpoint: string, params?: Record<string, string>): Promise<T> {
     try {
       // Constrói a URL completa
-      const url = new URL(endpoint, API_ENDPOINTS.footballData);
+      const baseUrl = API_ENDPOINTS.footballData.endsWith('/')
+        ? API_ENDPOINTS.footballData
+        : `${API_ENDPOINTS.footballData}/`;
+      const normalizedEndpoint = endpoint.startsWith('/') ? endpoint.slice(1) : endpoint;
+      const url = new URL(normalizedEndpoint, baseUrl);
       
       // Adiciona parâmetros de query se existirem
       if (params) {

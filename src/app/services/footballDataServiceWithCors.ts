@@ -86,7 +86,11 @@ export class FootballDataServiceWithCors {
   private async fetchWithCors<T>(endpoint: string, params?: Record<string, string>): Promise<T> {
     try {
       // Primeiro tenta via proxy CORS
-      const url = new URL(endpoint, API_ENDPOINTS.footballData);
+      const baseUrl = API_ENDPOINTS.footballData.endsWith('/')
+        ? API_ENDPOINTS.footballData
+        : `${API_ENDPOINTS.footballData}/`;
+      const normalizedEndpoint = endpoint.startsWith('/') ? endpoint.slice(1) : endpoint;
+      const url = new URL(normalizedEndpoint, baseUrl);
       if (params) {
         Object.entries(params).forEach(([key, value]) => {
           url.searchParams.append(key, value);
