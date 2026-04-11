@@ -1,5 +1,5 @@
 import { FootballMatch } from './footballDataService';
-import { getLatestCheckpoint, loadTrainingSessions } from './optimizedTrainingService';
+import { loadTrainingSessions } from './optimizedTrainingService';
 
 export interface AgentPrediction {
   agentName: string;

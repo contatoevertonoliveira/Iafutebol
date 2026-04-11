@@ -1,15 +1,18 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useRef } from 'react';
 import { mockMatches, mockPredictions, countries, leagues, Match, Prediction } from '../data/mockData';
 import { MatchCard } from '../components/MatchCard';
 import { PredictionDetails } from '../components/PredictionDetails';
 import { FilterBar } from '../components/FilterBar';
 import { TrendingUp } from 'lucide-react';
+import { DraggableWindow } from '../components/DraggableWindow';
 
 export default function Home() {
   const [selectedDate, setSelectedDate] = useState('all');
   const [selectedCountry, setSelectedCountry] = useState('all');
   const [selectedLeague, setSelectedLeague] = useState('all');
   const [selectedMatchId, setSelectedMatchId] = useState<string | null>(null);
+  const zRef = useRef(70);
+  const [detailsZ, setDetailsZ] = useState(60);
 
   // Filtrar partidas
   const filteredMatches = useMemo(() => {
@@ -174,11 +177,21 @@ export default function Home() {
 
       {/* Modal de detalhes */}
       {selectedMatch && selectedPrediction && (
-        <PredictionDetails
-          match={selectedMatch}
-          prediction={selectedPrediction}
-          onClose={() => setSelectedMatchId(null)}
-        />
+        <div className="fixed inset-0 z-50 pointer-events-none">
+          <DraggableWindow
+            title="Análise Completa (Previsão)"
+            onClose={() => setSelectedMatchId(null)}
+            initialPosition={{ x: 80, y: 80 }}
+            initialSize={{ width: 980, height: 760 }}
+            zIndex={detailsZ}
+            onFocus={() => {
+              zRef.current += 1;
+              setDetailsZ(zRef.current);
+            }}
+          >
+            <PredictionDetails match={selectedMatch} prediction={selectedPrediction} />
+          </DraggableWindow>
+        </div>
       )}
     </div>
   );

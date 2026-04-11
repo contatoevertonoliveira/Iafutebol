@@ -1,15 +1,14 @@
 import { Match, Prediction } from '../data/mockData';
-import { X, TrendingUp, Target, BarChart3, Trophy, Timer, Hash } from 'lucide-react';
+import { TrendingUp, Target, BarChart3, Trophy, Timer, Hash } from 'lucide-react';
 import { Badge } from './ui/badge';
 import { Card } from './ui/card';
 
 interface PredictionDetailsProps {
   match: Match;
   prediction: Prediction;
-  onClose: () => void;
 }
 
-export function PredictionDetails({ match, prediction, onClose }: PredictionDetailsProps) {
+export function PredictionDetails({ match, prediction }: PredictionDetailsProps) {
   const getConfidenceColor = (confidence: number) => {
     if (confidence >= 70) return 'bg-green-100 text-green-800 border-green-300';
     if (confidence >= 50) return 'bg-yellow-100 text-yellow-800 border-yellow-300';
@@ -23,17 +22,8 @@ export function PredictionDetails({ match, prediction, onClose }: PredictionDeta
   };
 
   return (
-    <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 overflow-y-auto">
-      <div className="bg-white rounded-xl max-w-4xl w-full my-8">
-        {/* Header */}
-        <div className="bg-gradient-to-r from-blue-600 to-blue-700 text-white p-6 rounded-t-xl relative">
-          <button
-            onClick={onClose}
-            className="absolute top-4 right-4 p-2 hover:bg-white/20 rounded-lg transition-colors"
-          >
-            <X className="w-5 h-5" />
-          </button>
-          
+    <div className="bg-white rounded-xl">
+      <div className="bg-gradient-to-r from-blue-600 to-blue-700 text-white p-6 rounded-t-xl">
           <div className="flex items-center gap-2 mb-4">
             <TrendingUp className="w-5 h-5" />
             <span className="font-semibold">{match.league}</span>
@@ -218,7 +208,6 @@ export function PredictionDetails({ match, prediction, onClose }: PredictionDeta
             Não garantem resultados e devem ser utilizadas apenas como referência informativa.
           </div>
         </div>
-      </div>
     </div>
   );
 }

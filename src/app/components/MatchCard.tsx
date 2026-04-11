@@ -1,5 +1,5 @@
 import { Match, Prediction } from '../data/mockData';
-import { Calendar, Clock, TrendingUp } from 'lucide-react';
+import { Calendar, Clock, TrendingUp, Star } from 'lucide-react';
 import { Badge } from './ui/badge';
 import { Card } from './ui/card';
 import { TeamLogo } from './TeamLogo';
@@ -16,9 +16,19 @@ interface MatchCardProps {
   onViewDetails: (matchId: string) => void;
   homeCrest?: string;
   awayCrest?: string;
+  isFavorite?: boolean;
+  onToggleFavorite?: (matchId: string) => void;
 }
 
-export function MatchCard({ match, prediction, onViewDetails, homeCrest, awayCrest }: MatchCardProps) {
+export function MatchCard({
+  match,
+  prediction,
+  onViewDetails,
+  homeCrest,
+  awayCrest,
+  isFavorite = false,
+  onToggleFavorite,
+}: MatchCardProps) {
   const [showResult, setShowResult] = useState(false);
 
   const getPredictionLabel = (pred: 'home' | 'away' | 'draw') => {
@@ -63,9 +73,18 @@ export function MatchCard({ match, prediction, onViewDetails, homeCrest, awayCre
           <TrendingUp className="w-4 h-4" />
           <span className="font-semibold text-sm">{match.league}</span>
         </div>
-        <Badge variant="secondary" className="bg-white/20 text-white border-0">
-          {match.country}
-        </Badge>
+        <div className="flex items-center gap-2">
+          <Badge variant="secondary" className="bg-white/20 text-white border-0">
+            {match.country}
+          </Badge>
+          <button
+            onClick={() => onToggleFavorite?.(match.id)}
+            className="p-1 rounded-md hover:bg-white/20 transition-colors"
+            aria-label={isFavorite ? 'Remover dos favoritos' : 'Adicionar aos favoritos'}
+          >
+            <Star className={`w-4 h-4 ${isFavorite ? 'fill-yellow-400 text-yellow-400' : 'text-white'}`} />
+          </button>
+        </div>
       </div>
 
       {/* Informações da Partida */}

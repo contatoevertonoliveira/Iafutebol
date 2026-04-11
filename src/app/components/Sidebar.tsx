@@ -65,27 +65,48 @@ export function Sidebar() {
             <h3 className="text-xs uppercase text-gray-500 font-semibold">Ligas Principais</h3>
           </div>
           <div className="space-y-1">
-            <button className="w-full text-left px-4 py-2 text-sm text-gray-300 hover:bg-gray-700 hover:text-white rounded-lg transition-colors">
-              🏴󠁧󠁢󠁥󠁮󠁧󠁿 Premier League
-            </button>
-            <button className="w-full text-left px-4 py-2 text-sm text-gray-300 hover:bg-gray-700 hover:text-white rounded-lg transition-colors">
+            <NavLink
+              to="/leagues?league=Premier%20League&country=Inglaterra"
+              className="w-full block text-left px-4 py-2 text-sm text-gray-300 hover:bg-gray-700 hover:text-white rounded-lg transition-colors"
+            >
+              🏴 Premier League
+            </NavLink>
+            <NavLink
+              to="/leagues?league=La%20Liga&country=Espanha"
+              className="w-full block text-left px-4 py-2 text-sm text-gray-300 hover:bg-gray-700 hover:text-white rounded-lg transition-colors"
+            >
               🇪🇸 La Liga
-            </button>
-            <button className="w-full text-left px-4 py-2 text-sm text-gray-300 hover:bg-gray-700 hover:text-white rounded-lg transition-colors">
+            </NavLink>
+            <NavLink
+              to="/leagues?league=Serie%20A&country=Itália"
+              className="w-full block text-left px-4 py-2 text-sm text-gray-300 hover:bg-gray-700 hover:text-white rounded-lg transition-colors"
+            >
               🇮🇹 Serie A
-            </button>
-            <button className="w-full text-left px-4 py-2 text-sm text-gray-300 hover:bg-gray-700 hover:text-white rounded-lg transition-colors">
+            </NavLink>
+            <NavLink
+              to="/leagues?league=Bundesliga&country=Alemanha"
+              className="w-full block text-left px-4 py-2 text-sm text-gray-300 hover:bg-gray-700 hover:text-white rounded-lg transition-colors"
+            >
               🇩🇪 Bundesliga
-            </button>
-            <button className="w-full text-left px-4 py-2 text-sm text-gray-300 hover:bg-gray-700 hover:text-white rounded-lg transition-colors">
+            </NavLink>
+            <NavLink
+              to="/leagues?league=Ligue%201&country=França"
+              className="w-full block text-left px-4 py-2 text-sm text-gray-300 hover:bg-gray-700 hover:text-white rounded-lg transition-colors"
+            >
               🇫🇷 Ligue 1
-            </button>
-            <button className="w-full text-left px-4 py-2 text-sm text-gray-300 hover:bg-gray-700 hover:text-white rounded-lg transition-colors">
+            </NavLink>
+            <NavLink
+              to="/leagues?league=Brasileirão%20Série%20A&country=Brasil"
+              className="w-full block text-left px-4 py-2 text-sm text-gray-300 hover:bg-gray-700 hover:text-white rounded-lg transition-colors"
+            >
               🇧🇷 Brasileirão
-            </button>
-            <button className="w-full text-left px-4 py-2 text-sm text-gray-300 hover:bg-gray-700 hover:text-white rounded-lg transition-colors">
+            </NavLink>
+            <NavLink
+              to="/leagues?league=UEFA%20Champions%20League"
+              className="w-full block text-left px-4 py-2 text-sm text-gray-300 hover:bg-gray-700 hover:text-white rounded-lg transition-colors"
+            >
               ⭐ Champions League
-            </button>
+            </NavLink>
           </div>
         </div>
       </nav>

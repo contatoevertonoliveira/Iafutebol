@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from 'react';
+import { useState, useMemo, useEffect, useRef } from 'react';
 import { mockMatches, mockPredictions, countries, leagues, Match, Prediction } from '../data/mockData';
 import { MatchCard } from '../components/MatchCard';
 import { PredictionDetails } from '../components/PredictionDetails';
@@ -6,6 +6,7 @@ import { FilterBar } from '../components/FilterBar';
 import { PremiumCarousel } from '../components/PremiumCarousel';
 import { AgentAnalysis } from '../components/AgentAnalysis';
 import { ApiStatus } from '../components/ApiStatus';
+import { DraggableWindow } from '../components/DraggableWindow';
 import { TrendingUp, Brain, Loader2, RefreshCw } from 'lucide-react';
 import { getDynamicAgentProfiles, AgentEnsemble, AgentPrediction, learnFromMatchResult } from '../services/aiAgents';
 import { loadApiConfig } from '../services/apiConfig';
@@ -14,6 +15,7 @@ import { ApiFootballService, ApiFootballMatch } from '../services/apiFootballSer
 import { OpenLigaDbService, OpenLigaMatch } from '../services/openLigaDbService';
 import { Button } from '../components/ui/button';
 import { toast } from 'sonner';
+import { useLocation } from 'react-router';
 
 type MatchStatus = 'scheduled' | 'live' | 'finished';
 type ApiSource = 'api-football' | 'football-data' | 'openligadb' | 'mock';
@@ -27,8 +29,14 @@ type DisplayMatch = Match & {
   };
 };
 
-export default function Home() {
-  const [selectedDate, setSelectedDate] = useState('all');
+type HomeEnhancedProps = {
+  initialSelectedDate?: string;
+  favoritesOnly?: boolean;
+};
+
+export default function Home({ initialSelectedDate = 'today', favoritesOnly = false }: HomeEnhancedProps) {
+  const location = useLocation();
+  const [selectedDate, setSelectedDate] = useState(initialSelectedDate);
   const [selectedCountry, setSelectedCountry] = useState('all');
   const [selectedLeague, setSelectedLeague] = useState('all');
   const [selectedMatchId, setSelectedMatchId] = useState<string | null>(null);
@@ -40,6 +48,64 @@ export default function Home() {
   const [apiSource, setApiSource] = useState<ApiSource>('mock');
   const [realPredictions, setRealPredictions] = useState<Record<string, Prediction>>({});
   const [lastUpdatedAt, setLastUpdatedAt] = useState<Date | null>(null);
+  const [detailsZIndex, setDetailsZIndex] = useState(60);
+  const [agentsZIndex, setAgentsZIndex] = useState(61);
+  const zCounterRef = useRef(70);
+  const favoritesKey = 'favorite_matches_v1';
+  const [favoriteMatchIds, setFavoriteMatchIds] = useState<string[]>([]);
+
+  useEffect(() => {
+    const refreshFavorites = () => {
+      try {
+        const raw = localStorage.getItem(favoritesKey) || '[]';
+        const parsed = JSON.parse(raw) as unknown;
+        if (Array.isArray(parsed)) {
+          setFavoriteMatchIds(parsed.map(String));
+        } else {
+          setFavoriteMatchIds([]);
+        }
+      } catch {
+        setFavoriteMatchIds([]);
+      }
+    };
+
+    refreshFavorites();
+    const onStorage = (e: StorageEvent) => {
+      if (!e.key || e.key === favoritesKey) refreshFavorites();
+    };
+    const onFavoritesChanged = () => refreshFavorites();
+
+    window.addEventListener('storage', onStorage);
+    window.addEventListener('favoritesChanged' as any, onFavoritesChanged as any);
+    window.addEventListener('focus', refreshFavorites);
+    return () => {
+      window.removeEventListener('storage', onStorage);
+      window.removeEventListener('favoritesChanged' as any, onFavoritesChanged as any);
+      window.removeEventListener('focus', refreshFavorites);
+    };
+  }, []);
+
+  const toggleFavoriteMatch = (matchId: string) => {
+    try {
+      const current = new Set(favoriteMatchIds);
+      if (current.has(matchId)) current.delete(matchId);
+      else current.add(matchId);
+      const next = Array.from(current);
+      localStorage.setItem(favoritesKey, JSON.stringify(next));
+      setFavoriteMatchIds(next);
+      window.dispatchEvent(new Event('favoritesChanged'));
+    } catch {
+      return;
+    }
+  };
+
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    const league = params.get('league');
+    const country = params.get('country');
+    if (league && league !== selectedLeague) setSelectedLeague(league);
+    if (country && country !== selectedCountry) setSelectedCountry(country);
+  }, [location.search, selectedCountry, selectedLeague]);
 
   useEffect(() => {
     if (apiSource === 'mock' || realMatches.length === 0) return;
@@ -596,8 +662,10 @@ export default function Home() {
     return matchesToUse.filter((match) => {
       // Filtro de data
       if (selectedDate !== 'all') {
-        const today = new Date('2026-04-10');
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
         const matchDate = new Date(match.date);
+        matchDate.setHours(0, 0, 0, 0);
         
         if (selectedDate === 'today') {
           if (matchDate.toDateString() !== today.toDateString()) return false;
@@ -630,9 +698,13 @@ export default function Home() {
         return false;
       }
 
+      if (favoritesOnly && !favoriteMatchIds.includes(match.id)) {
+        return false;
+      }
+
       return true;
     });
-  }, [apiSource, realMatches, selectedDate, selectedCountry, selectedLeague]);
+  }, [apiSource, realMatches, selectedDate, selectedCountry, selectedLeague, favoritesOnly, favoriteMatchIds]);
 
   // Agrupar partidas por liga
   const groupedMatches = useMemo(() => {
@@ -925,6 +997,8 @@ export default function Home() {
                         onViewDetails={handleViewDetails}
                         homeCrest={match.homeCrest}
                         awayCrest={match.awayCrest}
+                        isFavorite={favoriteMatchIds.includes(match.id)}
+                        onToggleFavorite={toggleFavoriteMatch}
                       />
                     );
                   })}
@@ -935,23 +1009,42 @@ export default function Home() {
         )}
       </div>
 
-      {/* Modal de detalhes com análise dos agentes */}
       {selectedMatch && selectedPrediction && (
-        <div className="fixed inset-0 bg-black/50 z-50 overflow-y-auto">
-          <div className="min-h-screen p-4 flex items-start justify-center">
-            <div className="bg-white rounded-xl max-w-6xl w-full my-8">
-              <PredictionDetails
-                match={selectedMatch}
-                prediction={selectedPrediction}
-                onClose={() => {
-                  setSelectedMatchId(null);
-                  setShowAgentAnalysis(false);
-                  setAgentPredictions([]);
-                }}
-              />
+        <div className="fixed inset-0 z-50 pointer-events-none">
+          <DraggableWindow
+            title="Análise Completa (Previsão)"
+            onClose={() => {
+              setSelectedMatchId(null);
+              setShowAgentAnalysis(false);
+              setAgentPredictions([]);
+            }}
+            initialPosition={{ x: 80, y: 80 }}
+            initialSize={{ width: 980, height: 760 }}
+            zIndex={detailsZIndex}
+            onFocus={() => {
+              zCounterRef.current += 1;
+              setDetailsZIndex(zCounterRef.current);
+            }}
+          >
+            <PredictionDetails match={selectedMatch} prediction={selectedPrediction} />
+          </DraggableWindow>
 
-              {/* Análise dos Agentes de IA */}
-              <div className="p-6 border-t">
+          {showAgentAnalysis && (
+            <DraggableWindow
+              title="Análise dos Agentes"
+              onClose={() => {
+                setShowAgentAnalysis(false);
+                setAgentPredictions([]);
+              }}
+              initialPosition={{ x: 1120, y: 120 }}
+              initialSize={{ width: 720, height: 760 }}
+              zIndex={agentsZIndex}
+              onFocus={() => {
+                zCounterRef.current += 1;
+                setAgentsZIndex(zCounterRef.current);
+              }}
+            >
+              <div className="p-6">
                 {isLoadingAgents ? (
                   <div className="flex items-center justify-center py-12">
                     <Loader2 className="w-8 h-8 text-blue-600 animate-spin" />
@@ -961,8 +1054,8 @@ export default function Home() {
                   <AgentAnalysis predictions={agentPredictions} profiles={getDynamicAgentProfiles()} />
                 ) : null}
               </div>
-            </div>
-          </div>
+            </DraggableWindow>
+          )}
         </div>
       )}
     </div>
