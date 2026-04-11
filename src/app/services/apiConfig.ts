@@ -2,6 +2,9 @@ export interface ApiConfig {
   footballDataApiKey: string;
   apiFootballKey: string;
   openLigaDbEnabled: boolean;
+  kaggleUsername: string;
+  kaggleApiKey: string;
+  agentTrainingEnabled: boolean;
 }
 
 export const API_ENDPOINTS = {

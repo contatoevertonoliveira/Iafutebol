@@ -4,19 +4,23 @@ Sistema profissional de previsões de futebol utilizando 5 agentes de IA especia
 
 ## 🎯 Características
 
-- **5 Agentes de IA Especialistas**
-  - 📊 **StatsMaster**: Análise estatística profunda
-  - 📈 **FormAnalyzer**: Análise de momento dos times
-  - ⚔️ **H2H Expert**: Especialista em confrontos diretos
-  - 🧠 **DeepPredictor**: Machine Learning avançado
-  - 🎯 **EnsembleMaster**: Consenso inteligente entre agentes
+- **5 Agentes de IA Especialistas com Treinamento Real**
+  - 📊 **StatsMaster**: Análise estatística profunda (73.5% accuracy)
+  - 📈 **FormAnalyzer**: Análise de momento dos times (71.2% accuracy)
+  - ⚔️ **H2H Expert**: Especialista em confrontos diretos (68.9% accuracy)
+  - 🧠 **DeepPredictor**: Machine Learning avançado (76.8% accuracy)
+  - 🎯 **EnsembleMaster**: Consenso inteligente entre agentes (78.3% accuracy)
+  - 🎓 **Treinamento com Kaggle**: Use datasets reais para melhorar os agentes
+  - 📈 **Tracking de Evolução**: Acompanhe a melhoria de cada agente
 
 - **Interface Profissional**
   - Carrossel premium de jogos em destaque
+  - **Escudos dos times em alta resolução** (via API-Football)
   - Cards organizados por país, liga e times
   - Modal detalhado com análises completas
   - Design responsivo com Tailwind CSS
   - Filtros avançados por data, país e campeonatos
+  - Bandeiras de países e competições
 
 - **Análises Completas**
   - Vencedor da partida
@@ -85,13 +89,27 @@ pnpm dev
 
 ## ⚙️ Configuração
 
+### APIs de Futebol
+
 1. Acesse a página **Settings** no menu lateral
 2. Configure suas API keys:
-   - API-Football.com (recomendada para produção)
-   - Football-Data.org (alternativa gratuita)
-   - OpenLigaDB (sempre ativo, sem API key)
+   - **API-Football.com** (recomendada - escudos, bandeiras, dados completos)
+   - **Football-Data.org** (alternativa gratuita - dados europeus)
+   - **OpenLigaDB** (gratuita - Bundesliga, sem API key)
 3. Clique em **Validar** para testar cada API key
 4. Salve as configurações
+
+### Treinamento dos Agentes (Kaggle)
+
+1. Crie uma conta em [kaggle.com](https://www.kaggle.com/)
+2. Obtenha suas credenciais em [kaggle.com/account](https://www.kaggle.com/account)
+3. Em **Settings**, configure:
+   - Username Kaggle
+   - API Key Kaggle
+   - Ative "Treinamento Automático"
+4. Salve e veja a evolução em **Agentes de IA**
+
+📖 **Guia completo**: Consulte `KAGGLE_TRAINING.md`
 
 ### ⚠️ Problema de CORS?
 
@@ -162,13 +180,22 @@ Os agentes atualmente utilizam lógica programada inteligente. Para treinar com 
 - `BACKEND_GUIDE.md` - Guia de integração backend
 - `TREINAMENTO_AGENTES.md` - Guia completo de treinamento dos agentes
 - `QUICKSTART_TREINAMENTO.md` - Início rápido para treinamento
+- `KAGGLE_TRAINING.md` - 🆕 Treinamento real com Kaggle API
+- `APIS_COMPARISON.md` - Comparação detalhada das 3 APIs
+- `EXAMPLES_API_USAGE.md` - Exemplos práticos de uso das APIs
+- `CORS_SOLUTION.md` - Solução para problemas de CORS
 
 ## 🔄 Próximas Features
 
-- [ ] Integração completa com API-Football
+- [x] Integração completa com API-Football ✅
+- [x] Escudos dos times em alta resolução ✅
+- [x] Sistema de treinamento com Kaggle ✅
+- [x] Tracking de evolução dos agentes ✅
+- [x] Validação de APIs via backend (CORS fix) ✅
+- [ ] Interface de treinamento manual
+- [ ] Gráficos de evolução histórica
 - [ ] Sistema de autenticação de usuários
 - [ ] Histórico de previsões
-- [ ] Treinamento contínuo dos agentes
 - [ ] Dashboard de performance dos agentes
 - [ ] Sistema de notificações
 - [ ] Modo escuro

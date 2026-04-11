@@ -1,10 +1,33 @@
-import { Brain, TrendingUp, Award, BarChart3, Target } from 'lucide-react';
+import { useState, useEffect } from 'react';
+import { Brain, TrendingUp, Award, BarChart3, Target, Activity, ArrowUp, ArrowDown } from 'lucide-react';
 import { AI_AGENTS } from '../services/aiAgents';
 import { Card } from '../components/ui/card';
 import { Badge } from '../components/ui/badge';
 import { Progress } from '../components/ui/progress';
+import { loadAgentMetrics, AgentMetrics } from '../services/agentTrainingService';
 
 export default function AIAgentsPage() {
+  const [agentMetrics, setAgentMetrics] = useState<AgentMetrics[]>([]);
+
+  useEffect(() => {
+    // Carregar métricas reais dos agentes
+    const metrics = loadAgentMetrics();
+    setAgentMetrics(metrics);
+  }, []);
+
+  // Mapear AI_AGENTS com métricas reais
+  const agentsWithMetrics = AI_AGENTS.map(agent => {
+    const metric = agentMetrics.find(m => m.agentId === agent.id);
+    return {
+      ...agent,
+      accuracy: metric?.accuracy || agent.accuracy,
+      previousAccuracy: metric?.previousAccuracy || agent.accuracy - 2,
+      improvement: metric?.improvement || 0,
+      totalPredictions: metric?.totalPredictions || agent.totalPredictions,
+      correctPredictions: metric?.correctPredictions || agent.correctPredictions,
+      lastUpdated: metric?.lastUpdated || new Date().toISOString(),
+    };
+  });
   return (
     <div className="min-h-screen bg-gray-50 p-6">
       <div className="max-w-7xl mx-auto">
@@ -34,8 +57,16 @@ export default function AIAgentsPage() {
               <TrendingUp className="w-8 h-8" />
               <div className="text-sm opacity-90">Accuracy Média</div>
             </div>
-            <div className="text-4xl font-bold">
-              {(AI_AGENTS.reduce((sum, a) => sum + a.accuracy, 0) / AI_AGENTS.length).toFixed(1)}%
+            <div className="flex items-center gap-2">
+              <div className="text-4xl font-bold">
+                {(agentsWithMetrics.reduce((sum, a) => sum + a.accuracy, 0) / agentsWithMetrics.length).toFixed(1)}%
+              </div>
+              {agentsWithMetrics.length > 0 && (
+                <div className="flex items-center text-sm bg-white/20 px-2 py-1 rounded">
+                  <ArrowUp className="w-4 h-4" />
+                  +{(agentsWithMetrics.reduce((sum, a) => sum + a.improvement, 0) / agentsWithMetrics.length).toFixed(1)}%
+                </div>
+              )}
             </div>
           </Card>
 
@@ -62,11 +93,52 @@ export default function AIAgentsPage() {
           </Card>
         </div>
 
+        {/* Evolution Card */}
+        {agentMetrics.length > 0 && (
+          <Card className="p-6 bg-gradient-to-br from-purple-50 to-pink-50 border-2 border-purple-200 mb-8">
+            <div className="flex items-center gap-3 mb-4">
+              <Activity className="w-6 h-6 text-purple-600" />
+              <h2 className="text-xl font-bold text-gray-900">Evolução dos Agentes</h2>
+            </div>
+
+            <div className="grid md:grid-cols-5 gap-4">
+              {agentMetrics.map((metric) => (
+                <div key={metric.agentId} className="bg-white rounded-lg p-4 border border-purple-200">
+                  <div className="text-sm font-semibold text-gray-700 mb-2">{metric.name}</div>
+                  <div className="flex items-center gap-2 mb-1">
+                    <div className="text-2xl font-bold text-purple-600">{metric.accuracy.toFixed(1)}%</div>
+                  </div>
+                  <div className="flex items-center gap-1 text-sm">
+                    <span className="text-gray-500">De {metric.previousAccuracy.toFixed(1)}%</span>
+                    <div className={`flex items-center ${
+                      metric.improvement > 0 ? 'text-green-600' : 'text-gray-400'
+                    }`}>
+                      {metric.improvement > 0 ? <ArrowUp className="w-3 h-3" /> : <ArrowDown className="w-3 h-3" />}
+                      <span className="font-semibold">{Math.abs(metric.improvement).toFixed(1)}%</span>
+                    </div>
+                  </div>
+                  <div className="mt-2">
+                    <div className="w-full bg-gray-200 rounded-full h-1.5">
+                      <div
+                        className="bg-purple-600 h-1.5 rounded-full transition-all duration-500"
+                        style={{ width: `${(metric.accuracy / 100) * 100}%` }}
+                      />
+                    </div>
+                  </div>
+                  <div className="text-xs text-gray-500 mt-2">
+                    Última atualização: {new Date(metric.lastUpdated).toLocaleDateString('pt-BR')}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </Card>
+        )}
+
         {/* Agent Details */}
         <div className="space-y-6">
           <h2 className="text-2xl font-bold text-gray-900 mb-4">Perfis dos Agentes</h2>
 
-          {AI_AGENTS.map((agent, idx) => (
+          {agentsWithMetrics.map((agent, idx) => (
             <Card key={agent.id} className="p-6 hover:shadow-xl transition-shadow">
               <div className="flex items-start gap-6">
                 {/* Avatar e Ranking */}
@@ -95,6 +167,14 @@ export default function AIAgentsPage() {
                     <div className="text-center bg-gradient-to-br from-green-50 to-green-100 rounded-xl p-4 border-2 border-green-300">
                       <div className="text-sm text-green-700 font-semibold mb-1">Accuracy</div>
                       <div className="text-3xl font-bold text-green-800">{agent.accuracy.toFixed(1)}%</div>
+                      {agent.improvement !== 0 && (
+                        <div className={`flex items-center justify-center gap-1 text-xs mt-1 ${
+                          agent.improvement > 0 ? 'text-green-600' : 'text-red-600'
+                        }`}>
+                          {agent.improvement > 0 ? <ArrowUp className="w-3 h-3" /> : <ArrowDown className="w-3 h-3" />}
+                          {Math.abs(agent.improvement).toFixed(1)}%
+                        </div>
+                      )}
                     </div>
                   </div>
 

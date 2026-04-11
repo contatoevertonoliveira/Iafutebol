@@ -2,6 +2,7 @@ import { Match, Prediction } from '../data/mockData';
 import { Calendar, Clock, TrendingUp } from 'lucide-react';
 import { Badge } from './ui/badge';
 import { Card } from './ui/card';
+import { TeamLogo } from './TeamLogo';
 
 interface MatchCardProps {
   match: Match;
@@ -53,14 +54,12 @@ export function MatchCard({ match, prediction, onViewDetails, homeCrest, awayCre
         {/* Times com Escudos */}
         <div className="space-y-3 mb-4">
           <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              {homeCrest && (
-                <div className="w-8 h-8 flex items-center justify-center">
-                  <img src={homeCrest} alt={match.homeTeam} className="w-full h-full object-contain" />
-                </div>
-              )}
-              <span className="font-semibold text-lg">{match.homeTeam}</span>
-            </div>
+            <TeamLogo
+              teamName={match.homeTeam}
+              logoUrl={homeCrest}
+              size="lg"
+              showName={true}
+            />
             {prediction.winner.prediction === 'home' && (
               <Badge className="bg-green-100 text-green-800 border-green-300">
                 Favorito
@@ -68,14 +67,12 @@ export function MatchCard({ match, prediction, onViewDetails, homeCrest, awayCre
             )}
           </div>
           <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              {awayCrest && (
-                <div className="w-8 h-8 flex items-center justify-center">
-                  <img src={awayCrest} alt={match.awayTeam} className="w-full h-full object-contain" />
-                </div>
-              )}
-              <span className="font-semibold text-lg">{match.awayTeam}</span>
-            </div>
+            <TeamLogo
+              teamName={match.awayTeam}
+              logoUrl={awayCrest}
+              size="lg"
+              showName={true}
+            />
             {prediction.winner.prediction === 'away' && (
               <Badge className="bg-green-100 text-green-800 border-green-300">
                 Favorito
