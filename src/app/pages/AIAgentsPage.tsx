@@ -1,33 +1,26 @@
-import { useState, useEffect } from 'react';
 import { Brain, TrendingUp, Award, BarChart3, Target, Activity, ArrowUp, ArrowDown } from 'lucide-react';
-import { getDynamicAgentProfiles } from '../services/aiAgents';
+import { getDynamicAgentProfiles, AI_AGENTS_BASE } from '../services/aiAgents';
 import { Card } from '../components/ui/card';
 import { Badge } from '../components/ui/badge';
-import { Progress } from '../components/ui/progress';
-import { loadAgentMetrics, AgentMetrics } from '../services/agentTrainingService';
 
 export default function AIAgentsPage() {
-  const [agentMetrics, setAgentMetrics] = useState<AgentMetrics[]>([]);
-
-  useEffect(() => {
-    // Carregar métricas reais dos agentes
-    const metrics = loadAgentMetrics();
-    setAgentMetrics(metrics);
-  }, []);
-
-  // Mapear agentes com métricas reais
-  const agentsWithMetrics = getDynamicAgentProfiles().map(agent => {
-    const metric = agentMetrics.find(m => m.agentId === agent.id);
+  // Carrega os agentes dinâmicos calculados pelo sistema
+  const dynamicProfiles = getDynamicAgentProfiles();
+  
+  // Mapeia e calcula a evolução real com base nos valores base (pré-treinados)
+  const agentsWithMetrics = dynamicProfiles.map(dynamicAgent => {
+    const baseAgent = AI_AGENTS_BASE.find(a => a.id === dynamicAgent.id) || dynamicAgent;
+    
+    const improvement = dynamicAgent.accuracy - baseAgent.accuracy;
+    
     return {
-      ...agent,
-      accuracy: metric?.accuracy || agent.accuracy,
-      previousAccuracy: metric?.previousAccuracy || agent.accuracy - 2,
-      improvement: metric?.improvement || 0,
-      totalPredictions: metric?.totalPredictions || agent.totalPredictions,
-      correctPredictions: metric?.correctPredictions || agent.correctPredictions,
-      lastUpdated: metric?.lastUpdated || new Date().toISOString(),
+      ...dynamicAgent,
+      previousAccuracy: baseAgent.accuracy,
+      improvement: improvement,
+      lastUpdated: new Date().toISOString(),
     };
   });
+
   return (
     <div className="min-h-screen bg-gray-50 p-6">
       <div className="max-w-7xl mx-auto">
@@ -49,7 +42,7 @@ export default function AIAgentsPage() {
               <Brain className="w-8 h-8" />
               <div className="text-sm opacity-90">Agentes Ativos</div>
             </div>
-            <div className="text-4xl font-bold">{getDynamicAgentProfiles().length}</div>
+            <div className="text-4xl font-bold">{agentsWithMetrics.length}</div>
           </Card>
 
           <Card className="p-6 bg-gradient-to-br from-green-500 to-green-600 text-white">
@@ -76,7 +69,7 @@ export default function AIAgentsPage() {
               <div className="text-sm opacity-90">Total Previsões</div>
             </div>
             <div className="text-4xl font-bold">
-              {getDynamicAgentProfiles().reduce((sum, a) => sum + a.totalPredictions, 0).toLocaleString()}
+              {agentsWithMetrics.reduce((sum, a) => sum + a.totalPredictions, 0).toLocaleString()}
             </div>
           </Card>
 
@@ -86,7 +79,7 @@ export default function AIAgentsPage() {
               <div className="text-sm opacity-90">Melhor Agente</div>
             </div>
             <div className="text-2xl font-bold">
-              {getDynamicAgentProfiles().reduce((best, agent) => 
+              {agentsWithMetrics.reduce((best, agent) => 
                 agent.accuracy > best.accuracy ? agent : best
               ).name}
             </div>
@@ -94,7 +87,7 @@ export default function AIAgentsPage() {
         </div>
 
         {/* Evolution Card */}
-        {agentMetrics.length > 0 && (
+        {agentsWithMetrics.length > 0 && (
           <Card className="p-6 bg-gradient-to-br from-purple-50 to-pink-50 border-2 border-purple-200 mb-8">
             <div className="flex items-center gap-3 mb-4">
               <Activity className="w-6 h-6 text-purple-600" />
@@ -102,8 +95,8 @@ export default function AIAgentsPage() {
             </div>
 
             <div className="grid md:grid-cols-5 gap-4">
-              {agentMetrics.map((metric) => (
-                <div key={metric.agentId} className="bg-white rounded-lg p-4 border border-purple-200">
+              {agentsWithMetrics.map((metric) => (
+                <div key={metric.id} className="bg-white rounded-lg p-4 border border-purple-200">
                   <div className="text-sm font-semibold text-gray-700 mb-2">{metric.name}</div>
                   <div className="flex items-center gap-2 mb-1">
                     <div className="text-2xl font-bold text-purple-600">{metric.accuracy.toFixed(1)}%</div>
