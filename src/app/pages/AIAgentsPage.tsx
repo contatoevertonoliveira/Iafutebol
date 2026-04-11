@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Brain, TrendingUp, Award, BarChart3, Target, Activity, ArrowUp, ArrowDown } from 'lucide-react';
-import { AI_AGENTS } from '../services/aiAgents';
+import { getDynamicAgentProfiles } from '../services/aiAgents';
 import { Card } from '../components/ui/card';
 import { Badge } from '../components/ui/badge';
 import { Progress } from '../components/ui/progress';
@@ -15,8 +15,8 @@ export default function AIAgentsPage() {
     setAgentMetrics(metrics);
   }, []);
 
-  // Mapear AI_AGENTS com métricas reais
-  const agentsWithMetrics = AI_AGENTS.map(agent => {
+  // Mapear agentes com métricas reais
+  const agentsWithMetrics = getDynamicAgentProfiles().map(agent => {
     const metric = agentMetrics.find(m => m.agentId === agent.id);
     return {
       ...agent,
@@ -49,7 +49,7 @@ export default function AIAgentsPage() {
               <Brain className="w-8 h-8" />
               <div className="text-sm opacity-90">Agentes Ativos</div>
             </div>
-            <div className="text-4xl font-bold">{AI_AGENTS.length}</div>
+            <div className="text-4xl font-bold">{getDynamicAgentProfiles().length}</div>
           </Card>
 
           <Card className="p-6 bg-gradient-to-br from-green-500 to-green-600 text-white">
@@ -76,7 +76,7 @@ export default function AIAgentsPage() {
               <div className="text-sm opacity-90">Total Previsões</div>
             </div>
             <div className="text-4xl font-bold">
-              {AI_AGENTS.reduce((sum, a) => sum + a.totalPredictions, 0).toLocaleString()}
+              {getDynamicAgentProfiles().reduce((sum, a) => sum + a.totalPredictions, 0).toLocaleString()}
             </div>
           </Card>
 
@@ -86,7 +86,7 @@ export default function AIAgentsPage() {
               <div className="text-sm opacity-90">Melhor Agente</div>
             </div>
             <div className="text-2xl font-bold">
-              {AI_AGENTS.reduce((best, agent) => 
+              {getDynamicAgentProfiles().reduce((best, agent) => 
                 agent.accuracy > best.accuracy ? agent : best
               ).name}
             </div>

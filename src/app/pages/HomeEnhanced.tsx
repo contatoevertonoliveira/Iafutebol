@@ -7,7 +7,7 @@ import { PremiumCarousel } from '../components/PremiumCarousel';
 import { AgentAnalysis } from '../components/AgentAnalysis';
 import { ApiStatus } from '../components/ApiStatus';
 import { TrendingUp, Brain, Loader2, RefreshCw } from 'lucide-react';
-import { AI_AGENTS, AgentEnsemble, AgentPrediction } from '../services/aiAgents';
+import { getDynamicAgentProfiles, AgentEnsemble, AgentPrediction, learnFromMatchResult } from '../services/aiAgents';
 import { loadApiConfig } from '../services/apiConfig';
 import { FootballDataService, FootballMatch } from '../services/footballDataService';
 import { ApiFootballService, ApiFootballMatch } from '../services/apiFootballService';
@@ -21,6 +21,10 @@ type ApiSource = 'api-football' | 'football-data' | 'openligadb' | 'mock';
 type DisplayMatch = Match & {
   homeCrest?: string;
   awayCrest?: string;
+  result?: {
+    home: number | null;
+    away: number | null;
+  };
 };
 
 export default function Home() {
@@ -37,6 +41,51 @@ export default function Home() {
   const [realPredictions, setRealPredictions] = useState<Record<string, Prediction>>({});
   const [lastUpdatedAt, setLastUpdatedAt] = useState<Date | null>(null);
 
+  useEffect(() => {
+    if (apiSource === 'mock' || realMatches.length === 0) return;
+
+    const evaluatedKey = 'evaluated_matches_v1';
+    let evaluated: string[] = [];
+    try {
+      evaluated = JSON.parse(localStorage.getItem(evaluatedKey) || '[]');
+    } catch {}
+
+    let hasNewEvaluations = false;
+    const dynamicAgents = getDynamicAgentProfiles();
+    const ensemble = new AgentEnsemble(dynamicAgents);
+
+    const evaluateMatchesAsync = async () => {
+      for (const m of realMatches) {
+        if (toMatchStatus(m.status) !== 'finished') continue;
+        const id = m.id.toString();
+        if (evaluated.includes(id)) continue;
+        
+        const homeScore = m.score?.fullTime?.home;
+        const awayScore = m.score?.fullTime?.away;
+        if (typeof homeScore !== 'number' || typeof awayScore !== 'number') continue;
+
+        const realWinner = homeScore > awayScore ? 'home' : (homeScore < awayScore ? 'away' : 'draw');
+        
+        // Obter as previsões individuais que foram geradas para essa partida
+        const predictions = await ensemble.predictWithAllAgents(m);
+        
+        // Ensinar aos agentes o resultado real
+        learnFromMatchResult(predictions, realWinner);
+
+        evaluated.push(id);
+        hasNewEvaluations = true;
+      }
+
+      if (hasNewEvaluations) {
+        localStorage.setItem(evaluatedKey, JSON.stringify(evaluated));
+        // Dispara evento para forçar a UI a reler a accuracy se necessário
+        window.dispatchEvent(new Event('agentMetricsUpdated'));
+      }
+    };
+
+    evaluateMatchesAsync();
+  }, [realMatches, apiSource]);
+
   const toMatchStatus = (status: string): MatchStatus => {
     const normalized = String(status || '').toUpperCase();
     if (['FINISHED', 'FT', 'AET', 'PEN'].includes(normalized)) return 'finished';
@@ -52,6 +101,70 @@ export default function Home() {
     const dateTo = nextWeek.toISOString().split('T')[0];
     return { dateFrom, dateTo };
   };
+
+  const cacheKey = 'matchesCache_v1';
+  const cacheMaxAgeMs = 1000 * 60 * 30;
+
+  const readCache = (dateFrom: string, dateTo: string) => {
+    try {
+      const raw = localStorage.getItem(cacheKey);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw) as {
+        version: number;
+        generatedAt: string;
+        dateFrom: string;
+        dateTo: string;
+        apiSource: ApiSource;
+        matches: FootballMatch[];
+        predictions: Record<string, Prediction>;
+      };
+
+      if (parsed.version !== 1) return null;
+      if (parsed.dateFrom !== dateFrom || parsed.dateTo !== dateTo) return null;
+
+      const age = Date.now() - new Date(parsed.generatedAt).getTime();
+      return { ...parsed, isFresh: age >= 0 && age < cacheMaxAgeMs };
+    } catch {
+      return null;
+    }
+  };
+
+  const writeCache = (payload: {
+    dateFrom: string;
+    dateTo: string;
+    apiSource: ApiSource;
+    matches: FootballMatch[];
+    predictions: Record<string, Prediction>;
+  }) => {
+    try {
+      localStorage.setItem(
+        cacheKey,
+        JSON.stringify({
+          version: 1,
+          generatedAt: new Date().toISOString(),
+          ...payload,
+        }),
+      );
+    } catch {
+      return;
+    }
+  };
+
+  useEffect(() => {
+    const config = loadApiConfig();
+    const { dateFrom, dateTo } = getDateRange();
+    const cached = readCache(dateFrom, dateTo);
+
+    if (cached) {
+      setApiSource(cached.apiSource);
+      setRealMatches(cached.matches);
+      setRealPredictions(cached.predictions);
+      setLastUpdatedAt(new Date(cached.generatedAt));
+      if (cached.isFresh) return;
+    }
+
+    loadMatchesWithFallback(config);
+  }, []);
 
   const convertApiFootballMatchToFootballMatch = (m: ApiFootballMatch): FootballMatch => {
     const status = m.fixture?.status?.short || 'NS';
@@ -193,15 +306,50 @@ export default function Home() {
     };
   };
 
-  const generatePredictionsForMatches = async (matches: FootballMatch[]) => {
-    const ensemble = new AgentEnsemble(AI_AGENTS);
-    const entries = await Promise.all(
-      matches.map(async (m) => {
-        const consensus = await ensemble.getConsensusPrediction(m);
-        return [m.id.toString(), consensusToPrediction(m.id.toString(), consensus)] as const;
+  const generatePredictionsForMatches = async (source: ApiSource, matches: FootballMatch[]) => {
+    const storeKey = 'predictionStore_v1';
+    const store = (() => {
+      try {
+        const raw = localStorage.getItem(storeKey);
+        if (!raw) return { version: 1 as const, items: {} as Record<string, { createdAt: string; prediction: Prediction }> };
+        const parsed = JSON.parse(raw) as {
+          version: number;
+          items: Record<string, { createdAt: string; prediction: Prediction }>;
+        };
+        if (parsed.version !== 1 || !parsed.items) {
+          return { version: 1 as const, items: {} as Record<string, { createdAt: string; prediction: Prediction }> };
+        }
+        return { version: 1 as const, items: parsed.items };
+      } catch {
+        return { version: 1 as const, items: {} as Record<string, { createdAt: string; prediction: Prediction }> };
+      }
+    })();
+
+    const dynamicAgents = getDynamicAgentProfiles();
+    const ensemble = new AgentEnsemble(dynamicAgents);
+
+    for (const m of matches) {
+      const id = m.id.toString();
+      const key = `${source}:${id}`;
+      if (store.items[key]?.prediction) continue;
+      const consensus = await ensemble.getConsensusPrediction(m);
+      store.items[key] = {
+        createdAt: new Date().toISOString(),
+        prediction: consensusToPrediction(id, consensus),
+      };
+    }
+
+    try {
+      localStorage.setItem(storeKey, JSON.stringify(store));
+    } catch {}
+
+    return Object.fromEntries(
+      matches.map((m) => {
+        const id = m.id.toString();
+        const key = `${source}:${id}`;
+        return [id, store.items[key]!.prediction] as const;
       }),
     );
-    return Object.fromEntries(entries);
   };
 
   const processCrests = (matches: FootballMatch[]) => {
@@ -254,9 +402,16 @@ export default function Home() {
             const processedMatches = processCrests(matches);
             setApiSource('api-football');
             setRealMatches(processedMatches);
-            const predictionsById = await generatePredictionsForMatches(processedMatches);
+            const predictionsById = await generatePredictionsForMatches('api-football', processedMatches);
             setRealPredictions(predictionsById);
             setLastUpdatedAt(new Date());
+            writeCache({
+              dateFrom,
+              dateTo,
+              apiSource: 'api-football',
+              matches: processedMatches,
+              predictions: predictionsById,
+            });
             toast.success(`${matches.length} partidas carregadas (API-Football)`);
             return;
           }
@@ -274,9 +429,16 @@ export default function Home() {
             const processedMatches = processCrests(matches);
             setApiSource('football-data');
             setRealMatches(processedMatches);
-            const predictionsById = await generatePredictionsForMatches(processedMatches);
+            const predictionsById = await generatePredictionsForMatches('football-data', processedMatches);
             setRealPredictions(predictionsById);
             setLastUpdatedAt(new Date());
+            writeCache({
+              dateFrom,
+              dateTo,
+              apiSource: 'football-data',
+              matches: processedMatches,
+              predictions: predictionsById,
+            });
             toast.success(`${matches.length} partidas carregadas (Football-Data)`);
             return;
           }
@@ -295,9 +457,16 @@ export default function Home() {
             const processedMatches = processCrests(matches);
             setApiSource('openligadb');
             setRealMatches(processedMatches);
-            const predictionsById = await generatePredictionsForMatches(processedMatches);
+            const predictionsById = await generatePredictionsForMatches('openligadb', processedMatches);
             setRealPredictions(predictionsById);
             setLastUpdatedAt(new Date());
+            writeCache({
+              dateFrom,
+              dateTo,
+              apiSource: 'openligadb',
+              matches: processedMatches,
+              predictions: predictionsById,
+            });
             toast.success(`${matches.length} partidas carregadas (OpenLigaDB)`);
             return;
           }
@@ -310,6 +479,13 @@ export default function Home() {
         setApiSource(successfulSource);
         setRealMatches([]);
         setLastUpdatedAt(new Date());
+        writeCache({
+          dateFrom,
+          dateTo,
+          apiSource: successfulSource,
+          matches: [],
+          predictions: {},
+        });
         toast.info('Nenhuma partida encontrada para o período selecionado');
         return;
       }
@@ -394,6 +570,7 @@ export default function Home() {
     const matchesToUse: DisplayMatch[] = apiSource !== 'mock' ?
       realMatches.map((footballMatch) => {
         const matchDate = new Date(footballMatch.utcDate);
+        const fullTime = footballMatch.score?.fullTime;
         return {
           id: footballMatch.id.toString(),
           homeTeam: footballMatch.homeTeam.name,
@@ -408,6 +585,10 @@ export default function Home() {
             minute: '2-digit' 
           }),
           status: toMatchStatus(footballMatch.status),
+          result: {
+            home: typeof fullTime?.home === 'number' ? fullTime.home : null,
+            away: typeof fullTime?.away === 'number' ? fullTime.away : null,
+          },
         };
       }) : 
       mockMatches.map((m) => ({ ...m, homeCrest: '', awayCrest: '' }));
@@ -515,6 +696,29 @@ export default function Home() {
     return Object.fromEntries(mockPredictions.map((p) => [p.matchId, p]));
   }, [apiSource, realPredictions]);
 
+  const winnerPerformance = useMemo(() => {
+    const finished = filteredMatches.filter(
+      (m) =>
+        m.status === 'finished' &&
+        typeof m.result?.home === 'number' &&
+        typeof m.result?.away === 'number' &&
+        Boolean(predictionByMatchId[m.id]),
+    );
+
+    const total = finished.length;
+    const hits = finished.filter((m) => {
+      const pred = predictionByMatchId[m.id];
+      if (!pred) return false;
+      const home = m.result!.home!;
+      const away = m.result!.away!;
+      const actualWinner = home > away ? 'home' : home < away ? 'away' : 'draw';
+      return pred.winner.prediction === actualWinner;
+    }).length;
+
+    const percent = total === 0 ? 0 : Math.round((hits / total) * 100);
+    return { hits, total, percent };
+  }, [filteredMatches, predictionByMatchId]);
+
   const selectedMatch = selectedMatchId ? filteredMatches.find((m) => m.id === selectedMatchId) ?? null : null;
   const selectedPrediction = selectedMatchId ? predictionByMatchId[selectedMatchId] ?? null : null;
 
@@ -527,7 +731,8 @@ export default function Home() {
     setTimeout(async () => {
       const realMatch = realMatches.find((m) => m.id.toString() === matchId);
       if (realMatch) {
-        const ensemble = new AgentEnsemble(AI_AGENTS);
+        const dynamicAgents = getDynamicAgentProfiles();
+        const ensemble = new AgentEnsemble(dynamicAgents);
         const predictions = await ensemble.predictWithAllAgents(realMatch);
         setAgentPredictions(predictions);
         setIsLoadingAgents(false);
@@ -575,7 +780,8 @@ export default function Home() {
         },
       };
 
-      const ensemble = new AgentEnsemble(AI_AGENTS);
+      const dynamicAgents = getDynamicAgentProfiles();
+      const ensemble = new AgentEnsemble(dynamicAgents);
       const predictions = await ensemble.predictWithAllAgents(footballMatch);
       setAgentPredictions(predictions);
       setIsLoadingAgents(false);
@@ -650,7 +856,7 @@ export default function Home() {
         )}
 
         {/* Estatísticas */}
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
+        <div className="grid grid-cols-1 md:grid-cols-5 gap-4 mb-8">
           <div className="bg-white p-4 rounded-lg shadow border border-gray-200">
             <div className="text-sm text-gray-600 mb-1">Total de Partidas</div>
             <div className="text-2xl font-bold text-blue-600">{filteredMatches.length}</div>
@@ -664,6 +870,15 @@ export default function Home() {
             </div>
           </div>
           <div className="bg-white p-4 rounded-lg shadow border border-gray-200">
+            <div className="text-sm text-gray-600 mb-1">Acertos (Vencedor)</div>
+            <div className="text-2xl font-bold text-gray-900">
+              {winnerPerformance.total === 0 ? '-' : `${winnerPerformance.hits}/${winnerPerformance.total}`}
+            </div>
+            <div className="text-sm text-gray-500">
+              {winnerPerformance.total === 0 ? 'Sem jogos finalizados' : `${winnerPerformance.percent}%`}
+            </div>
+          </div>
+          <div className="bg-white p-4 rounded-lg shadow border border-gray-200">
             <div className="text-sm text-gray-600 mb-1">Países</div>
             <div className="text-2xl font-bold text-purple-600">
               {new Set(filteredMatches.map(m => m.country)).size}
@@ -671,7 +886,7 @@ export default function Home() {
           </div>
           <div className="bg-white p-4 rounded-lg shadow border border-gray-200">
             <div className="text-sm text-gray-600 mb-1">Agentes IA Ativos</div>
-            <div className="text-2xl font-bold text-orange-600">{AI_AGENTS.length}</div>
+            <div className="text-2xl font-bold text-orange-600">{getDynamicAgentProfiles().length}</div>
           </div>
         </div>
 
@@ -743,7 +958,7 @@ export default function Home() {
                     <span className="ml-3 text-gray-600">Consultando agentes de IA...</span>
                   </div>
                 ) : agentPredictions.length > 0 ? (
-                  <AgentAnalysis predictions={agentPredictions} profiles={AI_AGENTS} />
+                  <AgentAnalysis predictions={agentPredictions} profiles={getDynamicAgentProfiles()} />
                 ) : null}
               </div>
             </div>
