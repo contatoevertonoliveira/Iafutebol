@@ -179,4 +179,69 @@ app.post("/make-server-1119702f/proxy/football-data", async (c) => {
   }
 });
 
+// Proxy API-Football.com requests (evita CORS e protege a key no browser)
+app.post("/make-server-1119702f/proxy/api-football", async (c) => {
+  try {
+    const { url, apiKey } = await c.req.json();
+
+    if (!apiKey) {
+      return c.json({ error: "API key não fornecida" }, 400);
+    }
+
+    if (!url || typeof url !== "string") {
+      return c.json({ error: "URL não fornecida" }, 400);
+    }
+
+    const allowedPrefix = "https://v3.football.api-sports.io/";
+    if (!url.startsWith(allowedPrefix)) {
+      return c.json({ error: "URL não permitida" }, 400);
+    }
+
+    const response = await fetch(url, {
+      method: "GET",
+      headers: {
+        "x-apisports-key": apiKey,
+      },
+    });
+
+    const contentType = response.headers.get("content-type") || "";
+    const isJson = contentType.includes("application/json");
+
+    if (isJson) {
+      const data = await response.json();
+      if (!response.ok) {
+        return c.json(
+          {
+            error: `API retornou status ${response.status}`,
+            details: data,
+          },
+          response.status,
+        );
+      }
+      return c.json(data);
+    }
+
+    const text = await response.text();
+    if (!response.ok) {
+      return c.json(
+        {
+          error: `API retornou status ${response.status}`,
+          details: text,
+        },
+        response.status,
+      );
+    }
+
+    return c.body(text, 200, {
+      "Content-Type": contentType || "text/plain; charset=utf-8",
+    });
+  } catch (error) {
+    console.error("❌ Erro no proxy API-Football:", error);
+    return c.json(
+      { error: error.message || "Erro ao fazer proxy para API-Football" },
+      500,
+    );
+  }
+});
+
 Deno.serve(app.fetch);

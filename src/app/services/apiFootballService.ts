@@ -90,6 +90,34 @@ export class ApiFootballService {
     this.apiKey = apiKey;
   }
 
+  private async fetchViaServerProxy<T>(url: string): Promise<T> {
+    const { projectId, publicAnonKey } = await import('/utils/supabase/info');
+
+    const response = await fetch(
+      `https://${projectId}.supabase.co/functions/v1/make-server-1119702f/proxy/api-football`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${publicAnonKey}`,
+        },
+        body: JSON.stringify({
+          url,
+          apiKey: this.apiKey,
+        }),
+      },
+    );
+
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => '');
+      throw new Error(
+        `Proxy error: ${response.status} ${response.statusText}${errorText ? ` - ${errorText}` : ''}`,
+      );
+    }
+
+    return response.json();
+  }
+
   private async fetch<T>(endpoint: string, params?: Record<string, string>): Promise<T> {
     const url = new URL(`${API_ENDPOINTS.apiFootball}${endpoint}`);
 
@@ -97,6 +125,18 @@ export class ApiFootballService {
       Object.entries(params).forEach(([key, value]) => {
         url.searchParams.append(key, value);
       });
+    }
+
+    try {
+      const data = await this.fetchViaServerProxy<ApiFootballResponse<T>>(url.toString());
+
+      if (data.errors && data.errors.length > 0) {
+        throw new Error(`API Error: ${JSON.stringify(data.errors)}`);
+      }
+
+      return data.response;
+    } catch (proxyError) {
+      console.warn('⚠️ Proxy via servidor falhou, tentando requisição direta...', proxyError);
     }
 
     const response = await fetch(url.toString(), {
