@@ -6,21 +6,25 @@ import { Label } from '../components/ui/label';
 import { Switch } from '../components/ui/switch';
 import { Button } from '../components/ui/button';
 import { Badge } from '../components/ui/badge';
-import { 
-  saveApiConfig, 
-  loadApiConfig, 
+import {
+  saveApiConfig,
+  loadApiConfig,
   validateFootballDataApiKey,
-  ApiConfig 
+  validateApiFootballKey,
+  ApiConfig
 } from '../services/apiConfig';
 import { toast } from 'sonner';
 
 export default function Settings() {
   const [config, setConfig] = useState<ApiConfig>({
     footballDataApiKey: '',
+    apiFootballKey: '',
     openLigaDbEnabled: true,
   });
   const [isValidating, setIsValidating] = useState(false);
   const [validationStatus, setValidationStatus] = useState<'idle' | 'valid' | 'invalid'>('idle');
+  const [isValidatingApiFootball, setIsValidatingApiFootball] = useState(false);
+  const [validationStatusApiFootball, setValidationStatusApiFootball] = useState<'idle' | 'valid' | 'invalid'>('idle');
   const [isSaving, setIsSaving] = useState(false);
 
   useEffect(() => {
@@ -29,6 +33,9 @@ export default function Settings() {
       setConfig(loaded);
       if (loaded.footballDataApiKey) {
         setValidationStatus('valid');
+      }
+      if (loaded.apiFootballKey) {
+        setValidationStatusApiFootball('valid');
       }
     }
   }, []);
@@ -43,19 +50,61 @@ export default function Settings() {
     setValidationStatus('idle');
 
     try {
+      console.log('🔄 Iniciando validação da Football-Data API...');
       const isValid = await validateFootballDataApiKey(config.footballDataApiKey);
       setValidationStatus(isValid ? 'valid' : 'invalid');
-      
+
       if (isValid) {
-        toast.success('API key validada com sucesso!');
+        toast.success('✅ API key validada com sucesso!', {
+          description: 'Verifique o console (F12) para mais detalhes'
+        });
       } else {
-        toast.error('API key inválida. Verifique e tente novamente.');
+        toast.error('❌ API key inválida', {
+          description: 'Verifique o console (F12) para mais informações'
+        });
       }
     } catch (error) {
       setValidationStatus('invalid');
-      toast.error('Erro ao validar API key');
+      console.error('Erro completo:', error);
+      toast.error('Erro ao validar API key', {
+        description: 'Verifique o console (F12) para detalhes'
+      });
     } finally {
       setIsValidating(false);
+    }
+  };
+
+  const handleValidateApiFootballKey = async () => {
+    if (!config.apiFootballKey.trim()) {
+      toast.error('Por favor, insira uma API key');
+      return;
+    }
+
+    setIsValidatingApiFootball(true);
+    setValidationStatusApiFootball('idle');
+
+    try {
+      console.log('🔄 Iniciando validação da API-Football...');
+      const isValid = await validateApiFootballKey(config.apiFootballKey);
+      setValidationStatusApiFootball(isValid ? 'valid' : 'invalid');
+
+      if (isValid) {
+        toast.success('✅ API-Football key validada com sucesso!', {
+          description: 'Verifique o console (F12) para mais detalhes'
+        });
+      } else {
+        toast.error('❌ API key inválida', {
+          description: 'Verifique o console (F12) para mais informações'
+        });
+      }
+    } catch (error) {
+      setValidationStatusApiFootball('invalid');
+      console.error('Erro completo:', error);
+      toast.error('Erro ao validar API key', {
+        description: 'Verifique o console (F12) para detalhes'
+      });
+    } finally {
+      setIsValidatingApiFootball(false);
     }
   };
 
@@ -159,12 +208,123 @@ export default function Settings() {
                 </ol>
               </div>
 
+              <div className="bg-purple-50 border border-purple-200 rounded-lg p-4">
+                <h4 className="font-semibold text-sm text-purple-900 mb-2 flex items-center gap-2">
+                  🔧 Validação via servidor (solução CORS)
+                </h4>
+                <p className="text-sm text-purple-800 mb-2">
+                  A validação agora é feita pelo servidor Supabase para contornar restrições CORS.
+                </p>
+                <ul className="text-sm text-purple-700 space-y-1">
+                  <li>• Abra o console do navegador (F12) para ver logs detalhados</li>
+                  <li>• Se funcionar via curl mas falhar aqui, verifique o servidor</li>
+                  <li>• Consulte CORS_SOLUTION.md para mais informações</li>
+                </ul>
+              </div>
+
               <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
                 <h4 className="font-semibold text-sm text-gray-900 mb-2">Limites do plano gratuito:</h4>
                 <ul className="text-sm text-gray-700 space-y-1">
                   <li>• 10 requisições por minuto</li>
                   <li>• Dados de competições selecionadas</li>
                   <li>• Ideal para desenvolvimento e testes</li>
+                </ul>
+              </div>
+            </div>
+          </Card>
+
+          {/* API-Football.com API */}
+          <Card className="p-6">
+            <div className="mb-6">
+              <div className="flex items-center justify-between mb-2">
+                <h2 className="text-xl font-bold flex items-center gap-2">
+                  <Key className="w-5 h-5 text-orange-600" />
+                  API-Football.com
+                </h2>
+                {validationStatusApiFootball !== 'idle' && (
+                  <Badge className={
+                    validationStatusApiFootball === 'valid'
+                      ? 'bg-green-100 text-green-800 border-green-300'
+                      : 'bg-red-100 text-red-800 border-red-300'
+                  }>
+                    {validationStatusApiFootball === 'valid' ? (
+                      <>
+                        <CheckCircle className="w-3 h-3 mr-1" />
+                        Válida
+                      </>
+                    ) : (
+                      <>
+                        <XCircle className="w-3 h-3 mr-1" />
+                        Inválida
+                      </>
+                    )}
+                  </Badge>
+                )}
+              </div>
+              <p className="text-sm text-gray-600">
+                API premium com dados completos, escudos, bandeiras e estatísticas avançadas
+              </p>
+            </div>
+
+            <div className="space-y-4">
+              <div>
+                <Label htmlFor="apiFootballKey">API Key</Label>
+                <div className="flex gap-2 mt-2">
+                  <Input
+                    id="apiFootballKey"
+                    type="password"
+                    placeholder="Insira sua API key do api-football.com"
+                    value={config.apiFootballKey}
+                    onChange={(e) => {
+                      setConfig({ ...config, apiFootballKey: e.target.value });
+                      setValidationStatusApiFootball('idle');
+                    }}
+                    className="flex-1"
+                  />
+                  <Button
+                    onClick={handleValidateApiFootballKey}
+                    disabled={isValidatingApiFootball || !config.apiFootballKey.trim()}
+                  >
+                    {isValidatingApiFootball ? (
+                      <>
+                        <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                        Validando...
+                      </>
+                    ) : (
+                      'Validar'
+                    )}
+                  </Button>
+                </div>
+              </div>
+
+              <div className="bg-orange-50 border border-orange-200 rounded-lg p-4">
+                <h4 className="font-semibold text-sm text-orange-900 mb-2">Como obter sua API key:</h4>
+                <ol className="text-sm text-orange-800 space-y-1 list-decimal list-inside">
+                  <li>Acesse <a href="https://www.api-football.com/register" target="_blank" rel="noopener noreferrer" className="underline font-semibold">api-football.com/register</a></li>
+                  <li>Escolha um plano (gratuito ou pago)</li>
+                  <li>Copie sua API key do dashboard</li>
+                  <li>Cole aqui e clique em "Validar"</li>
+                </ol>
+              </div>
+
+              <div className="bg-gradient-to-r from-orange-50 to-yellow-50 border border-orange-200 rounded-lg p-4">
+                <h4 className="font-semibold text-sm text-orange-900 mb-2">Recursos exclusivos da API-Football:</h4>
+                <ul className="text-sm text-orange-800 space-y-1">
+                  <li>⚽ Escudos de times em alta resolução</li>
+                  <li>🏴 Bandeiras de países e competições</li>
+                  <li>📊 Estatísticas avançadas e previsões</li>
+                  <li>🔄 Dados em tempo real</li>
+                  <li>🌍 Mais de 1000 ligas cobertas</li>
+                  <li>📈 Histórico completo de partidas (H2H)</li>
+                </ul>
+              </div>
+
+              <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
+                <h4 className="font-semibold text-sm text-gray-900 mb-2">Plano gratuito:</h4>
+                <ul className="text-sm text-gray-700 space-y-1">
+                  <li>• 100 requisições por dia</li>
+                  <li>• Acesso a todas as ligas principais</li>
+                  <li>• Ideal para desenvolvimento e protótipos</li>
                 </ul>
               </div>
             </div>
