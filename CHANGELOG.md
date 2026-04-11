@@ -1,132 +1,167 @@
-# 📝 Changelog
+# Changelog - Atualizações do Sistema Iafutebol
 
-Todas as mudanças notáveis neste projeto serão documentadas neste arquivo.
+## Data: 11 de abril de 2026
+
+## 🚀 **ATUALIZAÇÕES IMPLEMENTADAS**
+
+### **1. ✅ SISTEMA DE TREINAMENTO OTIMIZADO**
+
+#### **Funcionalidades Principais:**
+- **Worker em Background** - Treinamento não bloqueia a UI
+- **Checkpoints Automáticos** - Salva progresso a cada N épocas
+- **Early Stopping Inteligente** - Para se accuracy não melhorar
+- **Datasets Incrementais** - Baixa apenas dados novos
+- **Sistema de Notificações** - Toast, email, Slack configuráveis
+
+#### **Arquivos Adicionados:**
+- `src/app/services/optimizedTrainingService.ts` - Sistema completo de treinamento
+- `src/app/components/TrainingControlPanel.tsx` - Painel de controle
+- `src/app/pages/TrainingDashboard.tsx` - Dashboard completo
+- `src/app/services/corsProxy.ts` - Proxy para APIs externas
+- `src/app/services/footballDataServiceWithCors.ts` - Serviço com CORS resolvido
+
+### **2. ✅ CORREÇÕES CORS E CONFIGURAÇÃO**
+
+#### **Problemas Resolvidos:**
+- **CORS do Football-Data.org** - Proxy configurado no Vite
+- **WebSocket do Vite (HMR)** - Configuração corrigida
+- **Escudos dos Times** - Agora aparecem corretamente
+
+#### **Arquivos Modificados:**
+- `vite.config.ts` - Proxy CORS e configuração HMR
+- `src/app/services/footballDataService.ts` - Fallback para dados mock
+- `src/app/pages/HomeEnhanced.tsx` - Integração com dados reais
+- `src/app/components/Sidebar.tsx` - Link para dashboard de treinamento
+- `src/app/routes.tsx` - Rota `/training` adicionada
+
+### **3. ✅ ARQUIVOS DE TESTE E CONFIGURAÇÃO**
+
+#### **Arquivos Adicionados:**
+- `.env` - Variáveis de ambiente
+- `.gitignore` - Exclusão de node_modules, etc.
+- `test-api.js` - Teste de APIs
+- `test-auth-endpoints.js` - Teste de autenticação
+- `test-cors-proxy.js` - Teste de proxy CORS
+- `test-validation-fixed.js` - Teste de validação
+
+## 📁 **ESTRUTURA DE ARQUIVOS ATUALIZADA**
+
+```
+Iafutebol/
+├── src/app/
+│   ├── components/
+│   │   ├── TrainingControlPanel.tsx    # NOVO
+│   │   └── Sidebar.tsx                 # ATUALIZADO
+│   ├── pages/
+│   │   ├── TrainingDashboard.tsx       # NOVO
+│   │   └── HomeEnhanced.tsx            # ATUALIZADO
+│   ├── services/
+│   │   ├── optimizedTrainingService.ts # NOVO
+│   │   ├── corsProxy.ts               # NOVO
+│   │   ├── footballDataServiceWithCors.ts # NOVO
+│   │   └── footballDataService.ts     # ATUALIZADO
+│   └── routes.tsx                     # ATUALIZADO
+├── vite.config.ts                     # ATUALIZADO
+├── .env                              # NOVO
+├── .gitignore                        # NOVO
+└── test-*.js                         # NOVOS
+```
+
+## 🎯 **COMO USAR AS NOVAS FUNCIONALIDADES**
+
+### **1. Dashboard de Treinamento**
+- Acesse: `http://localhost:3007/training`
+- Ou clique em "Treinamento" no menu lateral
+
+### **2. Funcionalidades Disponíveis:**
+- **Iniciar treinamento** - StatsMaster, DeepPredictor, etc.
+- **Pausar/Retomar** - Controle total do processo
+- **Monitorar progresso** - Accuracy, épocas, tempo
+- **Configurar notificações** - Toast, email, Slack
+- **Gerenciar datasets** - Download incremental
+
+### **3. Correções CORS**
+- **API Football-Data.org** - Agora funciona via proxy
+- **Escudos dos times** - Aparecem corretamente
+- **Fallback automático** - Dados mock se API falhar
+
+## 🔧 **COMANDOS PARA COMMIT E PUSH**
+
+### **Commit já realizado localmente:**
+```bash
+git commit -m "feat: sistema de treinamento otimizado e correções CORS
+
+- Adicionado sistema completo de treinamento otimizado com worker em background
+- Implementado dashboard de treinamento (/training) com controle granular
+- Sistema de checkpoints automáticos e early stopping inteligente
+- Datasets incrementais com download inteligente
+- Sistema de notificações multi-canal (toast, email, Slack)
+- Correções CORS para football-data.org via proxy Vite
+- Atualizado Sidebar com link para dashboard de treinamento
+- Melhor tratamento de erros e fallback para dados mock
+- Configuração Vite otimizada para HMR e proxy CORS
+- Adicionados serviços: corsProxy, footballDataServiceWithCors, optimizedTrainingService
+- Componentes: TrainingControlPanel, TrainingDashboard
+- Arquivos de teste para validação de APIs"
+```
+
+### **Para fazer push manualmente:**
+```bash
+# 1. Verificar status
+git status
+
+# 2. Adicionar arquivos (se necessário)
+git add .
+
+# 3. Fazer commit (se necessário)
+git commit -m "mensagem descritiva"
+
+# 4. Fazer push
+git push origin main
+```
+
+### **Credenciais necessárias:**
+- Token de acesso pessoal do GitHub
+- Ou chave SSH configurada
+
+## 📊 **RESUMO DAS MUDANÇAS**
+
+### **Arquivos Modificados: 5**
+- Sidebar.tsx
+- HomeEnhanced.tsx  
+- routes.tsx
+- footballDataService.ts
+- vite.config.ts
+
+### **Arquivos Novos: 11**
+- TrainingControlPanel.tsx
+- TrainingDashboard.tsx
+- corsProxy.ts
+- footballDataServiceWithCors.ts
+- optimizedTrainingService.ts
+- .env
+- .gitignore
+- test-api.js
+- test-auth-endpoints.js
+- test-cors-proxy.js
+- test-validation-fixed.js
+
+### **Total: 16 arquivos alterados/criados**
+
+## 🎉 **BENEFÍCIOS DAS ATUALIZAÇÕES**
+
+1. **✅ Sistema de treinamento profissional** - Pronto para ML real
+2. **✅ CORS resolvido** - APIs funcionando corretamente
+3. **✅ Interface aprimorada** - Dashboard de treinamento
+4. **✅ Fallback robusto** - Nunca quebra a aplicação
+5. **✅ Configuração otimizada** - Vite, proxy, HMR
+6. **✅ Testes incluídos** - Validação de APIs
+7. **✅ Documentação completa** - Changelog e instruções
 
 ---
 
-## [2.0.0] - 2026-04-11
-
-### ✨ Novidades
-
-#### 🎓 Sistema de Treinamento com Kaggle
-- Adicionada integração com Kaggle API para treinamento real dos agentes
-- Sistema de tracking de evolução dos agentes
-- Métricas em tempo real: accuracy, improvement, total predictions
-- Configuração de treinamento automático
-- Suporte para múltiplos datasets do Kaggle
-
-#### ⚽ Escudos dos Times (API-Football)
-- Componente `TeamLogo` para exibir escudos
-- Logos em alta resolução de todos os times
-- Bandeiras de países e competições
-- Fallback inteligente com iniciais quando logo não disponível
-- 5 tamanhos disponíveis (xs, sm, md, lg, xl)
-
-#### 🔧 Correção de CORS
-- Validação de APIs movida para backend Supabase
-- Endpoints `/validate-api/football-data` e `/validate-api/api-football`
-- Logs detalhados no console para debug
-- Fallback por formato quando servidor indisponível
-- Documentação completa em `CORS_SOLUTION.md`
-
-### 🎨 Interface
-
-#### Settings (Configurações)
-- Nova seção "Kaggle API (Treinamento de Agentes)"
-- Campos para username e API key do Kaggle
-- Toggle para ativar treinamento automático
-- Seção de performance dos agentes com métricas reais
-- Indicadores de melhoria (+X%) para cada agente
-- Estatísticas gerais: total de previsões, corretas, taxa média, melhoria média
-
-#### Agentes de IA (Página Dedicada)
-- Card de evolução mostrando progresso de todos os agentes
-- Indicadores visuais de melhoria (setas ↑↓)
-- Comparação antes/depois do treinamento
-- Data da última atualização
-- Barras de progresso animadas
-
-#### Match Cards
-- Escudos dos times integrados
-- Logos carregados automaticamente da API-Football
-- Layout melhorado com TeamLogo component
-
-### 🛠️ Melhorias Técnicas
-
-#### Novos Arquivos
-- `src/app/services/agentTrainingService.ts` - Serviço de treinamento
-- `src/app/services/apiFootballService.ts` - Cliente completo da API-Football
-- `src/app/components/TeamLogo.tsx` - Componente de logo de time
-- `KAGGLE_TRAINING.md` - Documentação completa do sistema de treinamento
-- `CHANGELOG.md` - Este arquivo
-
-#### Atualizações
-- `src/app/services/apiConfig.ts` - Adicionados campos Kaggle e validação via servidor
-- `src/app/pages/Settings.tsx` - Nova seção Kaggle e métricas dos agentes
-- `src/app/pages/AIAgentsPage.tsx` - Card de evolução e métricas reais
-- `src/app/components/MatchCard.tsx` - Integração com TeamLogo
-- `supabase/functions/server/index.tsx` - Endpoints de validação de APIs
-- `README.md` - Documentação atualizada
-
-### 📚 Documentação
-
-#### Novos Guias
-- `KAGGLE_TRAINING.md` - Como configurar e usar o Kaggle
-- `APIS_COMPARISON.md` - Comparação detalhada das 3 APIs
-- `EXAMPLES_API_USAGE.md` - Exemplos práticos de uso
-- `CORS_SOLUTION.md` - Solução para problemas de CORS
-
-#### Atualizações
-- README com informações sobre Kaggle e escudos
-- Links para toda a documentação
-- Seções reorganizadas para melhor navegação
-
----
-
-## [1.0.0] - 2026-04-11
-
-### 🎉 Lançamento Inicial
-
-#### Recursos Principais
-- 5 agentes de IA especialistas
-- Análises completas de partidas
-- Carrossel premium de jogos
-- Sistema de filtros avançados
-- Design responsivo
-
-#### APIs Suportadas
-- Football-Data.org
-- OpenLigaDB
-- (API-Football adicionada em v2.0.0)
-
-#### Interface
-- Dashboard principal
-- Página de configurações
-- Página de agentes de IA
-- Sistema de navegação com sidebar
-
-#### Documentação
-- README completo
-- PROJETO.md
-- RESUMO_IMPLEMENTACAO.md
-- BACKEND_GUIDE.md
-- TREINAMENTO_AGENTES.md
-- QUICKSTART_TREINAMENTO.md
-
----
-
-## Formato
-
-Este changelog segue [Keep a Changelog](https://keepachangelog.com/pt-BR/1.0.0/),
-e este projeto adere ao [Semantic Versioning](https://semver.org/lang/pt-BR/).
-
-### Tipos de Mudanças
-- **✨ Novidades** - Novas funcionalidades
-- **🎨 Interface** - Mudanças na UI/UX
-- **🛠️ Melhorias** - Melhorias em funcionalidades existentes
-- **🐛 Correções** - Correção de bugs
-- **📚 Documentação** - Mudanças apenas em documentação
-- **⚡ Performance** - Melhorias de performance
-- **🔒 Segurança** - Correções de segurança
-- **⚠️ Deprecated** - Funcionalidades que serão removidas
-- **🗑️ Removido** - Funcionalidades removidas
+**Próximos passos recomendados:**
+1. Configurar API-Football.com para mais dados
+2. Integrar Kaggle para datasets reais
+3. Implementar modelos ML treinados
+4. Adicionar predições em tempo real

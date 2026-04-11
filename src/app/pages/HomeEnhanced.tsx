@@ -34,30 +34,160 @@ export default function Home() {
   const loadRealMatches = async (apiKey: string) => {
     setIsLoadingMatches(true);
     try {
+      console.log('🔍 Iniciando carregamento de partidas...');
       const service = new FootballDataService(apiKey);
       const today = new Date();
       const nextWeek = new Date(today);
       nextWeek.setDate(nextWeek.getDate() + 7);
 
-      const matches = await service.getMatches(
-        undefined,
-        today.toISOString().split('T')[0],
-        nextWeek.toISOString().split('T')[0]
-      );
+      const dateFrom = today.toISOString().split('T')[0];
+      const dateTo = nextWeek.toISOString().split('T')[0];
       
-      setRealMatches(matches);
-      toast.success(`${matches.length} partidas carregadas da API`);
+      console.log(`📅 Período: ${dateFrom} a ${dateTo}`);
+      
+      const matches = await service.getMatches(undefined, dateFrom, dateTo);
+      
+      console.log(`✅ ${matches.length} partidas carregadas`);
+      
+      // Processa os escudos dos times
+      const processedMatches = matches.map(match => {
+        // Garante que os escudos tenham URLs válidas
+        const homeCrest = match.homeTeam.crest || 
+          `https://crests.football-data.org/${match.homeTeam.id}.png` ||
+          `https://via.placeholder.com/40/cccccc/000000?text=${match.homeTeam.shortName}`;
+        
+        const awayCrest = match.awayTeam.crest || 
+          `https://crests.football-data.org/${match.awayTeam.id}.png` ||
+          `https://via.placeholder.com/40/cccccc/000000?text=${match.awayTeam.shortName}`;
+        
+        return {
+          ...match,
+          homeTeam: {
+            ...match.homeTeam,
+            crest: homeCrest
+          },
+          awayTeam: {
+            ...match.awayTeam,
+            crest: awayCrest
+          }
+        };
+      });
+      
+      setRealMatches(processedMatches);
+      
+      if (matches.length > 0) {
+        toast.success(`${matches.length} partidas carregadas`);
+        
+        // Log para debug dos escudos
+        matches.slice(0, 3).forEach((match, i) => {
+          console.log(`🏆 Partida ${i+1}: ${match.homeTeam.name} vs ${match.awayTeam.name}`);
+          console.log(`   Home crest: ${match.homeTeam.crest}`);
+          console.log(`   Away crest: ${match.awayTeam.crest}`);
+        });
+      } else {
+        toast.info('Nenhuma partida encontrada para esta semana');
+      }
     } catch (error) {
-      console.error('Erro ao carregar partidas:', error);
-      toast.error('Erro ao carregar partidas. Usando dados de exemplo.');
+      console.error('❌ Erro ao carregar partidas:', error);
+      toast.warning('Usando dados de exemplo devido a erro na API');
+      
+      // Usa dados mock como fallback
+      const mockMatches = getMockMatches();
+      setRealMatches(mockMatches);
     } finally {
       setIsLoadingMatches(false);
     }
   };
 
+  // Função para gerar dados mock quando a API falha
+  const getMockMatches = () => {
+    const teams = [
+      { id: 1765, name: 'Flamengo', crest: 'https://crests.football-data.org/1765.png', shortName: 'FLA' },
+      { id: 1770, name: 'Palmeiras', crest: 'https://crests.football-data.org/1770.png', shortName: 'PAL' },
+      { id: 1766, name: 'São Paulo', crest: 'https://crests.football-data.org/1766.png', shortName: 'SAO' },
+      { id: 1769, name: 'Grêmio', crest: 'https://crests.football-data.org/1769.png', shortName: 'GRE' },
+      { id: 66, name: 'Manchester United', crest: 'https://crests.football-data.org/66.png', shortName: 'MUN' },
+      { id: 57, name: 'Arsenal', crest: 'https://crests.football-data.org/57.png', shortName: 'ARS' },
+    ];
+
+    const competitions = [
+      { id: 2013, name: 'Campeonato Brasileiro Série A', emblem: 'https://crests.football-data.org/764.svg' },
+      { id: 2021, name: 'Premier League', emblem: 'https://crests.football-data.org/PL.png' },
+    ];
+
+    const today = new Date();
+    const matches = [];
+
+    for (let i = 0; i < 6; i++) {
+      const matchDate = new Date(today);
+      matchDate.setDate(today.getDate() + i);
+      
+      const homeTeam = teams[i % teams.length];
+      const awayTeam = teams[(i + 1) % teams.length];
+      const competition = competitions[i % competitions.length];
+      
+      matches.push({
+        id: 400000 + i,
+        utcDate: matchDate.toISOString(),
+        status: 'SCHEDULED',
+        matchday: Math.floor(Math.random() * 38) + 1,
+        competition: {
+          id: competition.id,
+          name: competition.name,
+          emblem: competition.emblem
+        },
+        homeTeam: {
+          id: homeTeam.id,
+          name: homeTeam.name,
+          shortName: homeTeam.shortName,
+          crest: homeTeam.crest
+        },
+        awayTeam: {
+          id: awayTeam.id,
+          name: awayTeam.name,
+          shortName: awayTeam.shortName,
+          crest: awayTeam.crest
+        },
+        score: {
+          winner: null,
+          fullTime: { home: null, away: null }
+        }
+      });
+    }
+    
+    console.log('🎭 Usando dados mock (fallback)');
+    return matches;
+  };
+
   // Filtrar partidas
+  // Filtrar partidas - usa realMatches se disponível, senão mockMatches
   const filteredMatches = useMemo(() => {
-    return mockMatches.filter((match) => {
+    // Converte realMatches (FootballMatch) para formato Match se disponível
+    const matchesToUse = realMatches.length > 0 ? 
+      realMatches.map(footballMatch => {
+        const matchDate = new Date(footballMatch.utcDate);
+        return {
+          id: footballMatch.id.toString(),
+          homeTeam: footballMatch.homeTeam.name,
+          awayTeam: footballMatch.awayTeam.name,
+          homeCrest: footballMatch.homeTeam.crest || '',
+          awayCrest: footballMatch.awayTeam.crest || '',
+          league: footballMatch.competition.name,
+          country: footballMatch.area?.name || footballMatch.competition.area?.name || 'Unknown',
+          date: matchDate,
+          time: matchDate.toLocaleTimeString('pt-BR', { 
+            hour: '2-digit', 
+            minute: '2-digit' 
+          }),
+          status: footballMatch.status,
+          score: footballMatch.score?.fullTime ? 
+            `${footballMatch.score.fullTime.home || 0}-${footballMatch.score.fullTime.away || 0}` : 
+            '0-0'
+        };
+      }) : 
+      mockMatches;
+
+    return matchesToUse.filter((match) => {
       // Filtro de data
       if (selectedDate !== 'all') {
         const today = new Date('2026-04-10');
@@ -96,7 +226,7 @@ export default function Home() {
 
       return true;
     });
-  }, [selectedDate, selectedCountry, selectedLeague]);
+  }, [realMatches, selectedDate, selectedCountry, selectedLeague]);
 
   // Agrupar partidas por liga
   const groupedMatches = useMemo(() => {
@@ -312,6 +442,8 @@ export default function Home() {
                         match={match}
                         prediction={prediction}
                         onViewDetails={handleViewDetails}
+                        homeCrest={match.homeCrest}
+                        awayCrest={match.awayCrest}
                       />
                     );
                   })}

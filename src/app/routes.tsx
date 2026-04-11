@@ -3,6 +3,7 @@ import { Layout } from './components/Layout';
 import Home from './pages/HomeEnhanced';
 import Settings from './pages/Settings';
 import AIAgentsPage from './pages/AIAgentsPage';
+import TrainingDashboard from './pages/TrainingDashboard';
 
 // Páginas placeholder para outras rotas
 function TodayPage() {
@@ -81,6 +82,7 @@ export const router = createBrowserRouter([
       { path: 'favorites', Component: FavoritesPage },
       { path: 'agents', Component: AIAgentsPage },
       { path: 'settings', Component: Settings },
+      { path: 'training', Component: TrainingDashboard },
       { path: '*', Component: NotFound },
     ],
   },

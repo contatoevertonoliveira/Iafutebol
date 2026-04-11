@@ -7,7 +7,8 @@ import {
   Trophy, 
   Star,
   Settings,
-  Brain
+  Brain,
+  Cpu
 } from 'lucide-react';
 
 export function Sidebar() {
@@ -18,6 +19,7 @@ export function Sidebar() {
     { to: '/month', icon: BarChart3, label: 'Este Mês' },
     { to: '/leagues', icon: Trophy, label: 'Ligas' },
     { to: '/agents', icon: Brain, label: 'Agentes IA' },
+    { to: '/training', icon: Cpu, label: 'Treinamento' },
     { to: '/favorites', icon: Star, label: 'Favoritos' },
   ];
 
