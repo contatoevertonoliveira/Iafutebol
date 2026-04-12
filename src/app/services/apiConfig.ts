@@ -5,6 +5,7 @@ export interface ApiConfig {
   kaggleUsername: string;
   kaggleApiKey: string;
   agentTrainingEnabled: boolean;
+  apiFootballDisabledLeagueIds?: number[];
 }
 
 export const API_ENDPOINTS = {
@@ -61,6 +62,7 @@ export function loadApiConfig(): ApiConfig | null {
       kaggleUsername: '',
       kaggleApiKey: '',
       agentTrainingEnabled: false,
+      apiFootballDisabledLeagueIds: [],
       ...envConfig,
       ...(storedConfig ?? {}),
     } satisfies ApiConfig;

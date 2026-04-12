@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useMemo, useRef, useState, useEffect } from 'react';
 import { 
   Play, Pause, StopCircle, RefreshCw, Download, 
   Bell, BellOff, Settings, BarChart3, Clock,
@@ -13,6 +13,7 @@ import { Label } from './ui/label';
 import { toast } from 'sonner';
 import {
   trainingWorker,
+  getTrainingAgentConfigs,
   loadTrainingSessions,
   loadNotificationConfig,
   saveNotificationConfig,
@@ -31,12 +32,26 @@ interface TrainingControlPanelProps {
 }
 
 export default function TrainingControlPanel({ className = '' }: TrainingControlPanelProps) {
+  const queueKey = 'training_queue_v1';
   const [sessions, setSessions] = useState<TrainingSession[]>([]);
   const [currentSession, setCurrentSession] = useState<TrainingSession | null>(null);
   const [notificationConfig, setNotificationConfig] = useState<NotificationConfig>(loadNotificationConfig());
   const [datasets, setDatasets] = useState<IncrementalDataset[]>([]);
   const [isDownloading, setIsDownloading] = useState(false);
   const [summary, setSummary] = useState(getTrainingSummary());
+  const [selectedAgentIds, setSelectedAgentIds] = useState<string[]>([]);
+  const [trainingQueue, setTrainingQueue] = useState<string[]>(() => {
+    try {
+      const raw = localStorage.getItem(queueKey);
+      const parsed = raw ? (JSON.parse(raw) as unknown) : [];
+      return Array.isArray(parsed) ? parsed.map(String) : [];
+    } catch {
+      return [];
+    }
+  });
+  const isStartingFromQueueRef = useRef(false);
+
+  const agentConfigs = useMemo(() => getTrainingAgentConfigs(), []);
 
   // Atualizar dados periodicamente
   useEffect(() => {
@@ -55,6 +70,64 @@ export default function TrainingControlPanel({ className = '' }: TrainingControl
     setDatasets(loadIncrementalDatasets());
     setSummary(getTrainingSummary());
   };
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(queueKey, JSON.stringify(trainingQueue));
+    } catch {}
+  }, [trainingQueue]);
+
+  useEffect(() => {
+    if (isStartingFromQueueRef.current) return;
+    if (currentSession) return;
+    if (trainingQueue.length === 0) return;
+
+    const nextAgentId = trainingQueue[0];
+    isStartingFromQueueRef.current = true;
+    void trainingWorker
+      .startTraining(nextAgentId)
+      .then(() => {
+        toast.success(`Treinamento iniciado para ${nextAgentId}`);
+        setTrainingQueue((q) => q.slice(1));
+        refreshData();
+      })
+      .catch((error) => {
+        toast.error(`Erro ao iniciar treinamento: ${error instanceof Error ? error.message : 'Erro desconhecido'}`);
+        setTrainingQueue((q) => q.slice(1));
+      })
+      .finally(() => {
+        isStartingFromQueueRef.current = false;
+      });
+  }, [currentSession, trainingQueue]);
+
+  const enqueueAgents = (agentIds: string[]) => {
+    const valid = agentIds.filter((id) => agentConfigs.some((c) => c.agentId === id));
+    if (valid.length === 0) return;
+    setTrainingQueue((q) => {
+      const set = new Set(q);
+      valid.forEach((id) => set.add(id));
+      return Array.from(set);
+    });
+    toast.success(`${valid.length} agente(s) adicionado(s) à fila`);
+  };
+
+  const toggleSelected = (agentId: string) => {
+    setSelectedAgentIds((prev) => {
+      if (prev.includes(agentId)) return prev.filter((id) => id !== agentId);
+      return [...prev, agentId];
+    });
+  };
+
+  const latestSessionByAgent = useMemo(() => {
+    const map = new Map<string, TrainingSession>();
+    for (const s of sessions) {
+      const prev = map.get(s.agentId);
+      if (!prev || new Date(s.startTime).getTime() > new Date(prev.startTime).getTime()) {
+        map.set(s.agentId, s);
+      }
+    }
+    return map;
+  }, [sessions]);
 
   const handleStartTraining = async (agentId: string) => {
     try {
@@ -158,27 +231,29 @@ export default function TrainingControlPanel({ className = '' }: TrainingControl
           </Badge>
         </div>
 
-        {/* Controles */}
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-4">
-          <Button 
-            onClick={() => handleStartTraining('statsmaster')}
-            disabled={!!currentSession}
+        <div className="flex flex-wrap items-center gap-2 mb-4">
+          <Button
+            onClick={() => enqueueAgents(selectedAgentIds)}
+            disabled={selectedAgentIds.length === 0}
             className="bg-green-600 hover:bg-green-700"
           >
             <Play className="w-4 h-4 mr-2" />
-            Iniciar StatsMaster
+            Treinar selecionados
           </Button>
-          
-          <Button 
-            onClick={() => handleStartTraining('deeppredictor')}
-            disabled={!!currentSession}
-            className="bg-purple-600 hover:bg-purple-700"
-          >
+          <Button onClick={() => enqueueAgents(agentConfigs.map((c) => c.agentId))} variant="outline">
             <Play className="w-4 h-4 mr-2" />
-            Iniciar DeepPredictor
+            Treinar todos
           </Button>
-          
-          <Button 
+          <Button onClick={() => setSelectedAgentIds([])} variant="outline">
+            Limpar seleção
+          </Button>
+          <Button onClick={() => setTrainingQueue([])} variant="outline">
+            Limpar fila
+          </Button>
+
+          <div className="flex-1" />
+
+          <Button
             onClick={handlePauseTraining}
             disabled={!currentSession || currentSession.status !== 'running'}
             variant="outline"
@@ -187,8 +262,8 @@ export default function TrainingControlPanel({ className = '' }: TrainingControl
             <Pause className="w-4 h-4 mr-2" />
             Pausar
           </Button>
-          
-          <Button 
+
+          <Button
             onClick={handleResumeTraining}
             disabled={!currentSession || !canResumeTraining(currentSession.sessionId)}
             variant="outline"
@@ -197,8 +272,8 @@ export default function TrainingControlPanel({ className = '' }: TrainingControl
             <RefreshCw className="w-4 h-4 mr-2" />
             Retomar
           </Button>
-          
-          <Button 
+
+          <Button
             onClick={handleStopTraining}
             disabled={!currentSession}
             variant="outline"
@@ -207,6 +282,81 @@ export default function TrainingControlPanel({ className = '' }: TrainingControl
             <StopCircle className="w-4 h-4 mr-2" />
             Parar
           </Button>
+        </div>
+
+        <div className="grid md:grid-cols-2 gap-4 mb-4">
+          <div className="bg-gray-50 rounded-lg p-4 border border-gray-200">
+            <div className="font-semibold text-gray-900 mb-2">Agentes</div>
+            <div className="space-y-2">
+              {agentConfigs.map((cfg) => {
+                const checked = selectedAgentIds.includes(cfg.agentId);
+                const latest = latestSessionByAgent.get(cfg.agentId) ?? null;
+                return (
+                  <div key={cfg.agentId} className="flex items-center justify-between gap-3">
+                    <label className="flex items-center gap-2 min-w-0">
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => toggleSelected(cfg.agentId)}
+                      />
+                      <span className="font-medium text-gray-900 truncate">{cfg.name}</span>
+                      <span className="text-xs text-gray-500 truncate">({cfg.maxEpochs} épocas)</span>
+                    </label>
+
+                    <div className="flex items-center gap-2 shrink-0">
+                      {latest && (
+                        <Badge className={getStatusColor(latest.status)}>
+                          {getStatusIcon(latest.status)}
+                          <span className="ml-1">{latest.status}</span>
+                        </Badge>
+                      )}
+                      <Button
+                        size="sm"
+                        onClick={() => {
+                          if (currentSession) enqueueAgents([cfg.agentId]);
+                          else void handleStartTraining(cfg.agentId);
+                        }}
+                        disabled={!!currentSession && trainingQueue.includes(cfg.agentId)}
+                      >
+                        <Play className="w-4 h-4 mr-2" />
+                        Treinar
+                      </Button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="bg-gray-50 rounded-lg p-4 border border-gray-200">
+            <div className="flex items-center justify-between mb-2">
+              <div className="font-semibold text-gray-900">Fila</div>
+              <Badge variant="outline">{trainingQueue.length}</Badge>
+            </div>
+            {trainingQueue.length === 0 ? (
+              <div className="text-sm text-gray-600">Nenhum agente na fila.</div>
+            ) : (
+              <div className="space-y-2">
+                {trainingQueue.map((agentId, idx) => {
+                  const cfg = agentConfigs.find((c) => c.agentId === agentId);
+                  return (
+                    <div key={`${agentId}-${idx}`} className="flex items-center justify-between">
+                      <div className="text-sm text-gray-900">
+                        {idx + 1}. {cfg?.name ?? agentId}
+                      </div>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => setTrainingQueue((q) => q.filter((id, i) => !(i === idx && id === agentId)))}
+                      >
+                        Remover
+                      </Button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
         </div>
 
         {/* Sessão Atual */}

@@ -34,6 +34,10 @@ export interface FootballMatch {
     };
   };
   competition: Competition;
+  live?: {
+    elapsed: number | null;
+    statusShort?: string;
+  };
 }
 
 export class FootballDataService {

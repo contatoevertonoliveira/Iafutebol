@@ -1,5 +1,6 @@
 import { Calendar, Globe, Trophy } from 'lucide-react';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
+import { Button } from './ui/button';
 
 interface FilterBarProps {
   selectedDate: string;
@@ -10,6 +11,10 @@ interface FilterBarProps {
   onLeagueChange: (value: string) => void;
   countries: string[];
   leagues: string[];
+  selectedStatus: 'all' | 'live' | 'upcoming' | 'finished';
+  onStatusChange: (value: 'all' | 'live' | 'upcoming' | 'finished') => void;
+  groupMode: 'leagues' | 'championships';
+  onGroupModeChange: (value: 'leagues' | 'championships') => void;
 }
 
 export function FilterBar({
@@ -21,6 +26,10 @@ export function FilterBar({
   onLeagueChange,
   countries,
   leagues,
+  selectedStatus,
+  onStatusChange,
+  groupMode,
+  onGroupModeChange,
 }: FilterBarProps) {
   return (
     <div className="bg-white border-b border-gray-200 p-4 sticky top-0 z-10 shadow-sm">
@@ -86,6 +95,58 @@ export function FilterBar({
               ))}
             </SelectContent>
           </Select>
+        </div>
+      </div>
+
+      <div className="mt-4 flex flex-wrap items-center gap-4">
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="text-xs font-semibold text-gray-600">Status</div>
+          <Button
+            size="sm"
+            variant={selectedStatus === 'all' ? 'default' : 'outline'}
+            onClick={() => onStatusChange('all')}
+          >
+            Todos
+          </Button>
+          <Button
+            size="sm"
+            variant={selectedStatus === 'live' ? 'default' : 'outline'}
+            onClick={() => onStatusChange('live')}
+          >
+            Ao vivo
+          </Button>
+          <Button
+            size="sm"
+            variant={selectedStatus === 'upcoming' ? 'default' : 'outline'}
+            onClick={() => onStatusChange('upcoming')}
+          >
+            Próximos
+          </Button>
+          <Button
+            size="sm"
+            variant={selectedStatus === 'finished' ? 'default' : 'outline'}
+            onClick={() => onStatusChange('finished')}
+          >
+            Finalizados
+          </Button>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="text-xs font-semibold text-gray-600">Agrupar</div>
+          <Button
+            size="sm"
+            variant={groupMode === 'leagues' ? 'default' : 'outline'}
+            onClick={() => onGroupModeChange('leagues')}
+          >
+            Ligas
+          </Button>
+          <Button
+            size="sm"
+            variant={groupMode === 'championships' ? 'default' : 'outline'}
+            onClick={() => onGroupModeChange('championships')}
+          >
+            Campeonatos
+          </Button>
         </div>
       </div>
 

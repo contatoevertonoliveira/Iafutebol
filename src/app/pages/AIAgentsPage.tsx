@@ -2,22 +2,61 @@ import { Brain, TrendingUp, Award, BarChart3, Target, Activity, ArrowUp, ArrowDo
 import { getDynamicAgentProfiles, AI_AGENTS_BASE } from '../services/aiAgents';
 import { Card } from '../components/ui/card';
 import { Badge } from '../components/ui/badge';
+import { loadTrainingSessions } from '../services/optimizedTrainingService';
 
 export default function AIAgentsPage() {
   // Carrega os agentes dinâmicos calculados pelo sistema
   const dynamicProfiles = getDynamicAgentProfiles();
   
+  const history = (() => {
+    try {
+      const raw = localStorage.getItem('agent_learning_history');
+      if (!raw) return {} as Record<string, { total: number; correct: number }>;
+      const parsed = JSON.parse(raw) as Record<string, { total: number; correct: number }>;
+      return parsed && typeof parsed === 'object' ? parsed : ({} as Record<string, { total: number; correct: number }>);
+    } catch {
+      return {} as Record<string, { total: number; correct: number }>;
+    }
+  })();
+
+  const trainingSessions = (() => {
+    try {
+      return loadTrainingSessions();
+    } catch {
+      return [];
+    }
+  })();
+
   // Mapeia e calcula a evolução real com base nos valores base (pré-treinados)
   const agentsWithMetrics = dynamicProfiles.map(dynamicAgent => {
     const baseAgent = AI_AGENTS_BASE.find(a => a.id === dynamicAgent.id) || dynamicAgent;
     
     const improvement = dynamicAgent.accuracy - baseAgent.accuracy;
+
+    const trainingAgentId = dynamicAgent.id.replace('agent-', '').replace('-', '');
+    const session = trainingSessions.find((s) => s.agentId === trainingAgentId);
+    const hasTraining = Boolean(session && session.bestAccuracy > 0);
+
+    const agentHistory = history[dynamicAgent.id];
+    const historyTotal = agentHistory?.total ?? 0;
+    const historyCorrect = agentHistory?.correct ?? 0;
+    const hasRealHistory = historyTotal > 0;
+
+    const historyWeightPercent = hasRealHistory ? 30 : 0;
     
     return {
       ...dynamicAgent,
       previousAccuracy: baseAgent.accuracy,
       improvement: improvement,
       lastUpdated: new Date().toISOString(),
+      sources: {
+        base: true,
+        training: hasTraining,
+        history: hasRealHistory,
+        historyWeightPercent,
+        historyTotal,
+        historyCorrect,
+      },
     };
   });
 
@@ -31,7 +70,7 @@ export default function AIAgentsPage() {
             <h1 className="text-4xl font-bold text-gray-900">Agentes de IA</h1>
           </div>
           <p className="text-gray-600 text-lg">
-            Conheça nossos 5 agentes especialistas em análise de futebol
+            Conheça nossos {agentsWithMetrics.length} agentes especialistas em análise de futebol
           </p>
         </div>
 
@@ -94,7 +133,7 @@ export default function AIAgentsPage() {
               <h2 className="text-xl font-bold text-gray-900">Evolução dos Agentes</h2>
             </div>
 
-            <div className="grid md:grid-cols-5 gap-4">
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-7 gap-4">
               {agentsWithMetrics.map((metric) => (
                 <div key={metric.id} className="bg-white rounded-lg p-4 border border-purple-200">
                   <div className="text-sm font-semibold text-gray-700 mb-2">{metric.name}</div>
@@ -152,6 +191,18 @@ export default function AIAgentsPage() {
                         <Badge variant="outline">{agent.type}</Badge>
                         <Badge className="bg-blue-100 text-blue-800">
                           {agent.specialty}
+                        </Badge>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2 mt-2">
+                        <Badge variant="outline">Base</Badge>
+                        {agent.sources.training && (
+                          <Badge className="bg-purple-100 text-purple-800 border-purple-300">Treino</Badge>
+                        )}
+                        {agent.sources.history && (
+                          <Badge className="bg-green-100 text-green-800 border-green-300">Histórico real</Badge>
+                        )}
+                        <Badge variant="outline">
+                          Peso do histórico: {agent.sources.historyWeightPercent}%
                         </Badge>
                       </div>
                     </div>
@@ -242,6 +293,8 @@ export default function AIAgentsPage() {
                       {agent.type === 'head2head' && 'Especialista em confrontos diretos, analisando o histórico entre os times em diferentes contextos.'}
                       {agent.type === 'advanced' && 'Utiliza deep learning com mais de 50 variáveis para identificar padrões complexos não visíveis a olho nu.'}
                       {agent.type === 'ensemble' && 'Combina as previsões de todos os agentes usando ponderação inteligente baseada no histórico de accuracy.'}
+                      {agent.type === 'goals' && 'Foca em padrões de gols, ritmo de jogo e tendência de Over/Under, incluindo comportamento por tempo e minutos finais.'}
+                      {agent.type === 'correctscore' && 'Modela distribuição de gols para sugerir placares corretos mais prováveis e composições para dutching.'}
                     </p>
                   </div>
 
@@ -253,6 +306,8 @@ export default function AIAgentsPage() {
                       {agent.type === 'head2head' && 'Clássicos, derbies e confrontos com histórico relevante.'}
                       {agent.type === 'advanced' && 'Situações complexas com múltiplas variáveis e padrões sutis.'}
                       {agent.type === 'ensemble' && 'Previsões gerais com maior confiabilidade e consenso entre especialistas.'}
+                      {agent.type === 'goals' && 'Mercados de gols: Over/Under, timing de gols, cenários de jogo aberto/fechado.'}
+                      {agent.type === 'correctscore' && 'Placar correto, proteção contra goleadas e composições de dutching.'}
                     </p>
                   </div>
                 </div>

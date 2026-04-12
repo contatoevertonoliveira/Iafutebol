@@ -8,7 +8,7 @@ import { AgentAnalysis } from '../components/AgentAnalysis';
 import { ApiStatus } from '../components/ApiStatus';
 import { DraggableWindow } from '../components/DraggableWindow';
 import { TrendingUp, Brain, Loader2, RefreshCw } from 'lucide-react';
-import { getDynamicAgentProfiles, AgentEnsemble, AgentPrediction, learnFromMatchResult } from '../services/aiAgents';
+import { getDynamicAgentProfiles, AgentEnsemble, AgentPrediction, learnFromMatchResult, recordTrainingSample } from '../services/aiAgents';
 import { loadApiConfig } from '../services/apiConfig';
 import { FootballDataService, FootballMatch } from '../services/footballDataService';
 import { ApiFootballService, ApiFootballMatch } from '../services/apiFootballService';
@@ -18,6 +18,8 @@ import { toast } from 'sonner';
 import { useLocation } from 'react-router';
 
 type MatchStatus = 'scheduled' | 'live' | 'finished';
+type StatusFilter = 'all' | 'live' | 'upcoming' | 'finished';
+type GroupMode = 'leagues' | 'championships';
 type ApiSource = 'api-football' | 'football-data' | 'openligadb' | 'mock';
 
 type DisplayMatch = Match & {
@@ -27,6 +29,7 @@ type DisplayMatch = Match & {
     home: number | null;
     away: number | null;
   };
+  liveElapsed?: number | null;
 };
 
 type HomeEnhancedProps = {
@@ -39,6 +42,8 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
   const [selectedDate, setSelectedDate] = useState(initialSelectedDate);
   const [selectedCountry, setSelectedCountry] = useState('all');
   const [selectedLeague, setSelectedLeague] = useState('all');
+  const [selectedStatus, setSelectedStatus] = useState<StatusFilter>('all');
+  const [groupMode, setGroupMode] = useState<GroupMode>('leagues');
   const [selectedMatchId, setSelectedMatchId] = useState<string | null>(null);
   const [showAgentAnalysis, setShowAgentAnalysis] = useState(false);
   const [agentPredictions, setAgentPredictions] = useState<AgentPrediction[]>([]);
@@ -137,6 +142,7 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
         
         // Ensinar aos agentes o resultado real
         learnFromMatchResult(predictions, realWinner);
+        recordTrainingSample(m, predictions);
 
         evaluated.push(id);
         hasNewEvaluations = true;
@@ -159,17 +165,24 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
     return 'scheduled';
   };
 
+  const TIME_ZONE = 'America/Sao_Paulo';
+  const getDayKey = (d: Date) =>
+    new Intl.DateTimeFormat('en-CA', { timeZone: TIME_ZONE, year: 'numeric', month: '2-digit', day: '2-digit' }).format(d);
+  const parseApiDate = (value: string) => {
+    const raw = String(value || '');
+    if (!raw) return new Date(NaN);
+    if (/[zZ]$/.test(raw) || /[+-]\d\d:\d\d$/.test(raw)) return new Date(raw);
+    return new Date(`${raw}Z`);
+  };
+
   const getDateRange = () => {
-    const today = new Date();
-    const nextWeek = new Date(today);
-    nextWeek.setDate(nextWeek.getDate() + 7);
-    const dateFrom = today.toISOString().split('T')[0];
-    const dateTo = nextWeek.toISOString().split('T')[0];
+    const dateFrom = getDayKey(new Date());
+    const dateTo = getDayKey(new Date(Date.now() + 7 * 24 * 60 * 60 * 1000));
     return { dateFrom, dateTo };
   };
 
   const cacheKey = 'matchesCache_v1';
-  const cacheMaxAgeMs = 1000 * 60 * 30;
+  const cacheMaxAgeMs = 1000 * 60 * 15;
 
   const readCache = (dateFrom: string, dateTo: string) => {
     try {
@@ -262,6 +275,10 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
           home: m.goals.home,
           away: m.goals.away,
         },
+      },
+      live: {
+        elapsed: m.fixture.status.elapsed,
+        statusShort: m.fixture.status.short,
       },
       competition: {
         id: m.league.id,
@@ -461,21 +478,24 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
       if (apiFootballKey) {
         try {
           const service = new ApiFootballService(apiFootballKey);
-          const fixtures = await service.getFixtures({ from: dateFrom, to: dateTo, timezone: 'UTC' });
+          const fixtures = await service.getFixtures({ from: dateFrom, to: dateTo, timezone: TIME_ZONE });
           const matches = fixtures.map(convertApiFootballMatchToFootballMatch);
           successfulSource = successfulSource ?? 'api-football';
           if (matches.length > 0) {
             const processedMatches = processCrests(matches);
+            const disabled = config?.apiFootballDisabledLeagueIds ?? [];
+            const visibleMatches =
+              disabled.length > 0 ? processedMatches.filter((m) => !disabled.includes(m.competition.id)) : processedMatches;
             setApiSource('api-football');
-            setRealMatches(processedMatches);
-            const predictionsById = await generatePredictionsForMatches('api-football', processedMatches);
+            setRealMatches(visibleMatches);
+            const predictionsById = await generatePredictionsForMatches('api-football', visibleMatches);
             setRealPredictions(predictionsById);
             setLastUpdatedAt(new Date());
             writeCache({
               dateFrom,
               dateTo,
               apiSource: 'api-football',
-              matches: processedMatches,
+              matches: visibleMatches,
               predictions: predictionsById,
             });
             toast.success(`${matches.length} partidas carregadas (API-Football)`);
@@ -635,7 +655,7 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
     // Converte realMatches (FootballMatch) para formato Match se disponível
     const matchesToUse: DisplayMatch[] = apiSource !== 'mock' ?
       realMatches.map((footballMatch) => {
-        const matchDate = new Date(footballMatch.utcDate);
+        const matchDate = parseApiDate(footballMatch.utcDate);
         const fullTime = footballMatch.score?.fullTime;
         return {
           id: footballMatch.id.toString(),
@@ -647,6 +667,7 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
           country: footballMatch.area?.name || footballMatch.competition.area?.name || 'Unknown',
           date: matchDate,
           time: matchDate.toLocaleTimeString('pt-BR', { 
+            timeZone: TIME_ZONE,
             hour: '2-digit', 
             minute: '2-digit' 
           }),
@@ -655,36 +676,58 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
             home: typeof fullTime?.home === 'number' ? fullTime.home : null,
             away: typeof fullTime?.away === 'number' ? fullTime.away : null,
           },
+          liveElapsed: footballMatch.live?.elapsed ?? null,
         };
       }) : 
       mockMatches.map((m) => ({ ...m, homeCrest: '', awayCrest: '' }));
 
+    const now = new Date();
+    const todayKey = getDayKey(now);
+    const tomorrowKey = getDayKey(new Date(Date.now() + 1 * 24 * 60 * 60 * 1000));
+    const allowedKeys = (() => {
+      if (selectedDate === 'week') {
+        const set = new Set<string>();
+        for (let i = 0; i < 7; i++) set.add(getDayKey(new Date(Date.now() + i * 24 * 60 * 60 * 1000)));
+        return set;
+      }
+      if (selectedDate === 'fortnight') {
+        const set = new Set<string>();
+        for (let i = 0; i < 15; i++) set.add(getDayKey(new Date(Date.now() + i * 24 * 60 * 60 * 1000)));
+        return set;
+      }
+      if (selectedDate === 'month') {
+        const set = new Set<string>();
+        for (let i = 0; i < 30; i++) set.add(getDayKey(new Date(Date.now() + i * 24 * 60 * 60 * 1000)));
+        return set;
+      }
+      return null;
+    })();
+
     return matchesToUse.filter((match) => {
+      const matchKey = getDayKey(new Date(match.date));
+
+      if (match.status === 'finished' && matchKey < todayKey) {
+        return false;
+      }
+
+      if (selectedStatus !== 'all') {
+        if (selectedStatus === 'live' && match.status !== 'live') return false;
+        if (selectedStatus === 'upcoming' && match.status !== 'scheduled') return false;
+        if (selectedStatus === 'finished' && match.status !== 'finished') return false;
+      }
+
       // Filtro de data
       if (selectedDate !== 'all') {
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
-        const matchDate = new Date(match.date);
-        matchDate.setHours(0, 0, 0, 0);
-        
         if (selectedDate === 'today') {
-          if (matchDate.toDateString() !== today.toDateString()) return false;
+          if (matchKey !== todayKey) return false;
         } else if (selectedDate === 'tomorrow') {
-          const tomorrow = new Date(today);
-          tomorrow.setDate(tomorrow.getDate() + 1);
-          if (matchDate.toDateString() !== tomorrow.toDateString()) return false;
+          if (matchKey !== tomorrowKey) return false;
         } else if (selectedDate === 'week') {
-          const weekLater = new Date(today);
-          weekLater.setDate(weekLater.getDate() + 7);
-          if (matchDate < today || matchDate > weekLater) return false;
+          if (!allowedKeys?.has(matchKey)) return false;
         } else if (selectedDate === 'fortnight') {
-          const fortnightLater = new Date(today);
-          fortnightLater.setDate(fortnightLater.getDate() + 15);
-          if (matchDate < today || matchDate > fortnightLater) return false;
+          if (!allowedKeys?.has(matchKey)) return false;
         } else if (selectedDate === 'month') {
-          const monthLater = new Date(today);
-          monthLater.setDate(monthLater.getDate() + 30);
-          if (matchDate < today || matchDate > monthLater) return false;
+          if (!allowedKeys?.has(matchKey)) return false;
         }
       }
 
@@ -704,22 +747,54 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
 
       return true;
     });
-  }, [apiSource, realMatches, selectedDate, selectedCountry, selectedLeague, favoritesOnly, favoriteMatchIds]);
+  }, [apiSource, realMatches, selectedStatus, selectedDate, selectedCountry, selectedLeague, favoritesOnly, favoriteMatchIds]);
 
   // Agrupar partidas por liga
   const groupedMatches = useMemo(() => {
-    const groups: { [key: string]: Match[] } = {};
+    const statusRank = (status: MatchStatus) => (status === 'live' ? 0 : status === 'scheduled' ? 1 : 2);
+    const groups: Record<string, Match[]> = {};
     
     filteredMatches.forEach((match) => {
-      const key = `${match.country} - ${match.league}`;
-      if (!groups[key]) {
-        groups[key] = [];
-      }
+      const key = groupMode === 'championships' ? match.league : `${match.country} - ${match.league}`;
+      if (!groups[key]) groups[key] = [];
       groups[key].push(match);
     });
 
-    return groups;
-  }, [filteredMatches]);
+    const sortMatches = (a: Match, b: Match) => {
+      const rankA = statusRank(a.status as MatchStatus);
+      const rankB = statusRank(b.status as MatchStatus);
+      if (rankA !== rankB) return rankA - rankB;
+
+      const timeA = new Date(a.date).getTime();
+      const timeB = new Date(b.date).getTime();
+
+      if (rankA === 2) return timeB - timeA;
+      return timeA - timeB;
+    };
+
+    const entries = Object.entries(groups).map(([key, matches]) => {
+      const sorted = [...matches].sort(sortMatches);
+      return [key, sorted] as const;
+    });
+
+    const groupBestRank = (matches: Match[]) => Math.min(...matches.map((m) => statusRank(m.status as MatchStatus)));
+    const groupBestTime = (matches: Match[]) => {
+      const best = groupBestRank(matches);
+      const times = matches
+        .filter((m) => statusRank(m.status as MatchStatus) === best)
+        .map((m) => new Date(m.date).getTime());
+      return times.length === 0 ? Number.MAX_SAFE_INTEGER : Math.min(...times);
+    };
+
+    entries.sort((a, b) => {
+      const rankA = groupBestRank(a[1]);
+      const rankB = groupBestRank(b[1]);
+      if (rankA !== rankB) return rankA - rankB;
+      return groupBestTime(a[1]) - groupBestTime(b[1]);
+    });
+
+    return entries;
+  }, [filteredMatches, groupMode]);
 
   // Jogos premium (alta confiança + melhor retorno)
   const premiumMatches = useMemo(() => {
@@ -767,6 +842,72 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
     if (apiSource !== 'mock') return realPredictions;
     return Object.fromEntries(mockPredictions.map((p) => [p.matchId, p]));
   }, [apiSource, realPredictions]);
+
+  const realMatchById = useMemo(() => {
+    return Object.fromEntries(realMatches.map((m) => [m.id.toString(), m])) as Record<string, FootballMatch>;
+  }, [realMatches]);
+
+  useEffect(() => {
+    type MatchHistoryItem = {
+      id: string;
+      source: ApiSource;
+      archivedAt: string;
+      match: {
+        id: string;
+        utcDate: string;
+        homeTeam: string;
+        awayTeam: string;
+        league: string;
+        country: string;
+        result: { home: number; away: number };
+      };
+      prediction: Prediction | null;
+    };
+
+    const historyKey = 'matches_history_v1';
+    const store = (() => {
+      try {
+        const raw = localStorage.getItem(historyKey);
+        if (!raw) return { version: 1 as const, items: {} as Record<string, MatchHistoryItem> };
+        const parsed = JSON.parse(raw) as { version: number; items: Record<string, MatchHistoryItem> };
+        if (parsed.version !== 1 || !parsed.items) return { version: 1 as const, items: {} as Record<string, MatchHistoryItem> };
+        return { version: 1 as const, items: parsed.items };
+      } catch {
+        return { version: 1 as const, items: {} as Record<string, MatchHistoryItem> };
+      }
+    })();
+
+    let changed = false;
+    for (const match of filteredMatches) {
+      if (match.status !== 'finished') continue;
+      if (typeof match.result?.home !== 'number' || typeof match.result?.away !== 'number') continue;
+      if (store.items[match.id]) continue;
+
+      const prediction = predictionByMatchId[match.id] ?? null;
+
+      store.items[match.id] = {
+        id: match.id,
+        source: apiSource,
+        archivedAt: new Date().toISOString(),
+        match: {
+          id: match.id,
+          utcDate: new Date(match.date).toISOString(),
+          homeTeam: match.homeTeam,
+          awayTeam: match.awayTeam,
+          league: match.league,
+          country: match.country,
+          result: { home: match.result!.home!, away: match.result!.away! },
+        },
+        prediction,
+      };
+      changed = true;
+    }
+
+    if (!changed) return;
+    try {
+      localStorage.setItem(historyKey, JSON.stringify(store));
+    } catch {}
+  }, [filteredMatches, predictionByMatchId, apiSource]);
 
   const winnerPerformance = useMemo(() => {
     const finished = filteredMatches.filter(
@@ -881,6 +1022,10 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
         onLeagueChange={setSelectedLeague}
         countries={countries}
         leagues={leagues}
+        selectedStatus={selectedStatus}
+        onStatusChange={setSelectedStatus}
+        groupMode={groupMode}
+        onGroupModeChange={setGroupMode}
       />
 
       <div className="p-6">
@@ -963,7 +1108,7 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
         </div>
 
         {/* Lista de partidas agrupadas */}
-        {Object.keys(groupedMatches).length === 0 ? (
+        {groupedMatches.length === 0 ? (
           <div className="text-center py-12 bg-white rounded-lg border border-gray-200">
             <TrendingUp className="w-12 h-12 text-gray-400 mx-auto mb-4" />
             <h3 className="text-lg font-semibold text-gray-900 mb-2">
@@ -975,7 +1120,7 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
           </div>
         ) : (
           <div className="space-y-8">
-            {Object.entries(groupedMatches).map(([leagueKey, matches]) => (
+            {groupedMatches.map(([leagueKey, matches]) => (
               <div key={leagueKey}>
                 <h2 className="text-xl font-bold text-gray-900 mb-4 flex items-center gap-2">
                   <TrendingUp className="w-5 h-5 text-blue-600" />
@@ -997,6 +1142,7 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
                         onViewDetails={handleViewDetails}
                         homeCrest={match.homeCrest}
                         awayCrest={match.awayCrest}
+                        footballMatch={apiSource !== 'mock' ? realMatchById[match.id] : undefined}
                         isFavorite={favoriteMatchIds.includes(match.id)}
                         onToggleFavorite={toggleFavoriteMatch}
                       />

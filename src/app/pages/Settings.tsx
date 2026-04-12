@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Settings as SettingsIcon, Key, CheckCircle, XCircle, Loader2 } from 'lucide-react';
+import { Settings as SettingsIcon, Key, CheckCircle, XCircle, Loader2, Trophy, Search } from 'lucide-react';
 import { Card } from '../components/ui/card';
 import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
@@ -14,8 +14,10 @@ import {
   ApiConfig
 } from '../services/apiConfig';
 import { toast } from 'sonner';
+import { ApiFootballService, ApiFootballLeague } from '../services/apiFootballService';
 
 export default function Settings() {
+  const [tab, setTab] = useState<'apis' | 'competitions'>('apis');
   const [config, setConfig] = useState<ApiConfig>({
     footballDataApiKey: '',
     apiFootballKey: '',
@@ -23,12 +25,16 @@ export default function Settings() {
     kaggleUsername: '',
     kaggleApiKey: '',
     agentTrainingEnabled: false,
+    apiFootballDisabledLeagueIds: [],
   });
   const [isValidating, setIsValidating] = useState(false);
   const [validationStatus, setValidationStatus] = useState<'idle' | 'valid' | 'invalid'>('idle');
   const [isValidatingApiFootball, setIsValidatingApiFootball] = useState(false);
   const [validationStatusApiFootball, setValidationStatusApiFootball] = useState<'idle' | 'valid' | 'invalid'>('idle');
   const [isSaving, setIsSaving] = useState(false);
+  const [leagues, setLeagues] = useState<ApiFootballLeague[]>([]);
+  const [isLoadingLeagues, setIsLoadingLeagues] = useState(false);
+  const [leagueSearch, setLeagueSearch] = useState('');
 
   useEffect(() => {
     const loaded = loadApiConfig();
@@ -42,6 +48,52 @@ export default function Settings() {
       }
     }
   }, []);
+
+  useEffect(() => {
+    if (tab !== 'competitions') return;
+    if (!config.apiFootballKey?.trim()) return;
+
+    const cacheKey = 'apiFootball_leagues_cache_v1';
+    const maxAgeMs = 1000 * 60 * 60 * 24;
+    const cached = (() => {
+      try {
+        const raw = localStorage.getItem(cacheKey);
+        if (!raw) return null;
+        const parsed = JSON.parse(raw) as { fetchedAt: string; items: ApiFootballLeague[] };
+        if (!parsed?.fetchedAt || !Array.isArray(parsed.items)) return null;
+        const age = Date.now() - new Date(parsed.fetchedAt).getTime();
+        return { ...parsed, isFresh: age >= 0 && age < maxAgeMs };
+      } catch {
+        return null;
+      }
+    })();
+
+    if (cached?.isFresh) {
+      setLeagues(cached.items);
+      return;
+    }
+
+    void (async () => {
+      setIsLoadingLeagues(true);
+      try {
+        const service = new ApiFootballService(config.apiFootballKey.trim());
+        const items = await service.getLeaguesCatalog({ current: true });
+        items.sort((a, b) => {
+          const c = a.country.localeCompare(b.country);
+          if (c !== 0) return c;
+          return a.name.localeCompare(b.name);
+        });
+        setLeagues(items);
+        try {
+          localStorage.setItem(cacheKey, JSON.stringify({ fetchedAt: new Date().toISOString(), items }));
+        } catch {}
+      } catch {
+        toast.error('Erro ao carregar campeonatos da API-Football');
+      } finally {
+        setIsLoadingLeagues(false);
+      }
+    })();
+  }, [tab, config.apiFootballKey]);
 
   const handleValidateApiKey = async () => {
     if (!config.footballDataApiKey.trim()) {
@@ -135,7 +187,175 @@ export default function Settings() {
           </p>
         </div>
 
+        <div className="flex gap-2 mb-6">
+          <Button variant={tab === 'apis' ? 'default' : 'outline'} onClick={() => setTab('apis')}>
+            APIs
+          </Button>
+          <Button variant={tab === 'competitions' ? 'default' : 'outline'} onClick={() => setTab('competitions')}>
+            <Trophy className="w-4 h-4 mr-2" />
+            Campeonatos
+          </Button>
+        </div>
+
+        {tab === 'competitions' && (
+          <div className="space-y-6">
+            <Card className="p-6">
+              <div className="flex items-start justify-between gap-4 mb-4">
+                <div>
+                  <h2 className="text-xl font-bold flex items-center gap-2">
+                    <Trophy className="w-5 h-5 text-orange-600" />
+                    Campeonatos (API-Football)
+                  </h2>
+                  <p className="text-sm text-gray-600">
+                    Ative/desative competições usadas no dia a dia. O sistema filtra os jogos vindos da API-Football.
+                  </p>
+                </div>
+                <Button
+                  variant="outline"
+                  disabled={!config.apiFootballKey?.trim() || isLoadingLeagues}
+                  onClick={async () => {
+                    if (!config.apiFootballKey?.trim()) return;
+                    setIsLoadingLeagues(true);
+                    try {
+                      const service = new ApiFootballService(config.apiFootballKey.trim());
+                      const items = await service.getLeaguesCatalog({ current: true });
+                      items.sort((a, b) => {
+                        const c = a.country.localeCompare(b.country);
+                        if (c !== 0) return c;
+                        return a.name.localeCompare(b.name);
+                      });
+                      setLeagues(items);
+                      try {
+                        localStorage.setItem('apiFootball_leagues_cache_v1', JSON.stringify({ fetchedAt: new Date().toISOString(), items }));
+                      } catch {}
+                      toast.success('Lista de campeonatos atualizada');
+                    } catch {
+                      toast.error('Erro ao atualizar lista de campeonatos');
+                    } finally {
+                      setIsLoadingLeagues(false);
+                    }
+                  }}
+                >
+                  {isLoadingLeagues ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : null}
+                  Atualizar lista
+                </Button>
+              </div>
+
+              {!config.apiFootballKey?.trim() ? (
+                <div className="bg-orange-50 border border-orange-200 rounded-lg p-4 text-sm text-orange-800">
+                  Configure e valide sua API key da API-Football para listar os campeonatos.
+                </div>
+              ) : (
+                <>
+                  <div className="flex flex-wrap items-center gap-3 mb-4">
+                    <div className="flex-1 min-w-[240px]">
+                      <Label htmlFor="leagueSearch">Buscar campeonato</Label>
+                      <div className="relative mt-2">
+                        <Search className="w-4 h-4 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                        <Input
+                          id="leagueSearch"
+                          placeholder="Ex: Premier League, Copa do Brasil..."
+                          value={leagueSearch}
+                          onChange={(e) => setLeagueSearch(e.target.value)}
+                          className="pl-9"
+                        />
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Button
+                        variant="outline"
+                        onClick={() => {
+                          const allIds = leagues.map((l) => l.id);
+                          setConfig({ ...config, apiFootballDisabledLeagueIds: allIds });
+                        }}
+                        disabled={leagues.length === 0}
+                      >
+                        Desativar todos
+                      </Button>
+                      <Button
+                        onClick={() => setConfig({ ...config, apiFootballDisabledLeagueIds: [] })}
+                        disabled={leagues.length === 0}
+                      >
+                        Ativar todos
+                      </Button>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-3 mb-4">
+                    <Badge className="bg-green-100 text-green-800 border-green-300">
+                      Ativos: {leagues.length - (config.apiFootballDisabledLeagueIds?.length ?? 0)}
+                    </Badge>
+                    <Badge className="bg-gray-100 text-gray-800 border-gray-300">
+                      Desativados: {config.apiFootballDisabledLeagueIds?.length ?? 0}
+                    </Badge>
+                  </div>
+
+                  <div className="space-y-3 max-h-[520px] overflow-auto pr-1">
+                    {leagues
+                      .filter((l) => {
+                        const q = leagueSearch.trim().toLowerCase();
+                        if (!q) return true;
+                        return `${l.name} ${l.country} ${l.type}`.toLowerCase().includes(q);
+                      })
+                      .map((l) => {
+                        const disabledIds = config.apiFootballDisabledLeagueIds ?? [];
+                        const isActive = !disabledIds.includes(l.id);
+                        return (
+                          <div key={l.id} className="flex items-center justify-between gap-3 p-3 bg-white border rounded-lg">
+                            <div className="min-w-0">
+                              <div className="font-semibold text-gray-900 truncate">{l.name}</div>
+                              <div className="text-xs text-gray-600 truncate">
+                                {l.country} • {l.type} • temporada {l.season}
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-3 shrink-0">
+                              <Badge
+                                className={
+                                  isActive
+                                    ? 'bg-green-100 text-green-800 border-green-300'
+                                    : 'bg-gray-100 text-gray-800 border-gray-300'
+                                }
+                              >
+                                {isActive ? 'Ativo' : 'Desativado'}
+                              </Badge>
+                              <Switch
+                                checked={isActive}
+                                onCheckedChange={(checked) => {
+                                  const current = new Set(config.apiFootballDisabledLeagueIds ?? []);
+                                  if (checked) current.delete(l.id);
+                                  else current.add(l.id);
+                                  setConfig({ ...config, apiFootballDisabledLeagueIds: Array.from(current) });
+                                }}
+                              />
+                            </div>
+                          </div>
+                        );
+                      })}
+                  </div>
+
+                  <div className="mt-4 flex justify-end gap-3">
+                    <Button variant="outline" onClick={() => window.location.reload()}>
+                      Cancelar
+                    </Button>
+                    <Button onClick={handleSave} disabled={isSaving} className="bg-blue-600 hover:bg-blue-700">
+                      {isSaving ? (
+                        <>
+                          <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                          Salvando...
+                        </>
+                      ) : (
+                        'Salvar Configurações'
+                      )}
+                    </Button>
+                  </div>
+                </>
+              )}
+            </Card>
+          </div>
+        )}
+
         {/* API Configuration */}
+        {tab === 'apis' && (
         <div className="space-y-6">
           {/* Football-data.org API */}
           <Card className="p-6">
@@ -549,6 +769,7 @@ export default function Settings() {
             </Button>
           </div>
         </div>
+        )}
       </div>
     </div>
   );

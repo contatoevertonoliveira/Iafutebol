@@ -118,7 +118,70 @@ const DEFAULT_AGENT_CONFIGS: AgentTrainingConfig[] = [
     batchSize: 256,
     learningRate: 0.05,
   },
+  {
+    agentId: 'goalsoverunder',
+    name: 'GoalLine',
+    maxEpochs: 180,
+    checkpointInterval: 10,
+    earlyStoppingPatience: 18,
+    minImprovement: 0.001,
+    batchSize: 64,
+    learningRate: 0.015,
+  },
+  {
+    agentId: 'correctscore',
+    name: 'ScoreOracle',
+    maxEpochs: 220,
+    checkpointInterval: 10,
+    earlyStoppingPatience: 22,
+    minImprovement: 0.001,
+    batchSize: 32,
+    learningRate: 0.012,
+  },
 ];
+
+export function getTrainingAgentConfigs(): AgentTrainingConfig[] {
+  return DEFAULT_AGENT_CONFIGS.slice();
+}
+
+function readLocalTrainingSampleCountForAgent(agentId: string): number {
+  const agentNameById: Record<string, string> = {
+    statsmaster: 'StatsMaster',
+    formanalyzer: 'FormAnalyzer',
+    h2hexpert: 'H2H Expert',
+    deeppredictor: 'DeepPredictor',
+    ensemblemaster: 'EnsembleMaster',
+    goalsoverunder: 'GoalLine',
+    correctscore: 'ScoreOracle',
+  };
+
+  const agentName = agentNameById[agentId];
+  if (!agentName) return 0;
+
+  const today = new Date().toISOString().slice(0, 10);
+
+  try {
+    const raw = localStorage.getItem('training_samples_v1');
+    if (!raw) return 0;
+    const parsed = JSON.parse(raw) as { version: number; items: Record<string, any> };
+    if (!parsed || parsed.version !== 1 || !parsed.items) return 0;
+    const items = Object.values(parsed.items);
+
+    let count = 0;
+    for (const s of items) {
+      if (!s || typeof s !== 'object') continue;
+      if (typeof s.day !== 'string') continue;
+      if (s.day >= today) continue;
+      const preds = Array.isArray(s.agentPredictions) ? s.agentPredictions : [];
+      if (preds.some((p: any) => p && p.agentName === agentName)) {
+        count += 1;
+      }
+    }
+    return count;
+  } catch {
+    return 0;
+  }
+}
 
 // Configuração padrão de notificações
 const DEFAULT_NOTIFICATION_CONFIG: NotificationConfig = {
@@ -616,7 +679,9 @@ export class TrainingWorker {
     // Em produção, isso seria calculado com dados reais de validação
     
     const baseAccuracy = 65; // Accuracy inicial
-    const maxAccuracy = 85;  // Accuracy máxima possível
+    const sampleCount = readLocalTrainingSampleCountForAgent(config.agentId);
+    const dataBoost = Math.min(10, Math.log1p(sampleCount) * 1.6);
+    const maxAccuracy = 85 + dataBoost;  // Accuracy máxima possível
     const learningRate = config.learningRate;
     
     // Curva de aprendizado simulada

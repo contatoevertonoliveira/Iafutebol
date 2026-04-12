@@ -20,6 +20,26 @@ export interface ApiFootballLeague {
   season: number;
 }
 
+export interface ApiFootballLeagueCatalogItem {
+  league: {
+    id: number;
+    name: string;
+    type: string;
+    logo: string;
+  };
+  country: {
+    name: string;
+    code: string | null;
+    flag: string | null;
+  };
+  seasons: Array<{
+    year: number;
+    start: string;
+    end: string;
+    current: boolean;
+  }>;
+}
+
 export interface ApiFootballFixture {
   id: number;
   referee: string | null;
@@ -194,6 +214,39 @@ export class ApiFootballService {
     if (params?.type) queryParams.type = params.type;
 
     return this.fetch<ApiFootballLeague[]>('/leagues', queryParams);
+  }
+
+  async getLeaguesCatalog(params?: {
+    country?: string;
+    season?: number;
+    type?: string;
+    current?: boolean;
+    search?: string;
+  }): Promise<ApiFootballLeague[]> {
+    const queryParams: Record<string, string> = {};
+    if (params?.country) queryParams.country = params.country;
+    if (params?.season) queryParams.season = params.season.toString();
+    if (params?.type) queryParams.type = params.type;
+    if (params?.current !== undefined) queryParams.current = params.current ? 'true' : 'false';
+    if (params?.search) queryParams.search = params.search;
+
+    const items = await this.fetch<ApiFootballLeagueCatalogItem[]>('/leagues', queryParams);
+    const mapped = items
+      .map((i) => {
+        const season = i.seasons?.find((s) => s.current)?.year ?? i.seasons?.[i.seasons.length - 1]?.year ?? new Date().getFullYear();
+        return {
+          id: i.league.id,
+          name: i.league.name,
+          type: i.league.type,
+          logo: i.league.logo,
+          country: i.country?.name ?? 'Unknown',
+          flag: i.country?.flag ?? '',
+          season,
+        } satisfies ApiFootballLeague;
+      })
+      .filter((l) => Number.isFinite(l.id));
+
+    return mapped;
   }
 
   // Obter times

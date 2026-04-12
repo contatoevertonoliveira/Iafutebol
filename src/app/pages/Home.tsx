@@ -10,6 +10,8 @@ export default function Home() {
   const [selectedDate, setSelectedDate] = useState('all');
   const [selectedCountry, setSelectedCountry] = useState('all');
   const [selectedLeague, setSelectedLeague] = useState('all');
+  const [selectedStatus, setSelectedStatus] = useState<'all' | 'live' | 'upcoming' | 'finished'>('all');
+  const [groupMode, setGroupMode] = useState<'leagues' | 'championships'>('leagues');
   const [selectedMatchId, setSelectedMatchId] = useState<string | null>(null);
   const zRef = useRef(70);
   const [detailsZ, setDetailsZ] = useState(60);
@@ -53,24 +55,63 @@ export default function Home() {
         return false;
       }
 
+      if (selectedStatus !== 'all') {
+        if (selectedStatus === 'live' && match.status !== 'live') return false;
+        if (selectedStatus === 'upcoming' && match.status !== 'scheduled') return false;
+        if (selectedStatus === 'finished' && match.status !== 'finished') return false;
+      }
+
       return true;
     });
-  }, [selectedDate, selectedCountry, selectedLeague]);
+  }, [selectedDate, selectedCountry, selectedLeague, selectedStatus]);
 
   // Agrupar partidas por liga
   const groupedMatches = useMemo(() => {
-    const groups: { [key: string]: Match[] } = {};
+    type MatchStatus = 'scheduled' | 'live' | 'finished';
+    const statusRank = (status: MatchStatus) => (status === 'live' ? 0 : status === 'scheduled' ? 1 : 2);
+    const groups: Record<string, Match[]> = {};
     
     filteredMatches.forEach((match) => {
-      const key = `${match.country} - ${match.league}`;
-      if (!groups[key]) {
-        groups[key] = [];
-      }
+      const key = groupMode === 'championships' ? match.league : `${match.country} - ${match.league}`;
+      if (!groups[key]) groups[key] = [];
       groups[key].push(match);
     });
 
-    return groups;
-  }, [filteredMatches]);
+    const sortMatches = (a: Match, b: Match) => {
+      const rankA = statusRank(a.status as MatchStatus);
+      const rankB = statusRank(b.status as MatchStatus);
+      if (rankA !== rankB) return rankA - rankB;
+
+      const timeA = new Date(a.date).getTime();
+      const timeB = new Date(b.date).getTime();
+
+      if (rankA === 2) return timeB - timeA;
+      return timeA - timeB;
+    };
+
+    const entries = Object.entries(groups).map(([key, matches]) => {
+      const sorted = [...matches].sort(sortMatches);
+      return [key, sorted] as const;
+    });
+
+    const groupBestRank = (matches: Match[]) => Math.min(...matches.map((m) => statusRank(m.status as MatchStatus)));
+    const groupBestTime = (matches: Match[]) => {
+      const best = groupBestRank(matches);
+      const times = matches
+        .filter((m) => statusRank(m.status as MatchStatus) === best)
+        .map((m) => new Date(m.date).getTime());
+      return times.length === 0 ? Number.MAX_SAFE_INTEGER : Math.min(...times);
+    };
+
+    entries.sort((a, b) => {
+      const rankA = groupBestRank(a[1]);
+      const rankB = groupBestRank(b[1]);
+      if (rankA !== rankB) return rankA - rankB;
+      return groupBestTime(a[1]) - groupBestTime(b[1]);
+    });
+
+    return entries;
+  }, [filteredMatches, groupMode]);
 
   const selectedMatch = selectedMatchId 
     ? mockMatches.find(m => m.id === selectedMatchId) 
@@ -90,6 +131,10 @@ export default function Home() {
         onLeagueChange={setSelectedLeague}
         countries={countries}
         leagues={leagues}
+        selectedStatus={selectedStatus}
+        onStatusChange={setSelectedStatus}
+        groupMode={groupMode}
+        onGroupModeChange={setGroupMode}
       />
 
       <div className="p-6">
@@ -133,7 +178,7 @@ export default function Home() {
         </div>
 
         {/* Lista de partidas agrupadas */}
-        {Object.keys(groupedMatches).length === 0 ? (
+        {groupedMatches.length === 0 ? (
           <div className="text-center py-12 bg-white rounded-lg border border-gray-200">
             <TrendingUp className="w-12 h-12 text-gray-400 mx-auto mb-4" />
             <h3 className="text-lg font-semibold text-gray-900 mb-2">
@@ -145,7 +190,7 @@ export default function Home() {
           </div>
         ) : (
           <div className="space-y-8">
-            {Object.entries(groupedMatches).map(([leagueKey, matches]) => (
+            {groupedMatches.map(([leagueKey, matches]) => (
               <div key={leagueKey}>
                 <h2 className="text-xl font-bold text-gray-900 mb-4 flex items-center gap-2">
                   <TrendingUp className="w-5 h-5 text-blue-600" />

@@ -4,6 +4,7 @@ import Home from './pages/HomeEnhanced';
 import Settings from './pages/Settings';
 import AIAgentsPage from './pages/AIAgentsPage';
 import TrainingDashboard from './pages/TrainingDashboard';
+import DailyOverviewPage from './pages/DailyOverviewPage';
 
 function TodayPage() {
   return <Home initialSelectedDate="today" />;
@@ -43,6 +44,7 @@ export const router = createBrowserRouter([
       { path: 'today', Component: TodayPage },
       { path: 'week', Component: WeekPage },
       { path: 'month', Component: MonthPage },
+      { path: 'panorama', Component: DailyOverviewPage },
       { path: 'leagues', Component: LeaguesPage },
       { path: 'favorites', Component: FavoritesPage },
       { path: 'agents', Component: AIAgentsPage },
