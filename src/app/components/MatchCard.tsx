@@ -1,9 +1,9 @@
 import { Match, Prediction } from '../data/mockData';
-import { Calendar, Clock, TrendingUp, Star, Loader2 } from 'lucide-react';
+import { Calendar, Clock, TrendingUp, Star, Loader2, RefreshCw } from 'lucide-react';
 import { Badge } from './ui/badge';
 import { Card } from './ui/card';
 import { TeamLogo } from './TeamLogo';
-import { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { AgentEnsemble, getDynamicAgentProfiles } from '../services/aiAgents';
 import type { FootballMatch } from '../services/footballDataService';
 
@@ -24,6 +24,7 @@ interface MatchCardProps {
       away: number | null;
     };
     liveElapsed?: number | null;
+    liveStatusShort?: string;
   };
   prediction: Prediction;
   onViewDetails: (matchId: string) => void;
@@ -32,6 +33,9 @@ interface MatchCardProps {
   footballMatch?: FootballMatch;
   isFavorite?: boolean;
   onToggleFavorite?: (matchId: string) => void;
+  onRefreshMatch?: (matchId: string) => void;
+  isRefreshing?: boolean;
+  lastUpdatedAt?: Date | null;
 }
 
 export function MatchCard({
@@ -43,12 +47,63 @@ export function MatchCard({
   footballMatch,
   isFavorite = false,
   onToggleFavorite,
+  onRefreshMatch,
+  isRefreshing = false,
+  lastUpdatedAt,
 }: MatchCardProps) {
   const [showResult, setShowResult] = useState(false);
   const isFinished = match.status === 'finished';
   const isLive = match.status === 'live';
   const [agentMarketSummaries, setAgentMarketSummaries] = useState<AgentMarketSummary[] | null>(null);
   const [isLoadingAgentMarkets, setIsLoadingAgentMarkets] = useState(false);
+  const [tick, setTick] = useState(0);
+
+  const resolvedLive = useMemo(() => {
+    const rawElapsed = match.liveElapsed ?? footballMatch?.live?.elapsed ?? null;
+    const elapsed =
+      typeof rawElapsed === 'number'
+        ? rawElapsed
+        : typeof rawElapsed === 'string'
+          ? Number(rawElapsed)
+          : null;
+
+    const statusShort =
+      match.liveStatusShort ??
+      footballMatch?.live?.statusShort ??
+      (typeof footballMatch?.status === 'string' ? footballMatch.status : undefined);
+
+    return {
+      elapsed: Number.isFinite(elapsed) ? (elapsed as number) : null,
+      statusShort: typeof statusShort === 'string' ? statusShort : undefined,
+    };
+  }, [footballMatch?.live?.elapsed, footballMatch?.live?.statusShort, footballMatch?.status, match.liveElapsed, match.liveStatusShort]);
+
+  useEffect(() => {
+    if (!isLive) return;
+    const id = window.setInterval(() => setTick((v) => v + 1), 1000);
+    return () => window.clearInterval(id);
+  }, [isLive]);
+
+  const liveClockLabel = useMemo(() => {
+    if (!isLive) return null;
+    if (typeof resolvedLive.elapsed !== 'number') return null;
+
+    const baseSeconds = Math.max(0, Math.floor(resolvedLive.elapsed) * 60);
+    const last = lastUpdatedAt ? lastUpdatedAt.getTime() : Date.now();
+    const deltaSeconds = Math.max(0, Math.floor((Date.now() - last) / 1000));
+    const totalSeconds = baseSeconds + deltaSeconds;
+
+    const mm = Math.floor(totalSeconds / 60);
+    const ss = totalSeconds % 60;
+    const mmss = `${String(mm).padStart(2, '0')}:${String(ss).padStart(2, '0')}`;
+
+    const short = String(resolvedLive.statusShort || '').toUpperCase();
+    if (short === '1H') return `1º Tempo - ${mmss}`;
+    if (short === '2H') return `2º Tempo - ${mmss}`;
+    if (short === 'ET') return `Prorrogação - ${mmss}`;
+    if (short === 'HT') return 'Intervalo';
+    return `Ao vivo - ${mmss}`;
+  }, [isLive, resolvedLive.elapsed, resolvedLive.statusShort, lastUpdatedAt, tick]);
 
   const getPredictionLabel = (pred: 'home' | 'away' | 'draw') => {
     if (pred === 'home') return match.homeTeam;
@@ -224,6 +279,20 @@ export function MatchCard({
           <Badge variant="secondary" className="bg-white/20 text-white border-0">
             {match.country}
           </Badge>
+          {onRefreshMatch && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                onRefreshMatch(match.id);
+              }}
+              disabled={isRefreshing}
+              className={`p-1 rounded-md hover:bg-white/20 transition-colors ${isRefreshing ? 'opacity-70 cursor-not-allowed' : ''}`}
+              aria-label="Atualizar jogo"
+              title="Atualizar jogo"
+            >
+              <RefreshCw className={`w-4 h-4 ${isRefreshing ? 'animate-spin' : ''}`} />
+            </button>
+          )}
           <button
             onClick={() => onToggleFavorite?.(match.id)}
             className="p-1 rounded-md hover:bg-white/20 transition-colors"
@@ -243,8 +312,8 @@ export function MatchCard({
           </div>
           <div className="flex items-center gap-2 text-sm text-gray-600">
             <Clock className="w-4 h-4" />
-            {isLive && typeof match.liveElapsed === 'number' ? (
-              <span>{match.liveElapsed}'</span>
+            {liveClockLabel ? (
+              <span>{liveClockLabel}</span>
             ) : (
               <span>{match.time}</span>
             )}

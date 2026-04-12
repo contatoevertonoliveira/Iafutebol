@@ -30,6 +30,7 @@ type DisplayMatch = Match & {
     away: number | null;
   };
   liveElapsed?: number | null;
+  liveStatusShort?: string;
 };
 
 type HomeEnhancedProps = {
@@ -50,6 +51,7 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
   const [isLoadingAgents, setIsLoadingAgents] = useState(false);
   const [realMatches, setRealMatches] = useState<FootballMatch[]>([]);
   const [isLoadingMatches, setIsLoadingMatches] = useState(false);
+  const [refreshingMatchIds, setRefreshingMatchIds] = useState<Set<string>>(() => new Set());
   const [apiSource, setApiSource] = useState<ApiSource>('mock');
   const [realPredictions, setRealPredictions] = useState<Record<string, Prediction>>({});
   const [lastUpdatedAt, setLastUpdatedAt] = useState<Date | null>(null);
@@ -677,6 +679,7 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
             away: typeof fullTime?.away === 'number' ? fullTime.away : null,
           },
           liveElapsed: footballMatch.live?.elapsed ?? null,
+          liveStatusShort: footballMatch.live?.statusShort ?? undefined,
         };
       }) : 
       mockMatches.map((m) => ({ ...m, homeCrest: '', awayCrest: '' }));
@@ -1011,6 +1014,109 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
     loadMatchesWithFallback(config);
   };
 
+  const updateCacheMatch = (matchId: string, next: FootballMatch | null) => {
+    try {
+      const { dateFrom, dateTo } = getDateRange();
+      const raw = localStorage.getItem(cacheKey);
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as {
+        version: number;
+        generatedAt: string;
+        dateFrom: string;
+        dateTo: string;
+        apiSource: ApiSource;
+        matches: FootballMatch[];
+        predictions: Record<string, Prediction>;
+      };
+      if (parsed.version !== 1) return;
+      if (parsed.dateFrom !== dateFrom || parsed.dateTo !== dateTo) return;
+      if (!Array.isArray(parsed.matches)) return;
+
+      const idx = parsed.matches.findIndex((m) => m.id.toString() === matchId);
+      let matches = parsed.matches;
+      if (next === null) {
+        if (idx === -1) return;
+        matches = parsed.matches.filter((m) => m.id.toString() !== matchId);
+      } else if (idx !== -1) {
+        matches = [...parsed.matches];
+        matches[idx] = next;
+      } else {
+        matches = [...parsed.matches, next];
+      }
+
+      localStorage.setItem(
+        cacheKey,
+        JSON.stringify({
+          ...parsed,
+          generatedAt: new Date().toISOString(),
+          matches,
+        }),
+      );
+    } catch {}
+  };
+
+  const handleRefreshMatch = async (matchId: string) => {
+    if (apiSource === 'mock') return;
+    if (refreshingMatchIds.has(matchId)) return;
+    const config = loadApiConfig();
+
+    setRefreshingMatchIds((prev) => {
+      const next = new Set(prev);
+      next.add(matchId);
+      return next;
+    });
+
+    try {
+      if (apiSource === 'api-football') {
+        const apiFootballKey = config?.apiFootballKey?.trim();
+        if (!apiFootballKey) throw new Error('API-Football não configurada');
+        const service = new ApiFootballService(apiFootballKey);
+        const fixtures = await service.getFixtures({ fixtureId: Number(matchId), timezone: TIME_ZONE });
+        const fixture = fixtures[0];
+        if (!fixture) throw new Error('Partida não encontrada na API-Football');
+
+        const updated = processCrests([convertApiFootballMatchToFootballMatch(fixture)])[0];
+        const disabled = config?.apiFootballDisabledLeagueIds ?? [];
+
+        if (disabled.includes(updated.competition.id)) {
+          setRealMatches((prev) => prev.filter((m) => m.id.toString() !== matchId));
+          updateCacheMatch(matchId, null);
+          toast.success('Partida removida (campeonato desativado)');
+          return;
+        }
+
+        setRealMatches((prev) => prev.map((m) => (m.id.toString() === matchId ? updated : m)));
+        updateCacheMatch(matchId, updated);
+        setLastUpdatedAt(new Date());
+        toast.success('Partida atualizada');
+        return;
+      }
+
+      if (apiSource === 'football-data') {
+        const apiKey = config?.footballDataApiKey?.trim();
+        if (!apiKey) throw new Error('Football-data.org não configurada');
+        const service = new FootballDataService(apiKey);
+        const updated = processCrests([await service.getMatchById(Number(matchId))])[0];
+
+        setRealMatches((prev) => prev.map((m) => (m.id.toString() === matchId ? updated : m)));
+        updateCacheMatch(matchId, updated);
+        setLastUpdatedAt(new Date());
+        toast.success('Partida atualizada');
+        return;
+      }
+
+      toast.error('Atualização por jogo não disponível para esta fonte');
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Erro ao atualizar partida');
+    } finally {
+      setRefreshingMatchIds((prev) => {
+        const next = new Set(prev);
+        next.delete(matchId);
+        return next;
+      });
+    }
+  };
+
   return (
     <div className="min-h-screen bg-gray-50">
       <FilterBar
@@ -1143,6 +1249,9 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
                         homeCrest={match.homeCrest}
                         awayCrest={match.awayCrest}
                         footballMatch={apiSource !== 'mock' ? realMatchById[match.id] : undefined}
+                        onRefreshMatch={handleRefreshMatch}
+                        isRefreshing={refreshingMatchIds.has(match.id)}
+                        lastUpdatedAt={lastUpdatedAt}
                         isFavorite={favoriteMatchIds.includes(match.id)}
                         onToggleFavorite={toggleFavoriteMatch}
                       />

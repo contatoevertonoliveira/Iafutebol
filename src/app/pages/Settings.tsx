@@ -14,7 +14,8 @@ import {
   ApiConfig
 } from '../services/apiConfig';
 import { toast } from 'sonner';
-import { ApiFootballService, ApiFootballLeague } from '../services/apiFootballService';
+import { ApiFootballMatch, ApiFootballService, ApiFootballLeague } from '../services/apiFootballService';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select';
 
 export default function Settings() {
   const [tab, setTab] = useState<'apis' | 'competitions'>('apis');
@@ -35,6 +36,112 @@ export default function Settings() {
   const [leagues, setLeagues] = useState<ApiFootballLeague[]>([]);
   const [isLoadingLeagues, setIsLoadingLeagues] = useState(false);
   const [leagueSearch, setLeagueSearch] = useState('');
+  const [selectedLeagueCountry, setSelectedLeagueCountry] = useState('all');
+  const [countryQuery, setCountryQuery] = useState('');
+  const [leaguesLastSource, setLeaguesLastSource] = useState<'api' | 'fixtures' | 'cache' | 'none'>('none');
+  const [leaguesLastError, setLeaguesLastError] = useState<string>('');
+
+  const derivedLeagues = (() => {
+    try {
+      const raw = localStorage.getItem('matchesCache_v1');
+      if (!raw) return [] as ApiFootballLeague[];
+      const parsed = JSON.parse(raw) as { version: number; apiSource: string; matches: any[] };
+      if (!parsed || parsed.version !== 1) return [] as ApiFootballLeague[];
+      if (parsed.apiSource !== 'api-football') return [] as ApiFootballLeague[];
+      if (!Array.isArray(parsed.matches)) return [] as ApiFootballLeague[];
+
+      const byId = new Map<number, ApiFootballLeague>();
+      const nowYear = new Date().getFullYear();
+
+      for (const m of parsed.matches) {
+        const comp = m?.competition;
+        const area = comp?.area;
+        const id = Number(comp?.id);
+        if (!Number.isFinite(id)) continue;
+        if (byId.has(id)) continue;
+
+        byId.set(id, {
+          id,
+          name: String(comp?.name ?? 'Unknown'),
+          type: 'League',
+          logo: String(comp?.emblem ?? ''),
+          country: String(area?.name ?? 'Unknown'),
+          flag: String(area?.flag ?? ''),
+          season: nowYear,
+        });
+      }
+
+      return Array.from(byId.values()).sort((a, b) => {
+        const c = a.country.localeCompare(b.country);
+        if (c !== 0) return c;
+        return a.name.localeCompare(b.name);
+      });
+    } catch {
+      return [] as ApiFootballLeague[];
+    }
+  })();
+
+  const fetchLeagues = async (opts?: { country?: string }) => {
+    if (!config.apiFootballKey?.trim()) return;
+    setIsLoadingLeagues(true);
+    setLeaguesLastError('');
+    try {
+      const service = new ApiFootballService(config.apiFootballKey.trim());
+      let items = await service.getLeaguesCatalog({ current: true, country: opts?.country });
+      if (items.length === 0) {
+        const seasons = await service.getSeasons().catch(() => []);
+        const latestSeason = seasons.length > 0 ? Math.max(...seasons) : new Date().getFullYear();
+        items = await service.getLeaguesCatalog({ season: latestSeason, country: opts?.country });
+      }
+      if (items.length === 0) {
+        items = await service.getLeaguesCatalog({ country: opts?.country });
+      }
+      if (items.length === 0) {
+        const today = new Intl.DateTimeFormat('en-CA', {
+          timeZone: 'America/Sao_Paulo',
+          year: 'numeric',
+          month: '2-digit',
+          day: '2-digit',
+        }).format(new Date());
+        const fixtures = await service.getFixtures({ date: today, timezone: 'America/Sao_Paulo' });
+        const byId = new Map<number, ApiFootballLeague>();
+        for (const f of fixtures as ApiFootballMatch[]) {
+          const l = f?.league;
+          if (!l || !Number.isFinite(l.id)) continue;
+          if (byId.has(l.id)) continue;
+          byId.set(l.id, {
+            id: l.id,
+            name: l.name,
+            type: l.type,
+            logo: l.logo,
+            country: l.country,
+            flag: l.flag,
+            season: l.season,
+          });
+        }
+        items = Array.from(byId.values());
+        setLeaguesLastSource('fixtures');
+      } else {
+        setLeaguesLastSource('api');
+      }
+      items.sort((a, b) => {
+        const c = a.country.localeCompare(b.country);
+        if (c !== 0) return c;
+        return a.name.localeCompare(b.name);
+      });
+      setLeagues(items);
+      try {
+        localStorage.setItem('apiFootball_leagues_cache_v1', JSON.stringify({ fetchedAt: new Date().toISOString(), items }));
+      } catch {}
+      toast.success(items.length > 0 ? `Lista atualizada (${items.length})` : 'Lista atualizada (0)');
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Erro ao carregar campeonatos da API-Football';
+      setLeaguesLastError(msg);
+      toast.error(msg);
+    } finally {
+      setIsLoadingLeagues(false);
+    }
+  };
 
   useEffect(() => {
     const loaded = loadApiConfig();
@@ -73,26 +180,7 @@ export default function Settings() {
       return;
     }
 
-    void (async () => {
-      setIsLoadingLeagues(true);
-      try {
-        const service = new ApiFootballService(config.apiFootballKey.trim());
-        const items = await service.getLeaguesCatalog({ current: true });
-        items.sort((a, b) => {
-          const c = a.country.localeCompare(b.country);
-          if (c !== 0) return c;
-          return a.name.localeCompare(b.name);
-        });
-        setLeagues(items);
-        try {
-          localStorage.setItem(cacheKey, JSON.stringify({ fetchedAt: new Date().toISOString(), items }));
-        } catch {}
-      } catch {
-        toast.error('Erro ao carregar campeonatos da API-Football');
-      } finally {
-        setIsLoadingLeagues(false);
-      }
-    })();
+    void fetchLeagues();
   }, [tab, config.apiFootballKey]);
 
   const handleValidateApiKey = async () => {
@@ -214,26 +302,7 @@ export default function Settings() {
                   variant="outline"
                   disabled={!config.apiFootballKey?.trim() || isLoadingLeagues}
                   onClick={async () => {
-                    if (!config.apiFootballKey?.trim()) return;
-                    setIsLoadingLeagues(true);
-                    try {
-                      const service = new ApiFootballService(config.apiFootballKey.trim());
-                      const items = await service.getLeaguesCatalog({ current: true });
-                      items.sort((a, b) => {
-                        const c = a.country.localeCompare(b.country);
-                        if (c !== 0) return c;
-                        return a.name.localeCompare(b.name);
-                      });
-                      setLeagues(items);
-                      try {
-                        localStorage.setItem('apiFootball_leagues_cache_v1', JSON.stringify({ fetchedAt: new Date().toISOString(), items }));
-                      } catch {}
-                      toast.success('Lista de campeonatos atualizada');
-                    } catch {
-                      toast.error('Erro ao atualizar lista de campeonatos');
-                    } finally {
-                      setIsLoadingLeagues(false);
-                    }
+                    await fetchLeagues();
                   }}
                 >
                   {isLoadingLeagues ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : null}
@@ -245,8 +314,78 @@ export default function Settings() {
                 <div className="bg-orange-50 border border-orange-200 rounded-lg p-4 text-sm text-orange-800">
                   Configure e valide sua API key da API-Football para listar os campeonatos.
                 </div>
+              ) : isLoadingLeagues ? (
+                <div className="bg-white border border-gray-200 rounded-lg p-6 flex items-center gap-3 text-gray-700">
+                  <Loader2 className="w-5 h-5 animate-spin" />
+                  Carregando campeonatos...
+                </div>
               ) : (
                 <>
+                  {leagues.length === 0 && (
+                    <div className="bg-white border border-gray-200 rounded-lg p-4 text-sm text-gray-700 mb-4">
+                      Nenhum campeonato retornado pelo endpoint /leagues. A lista abaixo usa as competições detectadas nos jogos já carregados no dashboard (cache API-Football).
+                    </div>
+                  )}
+                  <div className="grid md:grid-cols-2 gap-4 mb-4">
+                    <div>
+                      <Label htmlFor="countryQuery">Carregar por país (API)</Label>
+                      <div className="flex gap-2 mt-2">
+                        <Input
+                          id="countryQuery"
+                          placeholder="Ex: Brazil, England, Spain"
+                          value={countryQuery}
+                          onChange={(e) => setCountryQuery(e.target.value)}
+                        />
+                        <Button
+                          variant="outline"
+                          disabled={isLoadingLeagues || !countryQuery.trim()}
+                          onClick={async () => {
+                            await fetchLeagues({ country: countryQuery.trim() });
+                            setSelectedLeagueCountry('all');
+                          }}
+                        >
+                          Buscar
+                        </Button>
+                      </div>
+                    </div>
+                    <div className="bg-gray-50 border border-gray-200 rounded-lg p-3 text-xs text-gray-700">
+                      <div>Total API: {leagues.length}</div>
+                      <div>Total cache: {derivedLeagues.length}</div>
+                      <div>
+                        Fonte:{' '}
+                        {leaguesLastSource === 'api'
+                          ? 'API /leagues'
+                          : leaguesLastSource === 'fixtures'
+                            ? 'API /fixtures (derivado)'
+                            : derivedLeagues.length > 0
+                              ? 'Cache dashboard'
+                              : '-'}
+                      </div>
+                      {leaguesLastError && <div className="text-red-700 mt-1">Erro: {leaguesLastError}</div>}
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-3 mb-4">
+                    <div className="min-w-[220px]">
+                      <Label>País</Label>
+                      <Select value={selectedLeagueCountry} onValueChange={setSelectedLeagueCountry}>
+                        <SelectTrigger className="mt-2">
+                          <SelectValue placeholder="Selecione um país" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="all">Todos</SelectItem>
+                          {Array.from(
+                            new Set((leagues.length > 0 ? leagues : derivedLeagues).map((l) => l.country).filter(Boolean)),
+                          )
+                            .sort((a, b) => a.localeCompare(b))
+                            .map((country) => (
+                              <SelectItem key={country} value={country}>
+                                {country}
+                              </SelectItem>
+                            ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </div>
                   <div className="flex flex-wrap items-center gap-3 mb-4">
                     <div className="flex-1 min-w-[240px]">
                       <Label htmlFor="leagueSearch">Buscar campeonato</Label>
@@ -283,20 +422,24 @@ export default function Settings() {
 
                   <div className="flex items-center gap-3 mb-4">
                     <Badge className="bg-green-100 text-green-800 border-green-300">
-                      Ativos: {leagues.length - (config.apiFootballDisabledLeagueIds?.length ?? 0)}
+                      Ativos: {(leagues.length > 0 ? leagues.length : derivedLeagues.length) - (config.apiFootballDisabledLeagueIds?.length ?? 0)}
                     </Badge>
                     <Badge className="bg-gray-100 text-gray-800 border-gray-300">
                       Desativados: {config.apiFootballDisabledLeagueIds?.length ?? 0}
                     </Badge>
+                    <Badge variant="outline">
+                      Total: {leagues.length > 0 ? leagues.length : derivedLeagues.length}
+                    </Badge>
                   </div>
 
                   <div className="space-y-3 max-h-[520px] overflow-auto pr-1">
-                    {leagues
+                    {(leagues.length > 0 ? leagues : derivedLeagues)
                       .filter((l) => {
                         const q = leagueSearch.trim().toLowerCase();
                         if (!q) return true;
                         return `${l.name} ${l.country} ${l.type}`.toLowerCase().includes(q);
                       })
+                      .filter((l) => selectedLeagueCountry === 'all' || l.country === selectedLeagueCountry)
                       .map((l) => {
                         const disabledIds = config.apiFootballDisabledLeagueIds ?? [];
                         const isActive = !disabledIds.includes(l.id);

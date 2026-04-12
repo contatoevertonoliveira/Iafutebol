@@ -187,6 +187,7 @@ export class ApiFootballService {
     from?: string;
     to?: string;
     timezone?: string;
+    fixtureId?: number;
   }): Promise<ApiFootballMatch[]> {
     const queryParams: Record<string, string> = {};
 
@@ -197,6 +198,7 @@ export class ApiFootballService {
     if (params?.from) queryParams.from = params.from;
     if (params?.to) queryParams.to = params.to;
     if (params?.timezone) queryParams.timezone = params.timezone;
+    if (params?.fixtureId) queryParams.id = params.fixtureId.toString();
 
     return this.fetch<ApiFootballMatch[]>('/fixtures', queryParams);
   }
@@ -214,6 +216,10 @@ export class ApiFootballService {
     if (params?.type) queryParams.type = params.type;
 
     return this.fetch<ApiFootballLeague[]>('/leagues', queryParams);
+  }
+
+  async getSeasons(): Promise<number[]> {
+    return this.fetch<number[]>('/leagues/seasons');
   }
 
   async getLeaguesCatalog(params?: {

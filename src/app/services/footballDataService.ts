@@ -121,6 +121,49 @@ export class FootballDataService {
     }
   }
 
+  async getMatchById(matchId: number): Promise<FootballMatch> {
+    const data = await this.fetch<any>(`/matches/${matchId}`);
+
+    const match = data?.match ?? data;
+    return {
+      id: match.id,
+      utcDate: match.utcDate,
+      status: match.status,
+      matchday: match.matchday ?? 0,
+      homeTeam: {
+        id: match.homeTeam.id,
+        name: match.homeTeam.name,
+        shortName: match.homeTeam.shortName ?? match.homeTeam.name,
+        tla: match.homeTeam.tla ?? match.homeTeam.name.substring(0, 3).toUpperCase(),
+        crest: match.homeTeam.crest ?? '',
+      },
+      awayTeam: {
+        id: match.awayTeam.id,
+        name: match.awayTeam.name,
+        shortName: match.awayTeam.shortName ?? match.awayTeam.name,
+        tla: match.awayTeam.tla ?? match.awayTeam.name.substring(0, 3).toUpperCase(),
+        crest: match.awayTeam.crest ?? '',
+      },
+      score: {
+        fullTime: {
+          home: match.score?.fullTime?.home ?? null,
+          away: match.score?.fullTime?.away ?? null,
+        },
+      },
+      competition: {
+        id: match.competition?.id ?? 0,
+        name: match.competition?.name ?? 'Unknown',
+        code: match.competition?.code ?? '',
+        emblem: match.competition?.emblem ?? '',
+        area: {
+          name: match.area?.name ?? match.competition?.area?.name ?? 'Unknown',
+          code: match.area?.code ?? match.competition?.area?.code ?? '',
+          flag: match.area?.flag ?? match.competition?.area?.flag ?? '',
+        },
+      },
+    };
+  }
+
   // Método para gerar dados mock quando a API falha
   private getMockData(endpoint: string, params?: Record<string, string>): any {
     console.log('🎭 Gerando dados mock para:', endpoint);
