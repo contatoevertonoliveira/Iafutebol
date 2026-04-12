@@ -52,11 +52,16 @@ export function MatchCard({
   lastUpdatedAt,
 }: MatchCardProps) {
   const [showResult, setShowResult] = useState(false);
-  const isFinished = match.status === 'finished';
-  const isLive = match.status === 'live';
   const [agentMarketSummaries, setAgentMarketSummaries] = useState<AgentMarketSummary[] | null>(null);
   const [isLoadingAgentMarkets, setIsLoadingAgentMarkets] = useState(false);
   const [tick, setTick] = useState(0);
+
+  const toMatchStatus = (status: string | undefined): 'scheduled' | 'live' | 'finished' => {
+    const normalized = String(status || '').toUpperCase();
+    if (['FINISHED', 'FT', 'AET', 'PEN'].includes(normalized)) return 'finished';
+    if (['IN_PLAY', 'LIVE', '1H', '2H', 'HT', 'ET', 'P'].includes(normalized)) return 'live';
+    return 'scheduled';
+  };
 
   const resolvedLive = useMemo(() => {
     const rawElapsed = match.liveElapsed ?? footballMatch?.live?.elapsed ?? null;
@@ -77,6 +82,17 @@ export function MatchCard({
       statusShort: typeof statusShort === 'string' ? statusShort : undefined,
     };
   }, [footballMatch?.live?.elapsed, footballMatch?.live?.statusShort, footballMatch?.status, match.liveElapsed, match.liveStatusShort]);
+
+  const derivedStatus = useMemo(() => {
+    const fromShort = toMatchStatus(resolvedLive.statusShort);
+    if (fromShort !== 'scheduled') return fromShort;
+    const fromApi = toMatchStatus(footballMatch?.status);
+    if (fromApi !== 'scheduled') return fromApi;
+    return match.status as 'scheduled' | 'live' | 'finished';
+  }, [footballMatch?.status, match.status, resolvedLive.statusShort]);
+
+  const isFinished = derivedStatus === 'finished';
+  const isLive = derivedStatus === 'live';
 
   useEffect(() => {
     if (!isLive) return;
@@ -112,12 +128,12 @@ export function MatchCard({
   };
 
   const resultAvailable =
-    match.status === 'finished' &&
+    isFinished &&
     typeof match.result?.home === 'number' &&
     typeof match.result?.away === 'number';
 
   const liveScoreAvailable =
-    match.status === 'live' &&
+    isLive &&
     typeof match.result?.home === 'number' &&
     typeof match.result?.away === 'number';
 
