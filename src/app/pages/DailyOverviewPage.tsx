@@ -53,20 +53,24 @@ export default function DailyOverviewPage() {
     const raw = String(value || '');
     if (!raw) return new Date(NaN);
     if (/[zZ]$/.test(raw) || /[+-]\d\d:\d\d$/.test(raw)) return new Date(raw);
-    return new Date(`${raw}Z`);
+    return new Date(raw);
   };
 
   const cache = useMemo(() => {
-    const raw = localStorage.getItem('matchesCache_v1');
-    if (!raw) return null;
-    try {
-      const parsed = JSON.parse(raw) as MatchesCacheV1;
-      if (!parsed || parsed.version !== 1) return null;
-      if (!parsed.generatedAt || !parsed.matches || !parsed.predictions) return null;
-      return parsed;
-    } catch {
-      return null;
-    }
+    const readKey = (key: string) => {
+      const raw = localStorage.getItem(key);
+      if (!raw) return null;
+      try {
+        const parsed = JSON.parse(raw) as MatchesCacheV1 & { version: number };
+        if (!parsed || (parsed.version !== 1 && parsed.version !== 2 && parsed.version !== 3)) return null;
+        if (!parsed.generatedAt || !parsed.matches || !parsed.predictions) return null;
+        return parsed as MatchesCacheV1;
+      } catch {
+        return null;
+      }
+    };
+
+    return readKey('matchesCache_v3') ?? readKey('matchesCache_v2') ?? readKey('matchesCache_v1');
   }, []);
 
   const cacheMeta = useMemo(() => {

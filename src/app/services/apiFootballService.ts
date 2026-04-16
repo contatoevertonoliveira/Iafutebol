@@ -55,6 +55,7 @@ export interface ApiFootballFixture {
     long: string;
     short: string;
     elapsed: number | null;
+    extra?: number | null;
   };
 }
 
@@ -89,6 +90,25 @@ export interface ApiFootballMatch {
     away: number | null;
   };
   score: ApiFootballScore;
+}
+
+export interface ApiFootballEvent {
+  time: {
+    elapsed: number | null;
+    extra?: number | null;
+  };
+  team: ApiFootballTeam;
+  player: {
+    id: number | null;
+    name: string | null;
+  };
+  assist: {
+    id: number | null;
+    name: string | null;
+  };
+  type: string;
+  detail: string;
+  comments: string | null;
 }
 
 export interface ApiFootballResponse<T> {
@@ -138,7 +158,7 @@ export class ApiFootballService {
     return response.json();
   }
 
-  private async fetch<T>(endpoint: string, params?: Record<string, string>): Promise<T> {
+  private async fetchRaw<T>(endpoint: string, params?: Record<string, string>): Promise<ApiFootballResponse<T>> {
     const url = new URL(`${API_ENDPOINTS.apiFootball}${endpoint}`);
 
     if (params) {
@@ -154,7 +174,7 @@ export class ApiFootballService {
         throw new Error(`API Error: ${JSON.stringify(data.errors)}`);
       }
 
-      return data.response;
+      return data;
     } catch (proxyError) {
       console.warn('⚠️ Proxy via servidor falhou, tentando requisição direta...', proxyError);
     }
@@ -175,7 +195,30 @@ export class ApiFootballService {
       throw new Error(`API Error: ${JSON.stringify(data.errors)}`);
     }
 
+    return data;
+  }
+
+  private async fetch<T>(endpoint: string, params?: Record<string, string>): Promise<T> {
+    const data = await this.fetchRaw<T>(endpoint, params);
     return data.response;
+  }
+
+  private async fetchPagedArray<TItem>(endpoint: string, params?: Record<string, string>, maxPages?: number): Promise<TItem[]> {
+    const baseParams = { ...(params ?? {}) };
+    const all: TItem[] = [];
+    let page = 1;
+    let total = 1;
+    const limit = typeof maxPages === 'number' && maxPages > 0 ? Math.floor(maxPages) : null;
+
+    do {
+      const data = await this.fetchRaw<TItem[]>(endpoint, { ...baseParams, page: String(page) });
+      const items = Array.isArray(data.response) ? data.response : [];
+      all.push(...items);
+      total = Math.max(1, Number(data.paging?.total ?? 1));
+      page += 1;
+    } while (page <= total && (limit === null || page <= limit));
+
+    return all;
   }
 
   // Obter fixtures (partidas)
@@ -184,10 +227,12 @@ export class ApiFootballService {
     league?: number;
     season?: number;
     team?: number;
+    live?: string;
     from?: string;
     to?: string;
     timezone?: string;
     fixtureId?: number;
+    maxPages?: number;
   }): Promise<ApiFootballMatch[]> {
     const queryParams: Record<string, string> = {};
 
@@ -195,12 +240,17 @@ export class ApiFootballService {
     if (params?.league) queryParams.league = params.league.toString();
     if (params?.season) queryParams.season = params.season.toString();
     if (params?.team) queryParams.team = params.team.toString();
+    if (params?.live) queryParams.live = params.live;
     if (params?.from) queryParams.from = params.from;
     if (params?.to) queryParams.to = params.to;
     if (params?.timezone) queryParams.timezone = params.timezone;
     if (params?.fixtureId) queryParams.id = params.fixtureId.toString();
 
-    return this.fetch<ApiFootballMatch[]>('/fixtures', queryParams);
+    return this.fetchPagedArray<ApiFootballMatch>('/fixtures', queryParams, params?.maxPages);
+  }
+
+  async getFixtureEvents(fixtureId: number): Promise<ApiFootballEvent[]> {
+    return this.fetchPagedArray<ApiFootballEvent>('/fixtures/events', { fixture: fixtureId.toString() }, 5);
   }
 
   // Obter ligas
@@ -208,6 +258,7 @@ export class ApiFootballService {
     country?: string;
     season?: number;
     type?: string;
+    maxPages?: number;
   }): Promise<ApiFootballLeague[]> {
     const queryParams: Record<string, string> = {};
 
@@ -215,7 +266,7 @@ export class ApiFootballService {
     if (params?.season) queryParams.season = params.season.toString();
     if (params?.type) queryParams.type = params.type;
 
-    return this.fetch<ApiFootballLeague[]>('/leagues', queryParams);
+    return this.fetchPagedArray<ApiFootballLeague>('/leagues', queryParams, params?.maxPages);
   }
 
   async getSeasons(): Promise<number[]> {
@@ -228,6 +279,7 @@ export class ApiFootballService {
     type?: string;
     current?: boolean;
     search?: string;
+    maxPages?: number;
   }): Promise<ApiFootballLeague[]> {
     const queryParams: Record<string, string> = {};
     if (params?.country) queryParams.country = params.country;
@@ -236,7 +288,20 @@ export class ApiFootballService {
     if (params?.current !== undefined) queryParams.current = params.current ? 'true' : 'false';
     if (params?.search) queryParams.search = params.search;
 
-    const items = await this.fetch<ApiFootballLeagueCatalogItem[]>('/leagues', queryParams);
+    const maxPages = typeof params?.maxPages === 'number' && params.maxPages > 0 ? Math.floor(params.maxPages) : null;
+    const baseParams = { ...queryParams };
+
+    const items: ApiFootballLeagueCatalogItem[] = [];
+    let page = 1;
+    let total = 1;
+    do {
+      const data = await this.fetchRaw<ApiFootballLeagueCatalogItem[]>('/leagues', { ...baseParams, page: String(page) });
+      const chunk = Array.isArray(data.response) ? data.response : [];
+      items.push(...chunk);
+      total = Math.max(1, Number(data.paging?.total ?? 1));
+      page += 1;
+    } while (page <= total && (maxPages === null || page <= maxPages));
+
     const mapped = items
       .map((i) => {
         const season = i.seasons?.find((s) => s.current)?.year ?? i.seasons?.[i.seasons.length - 1]?.year ?? new Date().getFullYear();

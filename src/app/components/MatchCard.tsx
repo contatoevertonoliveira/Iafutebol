@@ -3,7 +3,7 @@ import { Calendar, Clock, TrendingUp, Star, Loader2, RefreshCw } from 'lucide-re
 import { Badge } from './ui/badge';
 import { Card } from './ui/card';
 import { TeamLogo } from './TeamLogo';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { AgentEnsemble, getDynamicAgentProfiles } from '../services/aiAgents';
 import type { FootballMatch } from '../services/footballDataService';
 
@@ -25,6 +25,7 @@ interface MatchCardProps {
     };
     liveElapsed?: number | null;
     liveStatusShort?: string;
+    liveExtra?: number | null;
   };
   prediction: Prediction;
   onViewDetails: (matchId: string) => void;
@@ -59,7 +60,7 @@ export function MatchCard({
   const toMatchStatus = (status: string | undefined): 'scheduled' | 'live' | 'finished' => {
     const normalized = String(status || '').toUpperCase();
     if (['FINISHED', 'FT', 'AET', 'PEN'].includes(normalized)) return 'finished';
-    if (['IN_PLAY', 'LIVE', '1H', '2H', 'HT', 'ET', 'P'].includes(normalized)) return 'live';
+    if (['IN_PLAY', 'PAUSED', 'BREAK', 'LIVE', '1H', '2H', 'HT', 'ET', 'BT', 'P', 'SUSP', 'INT', 'SUSPENDED', 'INTERRUPTED'].includes(normalized)) return 'live';
     return 'scheduled';
   };
 
@@ -72,6 +73,14 @@ export function MatchCard({
           ? Number(rawElapsed)
           : null;
 
+    const rawExtra = match.liveExtra ?? footballMatch?.live?.extra ?? null;
+    const extra =
+      typeof rawExtra === 'number'
+        ? rawExtra
+        : typeof rawExtra === 'string'
+          ? Number(rawExtra)
+          : null;
+
     const statusShort =
       match.liveStatusShort ??
       footballMatch?.live?.statusShort ??
@@ -79,9 +88,18 @@ export function MatchCard({
 
     return {
       elapsed: Number.isFinite(elapsed) ? (elapsed as number) : null,
+      extra: Number.isFinite(extra) ? (extra as number) : null,
       statusShort: typeof statusShort === 'string' ? statusShort : undefined,
     };
-  }, [footballMatch?.live?.elapsed, footballMatch?.live?.statusShort, footballMatch?.status, match.liveElapsed, match.liveStatusShort]);
+  }, [
+    footballMatch?.live?.elapsed,
+    footballMatch?.live?.extra,
+    footballMatch?.live?.statusShort,
+    footballMatch?.status,
+    match.liveElapsed,
+    match.liveExtra,
+    match.liveStatusShort,
+  ]);
 
   const derivedStatus = useMemo(() => {
     const fromShort = toMatchStatus(resolvedLive.statusShort);
@@ -91,8 +109,19 @@ export function MatchCard({
     return match.status as 'scheduled' | 'live' | 'finished';
   }, [footballMatch?.status, match.status, resolvedLive.statusShort]);
 
+  const kickoffMs = useMemo(() => new Date(match.date as unknown as Date).getTime(), [match.date]);
+  const isEstimatedLive = useMemo(() => {
+    if (derivedStatus !== 'scheduled') return false;
+    if (!Number.isFinite(kickoffMs)) return false;
+    const now = Date.now();
+    const started = now >= kickoffMs + 60 * 1000;
+    const withinWindow = now <= kickoffMs + 3 * 60 * 60 * 1000;
+    return started && withinWindow;
+  }, [derivedStatus, kickoffMs]);
+
   const isFinished = derivedStatus === 'finished';
-  const isLive = derivedStatus === 'live';
+  const isLive = derivedStatus === 'live' || isEstimatedLive;
+  const autoRefreshAttemptedRef = useRef(false);
 
   useEffect(() => {
     if (!isLive) return;
@@ -100,26 +129,45 @@ export function MatchCard({
     return () => window.clearInterval(id);
   }, [isLive]);
 
+  useEffect(() => {
+    if (!isEstimatedLive) return;
+    if (autoRefreshAttemptedRef.current) return;
+    if (typeof resolvedLive.elapsed === 'number') return;
+    if (!onRefreshMatch) return;
+    autoRefreshAttemptedRef.current = true;
+    onRefreshMatch(match.id);
+  }, [isEstimatedLive, match.id, onRefreshMatch, resolvedLive.elapsed]);
+
   const liveClockLabel = useMemo(() => {
     if (!isLive) return null;
-    if (typeof resolvedLive.elapsed !== 'number') return null;
-
-    const baseSeconds = Math.max(0, Math.floor(resolvedLive.elapsed) * 60);
-    const last = lastUpdatedAt ? lastUpdatedAt.getTime() : Date.now();
-    const deltaSeconds = Math.max(0, Math.floor((Date.now() - last) / 1000));
-    const totalSeconds = baseSeconds + deltaSeconds;
-
-    const mm = Math.floor(totalSeconds / 60);
-    const ss = totalSeconds % 60;
-    const mmss = `${String(mm).padStart(2, '0')}:${String(ss).padStart(2, '0')}`;
 
     const short = String(resolvedLive.statusShort || '').toUpperCase();
-    if (short === '1H') return `1º Tempo - ${mmss}`;
-    if (short === '2H') return `2º Tempo - ${mmss}`;
-    if (short === 'ET') return `Prorrogação - ${mmss}`;
     if (short === 'HT') return 'Intervalo';
-    return `Ao vivo - ${mmss}`;
-  }, [isLive, resolvedLive.elapsed, resolvedLive.statusShort, lastUpdatedAt, tick]);
+
+    const getMinuteText = (m: number, extra: number | null) => {
+      if (typeof extra === 'number' && extra > 0) return `${m}+${extra}'`;
+      return `${m}'`;
+    };
+
+    if (typeof resolvedLive.elapsed === 'number') {
+      const minute = Math.max(0, Math.floor(resolvedLive.elapsed));
+      const minuteText = getMinuteText(minute, resolvedLive.extra);
+
+      if (short === '1H') return `1º Tempo - ${minuteText}`;
+      if (short === '2H') return `2º Tempo - ${minuteText}`;
+      if (short === 'ET') return `Prorrogação - ${minuteText}`;
+      if (short === 'IN_PLAY' || short === 'LIVE' || short === 'PAUSED' || short === 'BREAK') return `Ao vivo - ${minuteText}`;
+      return `Ao vivo - ${minuteText}`;
+    }
+
+    if (short === '1H') return '1º Tempo';
+    if (short === '2H') return '2º Tempo';
+    if (short === 'ET') return 'Prorrogação';
+    if (short === 'IN_PLAY' || short === 'LIVE' || short === 'PAUSED' || short === 'BREAK') return 'Ao vivo';
+    if (isEstimatedLive) return 'Ao vivo';
+
+    return null;
+  }, [isLive, isEstimatedLive, resolvedLive.elapsed, resolvedLive.extra, resolvedLive.statusShort, tick]);
 
   const getPredictionLabel = (pred: 'home' | 'away' | 'draw') => {
     if (pred === 'home') return match.homeTeam;
@@ -132,10 +180,21 @@ export function MatchCard({
     typeof match.result?.home === 'number' &&
     typeof match.result?.away === 'number';
 
-  const liveScoreAvailable =
-    isLive &&
-    typeof match.result?.home === 'number' &&
-    typeof match.result?.away === 'number';
+  const displayHomeScore =
+    typeof match.result?.home === 'number'
+      ? match.result.home
+      : typeof footballMatch?.score?.fullTime?.home === 'number'
+        ? footballMatch.score.fullTime.home
+        : null;
+
+  const displayAwayScore =
+    typeof match.result?.away === 'number'
+      ? match.result.away
+      : typeof footballMatch?.score?.fullTime?.away === 'number'
+        ? footballMatch.score.fullTime.away
+        : null;
+
+  const shouldShowScoreboard = resultAvailable || isLive;
 
   const actualWinner = (() => {
     if (!resultAvailable) return null;
@@ -337,19 +396,19 @@ export function MatchCard({
         </div>
 
         {/* Times com Escudos */}
-        {(resultAvailable || liveScoreAvailable) ? (
+        {shouldShowScoreboard ? (
           <div className="grid grid-cols-[1fr_3rem] gap-x-3 gap-y-3 items-center mb-4">
             <div className="flex items-center gap-2 min-w-0">
               <TeamLogo teamName={match.homeTeam} logoUrl={homeCrest} size="lg" showName={false} />
               <div className="font-medium text-lg truncate">{match.homeTeam}</div>
             </div>
-            <div className="text-right text-xl font-bold text-gray-900 tabular-nums">{match.result!.home}</div>
+            <div className="text-right text-xl font-bold text-gray-900 tabular-nums">{displayHomeScore ?? '-'}</div>
 
             <div className="flex items-center gap-2 min-w-0">
               <TeamLogo teamName={match.awayTeam} logoUrl={awayCrest} size="lg" showName={false} />
               <div className="font-medium text-lg truncate">{match.awayTeam}</div>
             </div>
-            <div className="text-right text-xl font-bold text-gray-900 tabular-nums">{match.result!.away}</div>
+            <div className="text-right text-xl font-bold text-gray-900 tabular-nums">{displayAwayScore ?? '-'}</div>
           </div>
         ) : (
           <div className="space-y-3 mb-4">

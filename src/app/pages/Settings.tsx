@@ -43,10 +43,13 @@ export default function Settings() {
 
   const derivedLeagues = (() => {
     try {
-      const raw = localStorage.getItem('matchesCache_v1');
+      const raw =
+        localStorage.getItem('matchesCache_v3') ??
+        localStorage.getItem('matchesCache_v2') ??
+        localStorage.getItem('matchesCache_v1');
       if (!raw) return [] as ApiFootballLeague[];
       const parsed = JSON.parse(raw) as { version: number; apiSource: string; matches: any[] };
-      if (!parsed || parsed.version !== 1) return [] as ApiFootballLeague[];
+      if (!parsed || (parsed.version !== 1 && parsed.version !== 2 && parsed.version !== 3)) return [] as ApiFootballLeague[];
       if (parsed.apiSource !== 'api-football') return [] as ApiFootballLeague[];
       if (!Array.isArray(parsed.matches)) return [] as ApiFootballLeague[];
 
@@ -87,23 +90,27 @@ export default function Settings() {
     setLeaguesLastError('');
     try {
       const service = new ApiFootballService(config.apiFootballKey.trim());
-      let items = await service.getLeaguesCatalog({ current: true, country: opts?.country });
+      let items = await service.getLeaguesCatalog({ current: true, country: opts?.country, maxPages: 10 });
       if (items.length === 0) {
         const seasons = await service.getSeasons().catch(() => []);
         const latestSeason = seasons.length > 0 ? Math.max(...seasons) : new Date().getFullYear();
-        items = await service.getLeaguesCatalog({ season: latestSeason, country: opts?.country });
+        items = await service.getLeaguesCatalog({ season: latestSeason, country: opts?.country, maxPages: 10 });
       }
       if (items.length === 0) {
-        items = await service.getLeaguesCatalog({ country: opts?.country });
+        items = await service.getLeaguesCatalog({ country: opts?.country, maxPages: 10 });
       }
       if (items.length === 0) {
-        const today = new Intl.DateTimeFormat('en-CA', {
-          timeZone: 'America/Sao_Paulo',
-          year: 'numeric',
-          month: '2-digit',
-          day: '2-digit',
-        }).format(new Date());
-        const fixtures = await service.getFixtures({ date: today, timezone: 'America/Sao_Paulo' });
+        const dayKey = (d: Date) =>
+          new Intl.DateTimeFormat('en-CA', {
+            timeZone: 'America/Sao_Paulo',
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+          }).format(d);
+
+        const from = dayKey(new Date());
+        const to = dayKey(new Date(Date.now() + 7 * 24 * 60 * 60 * 1000));
+        const fixtures = await service.getFixtures({ from, to, timezone: 'America/Sao_Paulo' });
         const byId = new Map<number, ApiFootballLeague>();
         for (const f of fixtures as ApiFootballMatch[]) {
           const l = f?.league;

@@ -37,6 +37,7 @@ export interface FootballMatch {
   live?: {
     elapsed: number | null;
     statusShort?: string;
+    extra?: number | null;
   };
 }
 
