@@ -27,7 +27,7 @@ interface MatchCardProps {
     liveStatusShort?: string;
     liveExtra?: number | null;
   };
-  prediction: Prediction;
+  prediction?: Prediction | null;
   onViewDetails: (matchId: string) => void;
   homeCrest?: string;
   awayCrest?: string;
@@ -195,6 +195,7 @@ export function MatchCard({
         : null;
 
   const shouldShowScoreboard = resultAvailable || isLive;
+  const hasPrediction = Boolean(prediction);
 
   const actualWinner = (() => {
     if (!resultAvailable) return null;
@@ -203,21 +204,26 @@ export function MatchCard({
     return 'draw' as const;
   })();
 
-  const predictedWinner = prediction.winner.prediction;
-  const winnerHit = actualWinner ? actualWinner === predictedWinner : null;
+  const predictedWinner = prediction?.winner?.prediction ?? null;
+  const winnerHit = actualWinner && predictedWinner ? actualWinner === predictedWinner : null;
 
   const actualScoreText = resultAvailable ? `${match.result!.home}-${match.result!.away}` : null;
-  const predictedScoreText = prediction.correctScore.score;
-  const scoreHit = actualScoreText ? actualScoreText === predictedScoreText : null;
+  const predictedScoreText = prediction?.correctScore?.score ?? null;
+  const scoreHit = actualScoreText && predictedScoreText ? actualScoreText === predictedScoreText : null;
 
   const totalGoals = resultAvailable ? match.result!.home! + match.result!.away! : null;
+  const overUnderLine = prediction?.overUnder?.line ?? null;
   const actualOverUnder =
-    totalGoals === null ? null : totalGoals > prediction.overUnder.line ? ('over' as const) : ('under' as const);
-  const overUnderHit = actualOverUnder ? actualOverUnder === prediction.overUnder.prediction : null;
+    totalGoals === null || typeof overUnderLine !== 'number'
+      ? null
+      : totalGoals > overUnderLine
+        ? ('over' as const)
+        : ('under' as const);
+  const overUnderHit = actualOverUnder && prediction?.overUnder?.prediction ? actualOverUnder === prediction.overUnder.prediction : null;
 
   const actualBtts =
     resultAvailable ? ((match.result!.home! > 0 && match.result!.away! > 0 ? 'yes' : 'no') as const) : null;
-  const bttsHit = actualBtts ? actualBtts === prediction.btts.prediction : null;
+  const bttsHit = actualBtts && prediction?.btts?.prediction ? actualBtts === prediction.btts.prediction : null;
 
   const marketHits = {
     winner: winnerHit === true,
@@ -225,8 +231,11 @@ export function MatchCard({
     btts: bttsHit === true,
   };
 
-  const marketTotal = resultAvailable ? 3 : 0;
-  const marketCorrect = resultAvailable ? (Number(marketHits.winner) + Number(marketHits.overUnder) + Number(marketHits.btts)) : 0;
+  const marketTotal = resultAvailable && hasPrediction ? 3 : 0;
+  const marketCorrect =
+    resultAvailable && hasPrediction
+      ? Number(marketHits.winner) + Number(marketHits.overUnder) + Number(marketHits.btts)
+      : 0;
   const marketPercent = marketTotal === 0 ? 0 : Math.round((marketCorrect / marketTotal) * 100);
 
   const buildFallbackFootballMatch = (): FootballMatch => {
@@ -321,13 +330,13 @@ export function MatchCard({
   const handleToggleResult = () => {
     const next = !showResult;
     setShowResult(next);
-    if (next && resultAvailable && !agentMarketSummaries) {
+    if (next && resultAvailable && hasPrediction && !agentMarketSummaries) {
       void loadAgentMarketBreakdown();
     }
   };
 
   const handleCardClick = (e: React.MouseEvent) => {
-    if (!isFinished || !resultAvailable) return;
+    if (!isFinished || !resultAvailable || !hasPrediction) return;
     const target = e.target as HTMLElement | null;
     if (target?.closest('button')) return;
     handleToggleResult();
@@ -423,7 +432,7 @@ export function MatchCard({
           </div>
         )}
 
-        {resultAvailable && showResult && (
+        {resultAvailable && showResult && hasPrediction && (
           <div className="mb-4 rounded-lg border border-gray-200 bg-white p-3">
             <div className="flex items-center justify-between mb-3">
               <div className="text-sm font-semibold text-gray-900">Mercados (Pré-jogo)</div>
@@ -436,7 +445,7 @@ export function MatchCard({
               <div className="bg-gray-50 p-2 rounded flex items-center justify-between gap-2">
                 <div className="min-w-0">
                   <div className="text-xs text-gray-600 mb-1">Vencedor</div>
-                  <div className="font-semibold text-sm truncate">{getPredictionLabel(predictedWinner)}</div>
+                  <div className="font-semibold text-sm truncate">{predictedWinner ? getPredictionLabel(predictedWinner) : '—'}</div>
                 </div>
                 <div className={`text-xs font-semibold px-2 py-1 rounded ${marketHits.winner ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
                   {marketHits.winner ? 'Acertou' : 'Errou'}
@@ -445,9 +454,9 @@ export function MatchCard({
 
               <div className="bg-gray-50 p-2 rounded flex items-center justify-between gap-2">
                 <div className="min-w-0">
-                  <div className="text-xs text-gray-600 mb-1">Over/Under {prediction.overUnder.line}</div>
+                  <div className="text-xs text-gray-600 mb-1">Over/Under {prediction!.overUnder.line}</div>
                   <div className="font-semibold text-sm truncate">
-                    {prediction.overUnder.prediction === 'over' ? 'Over' : 'Under'}
+                    {prediction!.overUnder.prediction === 'over' ? 'Over' : 'Under'}
                   </div>
                 </div>
                 <div className={`text-xs font-semibold px-2 py-1 rounded ${marketHits.overUnder ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
@@ -459,7 +468,7 @@ export function MatchCard({
                 <div className="min-w-0">
                   <div className="text-xs text-gray-600 mb-1">Ambos Marcam</div>
                   <div className="font-semibold text-sm truncate">
-                    {prediction.btts.prediction === 'yes' ? 'Sim' : 'Não'}
+                    {prediction!.btts.prediction === 'yes' ? 'Sim' : 'Não'}
                   </div>
                 </div>
                 <div className={`text-xs font-semibold px-2 py-1 rounded ${marketHits.btts ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
@@ -470,7 +479,7 @@ export function MatchCard({
               <div className="bg-gray-50 p-2 rounded flex items-center justify-between gap-2">
                 <div className="min-w-0">
                   <div className="text-xs text-gray-600 mb-1">Placar Exato</div>
-                  <div className="font-semibold text-sm truncate">{predictedScoreText}</div>
+                  <div className="font-semibold text-sm truncate">{predictedScoreText ?? '—'}</div>
                 </div>
                 <div className={`text-xs font-semibold px-2 py-1 rounded ${scoreHit ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
                   {scoreHit ? 'Acertou' : 'Errou'}
@@ -513,63 +522,77 @@ export function MatchCard({
         )}
 
         {/* Confiança da IA */}
-        <div className="mb-4">
-          <div className="flex items-center justify-between mb-1">
-            <span className="text-sm text-gray-600">Confiança da IA</span>
-            <span className={`text-sm font-semibold ${
-              prediction.aiConfidence >= 80 ? 'text-green-600' :
-              prediction.aiConfidence >= 60 ? 'text-yellow-600' : 'text-red-600'
-            }`}>
-              {prediction.aiConfidence}%
-            </span>
+        {hasPrediction ? (
+          <div className="mb-4">
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-sm text-gray-600">Confiança da IA</span>
+              <span className={`text-sm font-semibold ${
+                (prediction!.aiConfidence ?? 0) >= 80 ? 'text-green-600' :
+                (prediction!.aiConfidence ?? 0) >= 60 ? 'text-yellow-600' : 'text-red-600'
+              }`}>
+                {prediction!.aiConfidence}%
+              </span>
+            </div>
+            <div className="w-full bg-gray-200 rounded-full h-2">
+              <div
+                className={`h-2 rounded-full ${
+                  (prediction!.aiConfidence ?? 0) >= 80 ? 'bg-green-600' :
+                  (prediction!.aiConfidence ?? 0) >= 60 ? 'bg-yellow-600' : 'bg-red-600'
+                }`}
+                style={{ width: `${prediction!.aiConfidence}%` }}
+              />
+            </div>
           </div>
-          <div className="w-full bg-gray-200 rounded-full h-2">
-            <div
-              className={`h-2 rounded-full ${
-                prediction.aiConfidence >= 80 ? 'bg-green-600' :
-                prediction.aiConfidence >= 60 ? 'bg-yellow-600' : 'bg-red-600'
-              }`}
-              style={{ width: `${prediction.aiConfidence}%` }}
-            />
+        ) : (
+          <div className="mb-4 bg-gray-50 border border-gray-200 rounded-lg p-3 text-sm text-gray-700 flex items-center gap-2">
+            <Loader2 className="w-4 h-4 animate-spin" />
+            Gerando previsão...
           </div>
-        </div>
+        )}
 
         {/* Preview de Previsões */}
-        <div className="grid grid-cols-2 gap-2 mb-4">
-          <div className="bg-gray-50 p-2 rounded">
-            <div className="text-xs text-gray-600 mb-1">Vencedor</div>
-            <div className="font-semibold text-sm truncate">
-              {getPredictionLabel(prediction.winner.prediction)}
+        {hasPrediction && (
+          <div className="grid grid-cols-2 gap-2 mb-4">
+            <div className="bg-gray-50 p-2 rounded">
+              <div className="text-xs text-gray-600 mb-1">Vencedor</div>
+              <div className="font-semibold text-sm truncate">
+                {getPredictionLabel(prediction!.winner.prediction)}
+              </div>
+              <div className="text-xs text-gray-500">{prediction!.winner.confidence}%</div>
             </div>
-            <div className="text-xs text-gray-500">{prediction.winner.confidence}%</div>
-          </div>
-          
-          <div className="bg-gray-50 p-2 rounded">
-            <div className="text-xs text-gray-600 mb-1">Over/Under {prediction.overUnder.line}</div>
-            <div className="font-semibold text-sm">
-              {prediction.overUnder.prediction === 'over' ? 'Over' : 'Under'}
+            
+            <div className="bg-gray-50 p-2 rounded">
+              <div className="text-xs text-gray-600 mb-1">Over/Under {prediction!.overUnder.line}</div>
+              <div className="font-semibold text-sm">
+                {prediction!.overUnder.prediction === 'over' ? 'Over' : 'Under'}
+              </div>
+              <div className="text-xs text-gray-500">{prediction!.overUnder.confidence}%</div>
             </div>
-            <div className="text-xs text-gray-500">{prediction.overUnder.confidence}%</div>
-          </div>
 
-          <div className="bg-gray-50 p-2 rounded">
-            <div className="text-xs text-gray-600 mb-1">Ambos Marcam</div>
-            <div className="font-semibold text-sm">
-              {prediction.btts.prediction === 'yes' ? 'Sim' : 'Não'}
+            <div className="bg-gray-50 p-2 rounded">
+              <div className="text-xs text-gray-600 mb-1">Ambos Marcam</div>
+              <div className="font-semibold text-sm">
+                {prediction!.btts.prediction === 'yes' ? 'Sim' : 'Não'}
+              </div>
+              <div className="text-xs text-gray-500">{prediction!.btts.confidence}%</div>
             </div>
-            <div className="text-xs text-gray-500">{prediction.btts.confidence}%</div>
-          </div>
 
-          <div className="bg-gray-50 p-2 rounded">
-            <div className="text-xs text-gray-600 mb-1">Placar Exato</div>
-            <div className="font-semibold text-sm">{prediction.correctScore.score}</div>
-            <div className="text-xs text-gray-500">{prediction.correctScore.confidence}%</div>
+            <div className="bg-gray-50 p-2 rounded">
+              <div className="text-xs text-gray-600 mb-1">Placar Exato</div>
+              <div className="font-semibold text-sm">{prediction!.correctScore.score}</div>
+              <div className="text-xs text-gray-500">{prediction!.correctScore.confidence}%</div>
+            </div>
           </div>
-        </div>
+        )}
 
         <button
           onClick={() => onViewDetails(match.id)}
-          className="w-full bg-blue-600 hover:bg-blue-700 text-white py-2 rounded-lg font-semibold transition-colors"
+          disabled={!hasPrediction}
+          className={`w-full py-2 rounded-lg font-semibold transition-colors ${
+            hasPrediction
+              ? 'bg-blue-600 hover:bg-blue-700 text-white'
+              : 'bg-gray-200 text-gray-600 cursor-not-allowed'
+          }`}
         >
           Ver Análise Completa
         </button>

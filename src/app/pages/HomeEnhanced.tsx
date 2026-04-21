@@ -7,7 +7,8 @@ import { PremiumCarousel } from '../components/PremiumCarousel';
 import { AgentAnalysis } from '../components/AgentAnalysis';
 import { ApiStatus } from '../components/ApiStatus';
 import { DraggableWindow } from '../components/DraggableWindow';
-import { TrendingUp, Brain, Loader2, RefreshCw } from 'lucide-react';
+import { BarChart3, Brain, Globe, Loader2, RefreshCw, ShieldCheck, Target, TrendingUp } from 'lucide-react';
+import { MobileMatchCard } from '../components/MobileMatchCard';
 import { getDynamicAgentProfiles, AgentEnsemble, AgentPrediction, learnFromMatchResult, recordTrainingSample } from '../services/aiAgents';
 import { loadApiConfig } from '../services/apiConfig';
 import { FootballDataService, FootballMatch } from '../services/footballDataService';
@@ -15,7 +16,7 @@ import { ApiFootballService, ApiFootballMatch } from '../services/apiFootballSer
 import { OpenLigaDbService, OpenLigaMatch } from '../services/openLigaDbService';
 import { Button } from '../components/ui/button';
 import { toast } from 'sonner';
-import { useLocation } from 'react-router';
+import { useLocation, useNavigate } from 'react-router';
 
 type MatchStatus = 'scheduled' | 'live' | 'finished';
 type StatusFilter = 'all' | 'live' | 'upcoming' | 'finished';
@@ -43,6 +44,7 @@ type HomeEnhancedProps = {
 
 export default function Home({ initialSelectedDate = 'today', favoritesOnly = false }: HomeEnhancedProps) {
   const location = useLocation();
+  const navigate = useNavigate();
   const [selectedDate, setSelectedDate] = useState(initialSelectedDate);
   const [selectedCountry, setSelectedCountry] = useState('all');
   const [selectedLeague, setSelectedLeague] = useState('all');
@@ -282,6 +284,15 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
 
     window.addEventListener('apiConfigChanged' as any, onConfigChanged as any);
     return () => window.removeEventListener('apiConfigChanged' as any, onConfigChanged as any);
+  }, []);
+
+  useEffect(() => {
+    const onManualRefresh = () => {
+      const config = loadApiConfig();
+      loadMatchesWithFallback(config);
+    };
+    window.addEventListener('manualRefreshMatches' as any, onManualRefresh as any);
+    return () => window.removeEventListener('manualRefreshMatches' as any, onManualRefresh as any);
   }, []);
 
   const convertApiFootballMatchToFootballMatch = (m: ApiFootballMatch): FootballMatch => {
@@ -1119,6 +1130,10 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
     loadAgentAnalysis(matchId);
   };
 
+  const handleViewDetailsMobile = (matchId: string) => {
+    navigate(`/analysis/${matchId}`);
+  };
+
   const handleManualRefreshMatches = () => {
     const config = loadApiConfig();
     loadMatchesWithFallback(config);
@@ -1296,24 +1311,26 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
 
   return (
     <div className="min-h-screen bg-gray-50">
-      <FilterBar
-        selectedDate={selectedDate}
-        selectedCountry={selectedCountry}
-        selectedLeague={selectedLeague}
-        onDateChange={setSelectedDate}
-        onCountryChange={setSelectedCountry}
-        onLeagueChange={setSelectedLeague}
-        countries={countries}
-        leagues={leagues}
-        selectedStatus={selectedStatus}
-        onStatusChange={setSelectedStatus}
-        groupMode={groupMode}
-        onGroupModeChange={setGroupMode}
-      />
+      <div className="hidden md:block">
+        <FilterBar
+          selectedDate={selectedDate}
+          selectedCountry={selectedCountry}
+          selectedLeague={selectedLeague}
+          onDateChange={setSelectedDate}
+          onCountryChange={setSelectedCountry}
+          onLeagueChange={setSelectedLeague}
+          countries={countries}
+          leagues={leagues}
+          selectedStatus={selectedStatus}
+          onStatusChange={setSelectedStatus}
+          groupMode={groupMode}
+          onGroupModeChange={setGroupMode}
+        />
+      </div>
 
-      <div className="p-6">
+      <div className="p-4 md:p-6">
         {/* Header */}
-        <div className="mb-6">
+        <div className="mb-4 md:mb-6 hidden md:block">
           <div className="flex items-start justify-between gap-4 mb-2">
             <div className="flex items-center gap-3">
               <Brain className="w-8 h-8 text-purple-600" />
@@ -1345,18 +1362,60 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
         </div>
 
         {/* API Status */}
-        <ApiStatus />
+        <div className="hidden md:block">
+          <ApiStatus />
+        </div>
 
         {/* Carrossel Premium */}
-        {premiumMatches.length > 0 && (
-          <PremiumCarousel
-            matches={premiumMatches}
-            onMatchClick={handleViewDetails}
-          />
-        )}
+        <div className="hidden md:block">
+          {premiumMatches.length > 0 && (
+            <PremiumCarousel
+              matches={premiumMatches}
+              onMatchClick={handleViewDetails}
+            />
+          )}
+        </div>
 
         {/* Estatísticas */}
-        <div className="grid grid-cols-1 md:grid-cols-5 gap-4 mb-8">
+        <div className="md:hidden mb-5">
+          <div className="bg-white border border-gray-200 rounded-2xl shadow-sm px-3 py-3">
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2 min-w-0">
+                <BarChart3 className="w-4 h-4 text-blue-700" />
+                <div className="text-xs text-gray-600">Partidas</div>
+                <div className="text-sm font-bold text-gray-900 tabular-nums">{filteredMatches.length}</div>
+              </div>
+              <div className="flex items-center gap-2 min-w-0">
+                <ShieldCheck className="w-4 h-4 text-green-700" />
+                <div className="text-xs text-gray-600">Alta</div>
+                <div className="text-sm font-bold text-gray-900 tabular-nums">
+                  {Object.values(predictionByMatchId).filter(
+                    (p) => p.aiConfidence >= 80 && filteredMatches.some((m) => m.id === p.matchId),
+                  ).length}
+                </div>
+              </div>
+              <div className="flex items-center gap-2 min-w-0">
+                <Target className="w-4 h-4 text-gray-800" />
+                <div className="text-xs text-gray-600">Acertos</div>
+                <div className="text-sm font-bold text-gray-900 tabular-nums">
+                  {winnerPerformance.total === 0 ? '-' : `${winnerPerformance.hits}/${winnerPerformance.total}`}
+                </div>
+              </div>
+              <div className="flex items-center gap-2 min-w-0">
+                <Globe className="w-4 h-4 text-purple-700" />
+                <div className="text-xs text-gray-600">Países</div>
+                <div className="text-sm font-bold text-gray-900 tabular-nums">{new Set(filteredMatches.map((m) => m.country)).size}</div>
+              </div>
+              <div className="flex items-center gap-2 min-w-0">
+                <Brain className="w-4 h-4 text-orange-700" />
+                <div className="text-xs text-gray-600">Agentes</div>
+                <div className="text-sm font-bold text-gray-900 tabular-nums">{getDynamicAgentProfiles().length}</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="hidden md:grid grid-cols-1 md:grid-cols-5 gap-4 mb-8">
           <div className="bg-white p-4 rounded-lg shadow border border-gray-200">
             <div className="text-sm text-gray-600 mb-1">Total de Partidas</div>
             <div className="text-2xl font-bold text-blue-600">{filteredMatches.length}</div>
@@ -1402,47 +1461,63 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
             </p>
           </div>
         ) : (
-          <div className="space-y-8">
-            {groupedMatches.map(([leagueKey, matches]) => (
-              <div key={leagueKey}>
-                <h2 className="text-xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-                  <TrendingUp className="w-5 h-5 text-blue-600" />
-                  {leagueKey}
-                  <span className="text-sm font-normal text-gray-500">
-                    ({matches.length} {matches.length === 1 ? 'partida' : 'partidas'})
-                  </span>
-                </h2>
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                  {matches.map((match) => {
-                    const prediction = predictionByMatchId[match.id];
-                    if (!prediction) return null;
-                    
-                    return (
-                      <MatchCard
-                        key={match.id}
-                        match={match}
-                        prediction={prediction}
-                        onViewDetails={handleViewDetails}
-                        homeCrest={match.homeCrest}
-                        awayCrest={match.awayCrest}
-                        footballMatch={apiSource !== 'mock' ? realMatchById[match.id] : undefined}
-                        onRefreshMatch={handleRefreshMatch}
-                        isRefreshing={refreshingMatchIds.has(match.id)}
-                        lastUpdatedAt={lastUpdatedAt}
-                        isFavorite={favoriteMatchIds.includes(match.id)}
-                        onToggleFavorite={toggleFavoriteMatch}
-                      />
-                    );
-                  })}
+          <>
+            <div className="md:hidden space-y-4">
+              {groupedMatches.flatMap(([, matches]) => matches).map((match) => {
+                const prediction = predictionByMatchId[match.id] ?? null;
+                return (
+                  <MobileMatchCard
+                    key={match.id}
+                    match={match}
+                    prediction={prediction}
+                    onViewDetails={handleViewDetailsMobile}
+                    homeCrest={match.homeCrest}
+                    awayCrest={match.awayCrest}
+                  />
+                );
+              })}
+            </div>
+
+            <div className="hidden md:block space-y-8">
+              {groupedMatches.map(([leagueKey, matches]) => (
+                <div key={leagueKey}>
+                  <h2 className="text-xl font-bold text-gray-900 mb-4 flex items-center gap-2">
+                    <TrendingUp className="w-5 h-5 text-blue-600" />
+                    {leagueKey}
+                    <span className="text-sm font-normal text-gray-500">
+                      ({matches.length} {matches.length === 1 ? 'partida' : 'partidas'})
+                    </span>
+                  </h2>
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                    {matches.map((match) => {
+                      const prediction = predictionByMatchId[match.id] ?? null;
+                      return (
+                        <MatchCard
+                          key={match.id}
+                          match={match}
+                          prediction={prediction}
+                          onViewDetails={handleViewDetails}
+                          homeCrest={match.homeCrest}
+                          awayCrest={match.awayCrest}
+                          footballMatch={apiSource !== 'mock' ? realMatchById[match.id] : undefined}
+                          onRefreshMatch={handleRefreshMatch}
+                          isRefreshing={refreshingMatchIds.has(match.id)}
+                          lastUpdatedAt={lastUpdatedAt}
+                          isFavorite={favoriteMatchIds.includes(match.id)}
+                          onToggleFavorite={toggleFavoriteMatch}
+                        />
+                      );
+                    })}
+                  </div>
                 </div>
-              </div>
-            ))}
-          </div>
+              ))}
+            </div>
+          </>
         )}
       </div>
 
       {selectedMatch && selectedPrediction && (
-        <div className="fixed inset-0 z-50 pointer-events-none">
+        <div className="fixed inset-0 z-50 pointer-events-none hidden md:block">
           <DraggableWindow
             title="Análise Completa (Previsão)"
             onClose={() => {

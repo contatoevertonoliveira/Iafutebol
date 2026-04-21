@@ -5,6 +5,7 @@ import Settings from './pages/Settings';
 import AIAgentsPage from './pages/AIAgentsPage';
 import TrainingDashboard from './pages/TrainingDashboard';
 import DailyOverviewPage from './pages/DailyOverviewPage';
+import MobileAnalysisPage from './pages/MobileAnalysisPage';
 
 function TodayPage() {
   return <Home initialSelectedDate="today" />;
@@ -50,6 +51,7 @@ export const router = createBrowserRouter([
       { path: 'agents', Component: AIAgentsPage },
       { path: 'settings', Component: Settings },
       { path: 'training', Component: TrainingDashboard },
+      { path: 'analysis/:matchId', Component: MobileAnalysisPage },
       { path: '*', Component: NotFound },
     ],
   },
