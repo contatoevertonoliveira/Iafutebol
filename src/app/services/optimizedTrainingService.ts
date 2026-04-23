@@ -1,5 +1,6 @@
 import { loadApiConfig, saveApiConfig } from './apiConfig';
 import { toast } from 'sonner';
+import { trainMetaModelFromLocalSamples } from './aiAgents';
 
 // ==================== TIPOS E INTERFACES ====================
 
@@ -34,6 +35,7 @@ export interface TrainingSession {
   bestAccuracy: number;
   checkpoints: TrainingCheckpoint[];
   datasetVersion: string;
+  simulated?: boolean;
   config: AgentTrainingConfig;
 }
 
@@ -129,6 +131,26 @@ const DEFAULT_AGENT_CONFIGS: AgentTrainingConfig[] = [
     learningRate: 0.015,
   },
   {
+    agentId: 'bttsspecialist',
+    name: 'BTTS Scout',
+    maxEpochs: 170,
+    checkpointInterval: 10,
+    earlyStoppingPatience: 17,
+    minImprovement: 0.001,
+    batchSize: 64,
+    learningRate: 0.016,
+  },
+  {
+    agentId: 'metamodel',
+    name: 'MetaModel',
+    maxEpochs: 60,
+    checkpointInterval: 5,
+    earlyStoppingPatience: 12,
+    minImprovement: 0.001,
+    batchSize: 256,
+    learningRate: 0.05,
+  },
+  {
     agentId: 'correctscore',
     name: 'ScoreOracle',
     maxEpochs: 220,
@@ -152,8 +174,21 @@ function readLocalTrainingSampleCountForAgent(agentId: string): number {
     deeppredictor: 'DeepPredictor',
     ensemblemaster: 'EnsembleMaster',
     goalsoverunder: 'GoalLine',
+    bttsspecialist: 'BTTS Scout',
     correctscore: 'ScoreOracle',
   };
+
+  if (agentId === 'metamodel') {
+    try {
+      const raw = localStorage.getItem('training_samples_v1');
+      if (!raw) return 0;
+      const parsed = JSON.parse(raw) as { version: number; items: Record<string, any> };
+      if (!parsed || parsed.version !== 1 || !parsed.items) return 0;
+      return Object.keys(parsed.items).length;
+    } catch {
+      return 0;
+    }
+  }
 
   const agentName = agentNameById[agentId];
   if (!agentName) return 0;
@@ -223,6 +258,7 @@ export function createTrainingSession(agentId: string): TrainingSession {
     bestAccuracy: 0,
     checkpoints: [],
     datasetVersion: 'latest',
+    simulated: agentId !== 'metamodel',
     config,
   };
 
@@ -530,6 +566,72 @@ export class TrainingWorker {
     const config = session.config;
 
     try {
+      if (session.agentId === 'metamodel') {
+        const sampleCount = readLocalTrainingSampleCountForAgent('metamodel');
+        if (sampleCount < 30) {
+          throw new Error(`Dados insuficientes para treino real. Amostras com resultado: ${sampleCount}`);
+        }
+
+        let best = bestAccuracy;
+        await trainMetaModelFromLocalSamples({
+          epochs: config.maxEpochs,
+          learningRate: config.learningRate,
+          signal,
+          onEpoch: ({ epoch, epochs, winnerAcc, bttsAcc, overUnderAcc }) => {
+            const acc = (winnerAcc + bttsAcc + overUnderAcc) / 3;
+            if (acc > best) {
+              best = acc;
+              epochsWithoutImprovement = 0;
+            } else {
+              epochsWithoutImprovement += 1;
+            }
+
+            updateTrainingSession(sessionId, {
+              completedEpochs: epoch,
+              bestAccuracy: best,
+              simulated: false,
+            });
+
+            if (epoch % config.checkpointInterval === 0 || epoch === epochs) {
+              const checkpoint: TrainingCheckpoint = {
+                epoch,
+                accuracy: acc,
+                loss: 1 - acc / 100,
+                timestamp: new Date().toISOString(),
+                modelState: { winnerAcc, bttsAcc, overUnderAcc },
+                optimizerState: { learningRate: config.learningRate },
+              };
+              saveCheckpoint(sessionId, checkpoint);
+            }
+
+            if (epochsWithoutImprovement >= config.earlyStoppingPatience) {
+              updateTrainingSession(sessionId, {
+                status: 'completed',
+                endTime: new Date().toISOString(),
+              });
+            }
+          },
+        });
+
+        updateTrainingSession(sessionId, {
+          status: 'completed',
+          endTime: new Date().toISOString(),
+          bestAccuracy: best,
+          simulated: false,
+        });
+
+        const finalSession = loadTrainingSessions().find((s) => s.sessionId === sessionId);
+        if (finalSession && finalSession.status === 'completed') {
+          sendNotification(
+            'complete',
+            `Treinamento real (MetaModel) concluído! Accuracy validação: ${finalSession.bestAccuracy.toFixed(2)}%`,
+            finalSession,
+          );
+        }
+
+        return;
+      }
+
       // Baixar dataset incremental (se necessário)
       const dataset = await downloadIncrementalDataset('european-soccer-database');
       console.log(`📊 Dataset: ${dataset.totalMatches} partidas (${dataset.newMatches} novas)`);

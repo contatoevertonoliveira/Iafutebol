@@ -16,6 +16,11 @@ type MobileMatchCardProps = {
 export function MobileMatchCard({ match, prediction, homeCrest, awayCrest, onViewDetails }: MobileMatchCardProps) {
   const isLive = match.status === 'live';
   const isFinished = match.status === 'finished';
+  const bttsOpportunity =
+    Boolean(prediction) &&
+    prediction?.btts?.prediction === 'yes' &&
+    typeof prediction?.btts?.confidence === 'number' &&
+    prediction.btts.confidence >= 75;
 
   const scoreHome = typeof match.result?.home === 'number' ? match.result.home : null;
   const scoreAway = typeof match.result?.away === 'number' ? match.result.away : null;
@@ -55,6 +60,21 @@ export function MobileMatchCard({ match, prediction, homeCrest, awayCrest, onVie
     return { home, draw, away };
   })();
 
+  const signals = (() => {
+    if (!prediction || !prob) return null;
+    const over15 =
+      prediction.overUnder?.prediction === 'over' && typeof prediction.overUnder.confidence === 'number'
+        ? Math.round(prediction.overUnder.confidence)
+        : null;
+    const bttsYes =
+      prediction.btts?.prediction === 'yes' && typeof prediction.btts.confidence === 'number'
+        ? Math.round(prediction.btts.confidence)
+        : null;
+    const layHome = Math.max(0, 100 - prob.home);
+    const layAway = Math.max(0, 100 - prob.away);
+    return { over15, bttsYes, layHome, layAway };
+  })();
+
   return (
     <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
       <div className="px-4 pt-4 flex items-center justify-between">
@@ -67,8 +87,15 @@ export function MobileMatchCard({ match, prediction, homeCrest, awayCrest, onVie
             <span className="text-gray-500">{isFinished ? 'FINALIZADO' : ''}</span>
           )}
         </div>
-        <div className="text-[11px] font-semibold px-3 py-1 rounded-full bg-gray-100 text-gray-700">
-          {match.league.toUpperCase()}
+        <div className="flex items-center gap-2">
+          {bttsOpportunity ? (
+            <div className="text-[11px] font-semibold px-3 py-1 rounded-full bg-emerald-100 text-emerald-800 border border-emerald-200">
+              BTTS SIM {Math.round(prediction!.btts.confidence)}%
+            </div>
+          ) : null}
+          <div className="text-[11px] font-semibold px-3 py-1 rounded-full bg-gray-100 text-gray-700">
+            {match.league.toUpperCase()}
+          </div>
         </div>
       </div>
 
@@ -123,6 +150,27 @@ export function MobileMatchCard({ match, prediction, homeCrest, awayCrest, onVie
             <div className="mt-2 text-sm text-gray-600">Gerando previsão...</div>
           )}
         </div>
+
+        {signals ? (
+          <div className="mt-3 flex flex-wrap gap-2">
+            {signals.bttsYes !== null ? (
+              <div className="text-[11px] font-semibold px-3 py-1 rounded-full bg-emerald-100 text-emerald-800 border border-emerald-200">
+                BTTS {signals.bttsYes}%
+              </div>
+            ) : null}
+            {signals.over15 !== null ? (
+              <div className="text-[11px] font-semibold px-3 py-1 rounded-full bg-blue-100 text-blue-800 border border-blue-200">
+                Over 1.5 {signals.over15}%
+              </div>
+            ) : null}
+            <div className="text-[11px] font-semibold px-3 py-1 rounded-full bg-gray-100 text-gray-800 border border-gray-200">
+              Lay Casa {signals.layHome}%
+            </div>
+            <div className="text-[11px] font-semibold px-3 py-1 rounded-full bg-gray-100 text-gray-800 border border-gray-200">
+              Lay Fora {signals.layAway}%
+            </div>
+          </div>
+        ) : null}
 
         <button
           className="mt-4 w-full bg-blue-700 hover:bg-blue-800 text-white font-semibold py-3 rounded-xl transition-colors disabled:bg-gray-200 disabled:text-gray-600 disabled:cursor-not-allowed"

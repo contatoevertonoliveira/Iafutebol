@@ -45,6 +45,18 @@ export interface Prediction {
   };
 }
 
+const baseMockDate = (() => {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  return d;
+})();
+
+function addDays(base: Date, days: number) {
+  const d = new Date(base);
+  d.setDate(d.getDate() + days);
+  return d;
+}
+
 // Mock data de partidas
 export const mockMatches: Match[] = [
   // Premier League - Inglaterra
@@ -54,7 +66,7 @@ export const mockMatches: Match[] = [
     league: 'Premier League',
     homeTeam: 'Manchester City',
     awayTeam: 'Arsenal',
-    date: new Date('2026-04-10'),
+    date: addDays(baseMockDate, 0),
     time: '17:30',
     status: 'scheduled',
   },
@@ -64,7 +76,7 @@ export const mockMatches: Match[] = [
     league: 'Premier League',
     homeTeam: 'Liverpool',
     awayTeam: 'Chelsea',
-    date: new Date('2026-04-10'),
+    date: addDays(baseMockDate, 0),
     time: '20:00',
     status: 'scheduled',
   },
@@ -74,7 +86,7 @@ export const mockMatches: Match[] = [
     league: 'Premier League',
     homeTeam: 'Manchester United',
     awayTeam: 'Tottenham',
-    date: new Date('2026-04-11'),
+    date: addDays(baseMockDate, 1),
     time: '15:00',
     status: 'scheduled',
   },
@@ -86,7 +98,7 @@ export const mockMatches: Match[] = [
     league: 'La Liga',
     homeTeam: 'Real Madrid',
     awayTeam: 'Barcelona',
-    date: new Date('2026-04-10'),
+    date: addDays(baseMockDate, 0),
     time: '21:00',
     status: 'scheduled',
   },
@@ -96,7 +108,7 @@ export const mockMatches: Match[] = [
     league: 'La Liga',
     homeTeam: 'Atlético Madrid',
     awayTeam: 'Sevilla',
-    date: new Date('2026-04-11'),
+    date: addDays(baseMockDate, 1),
     time: '19:00',
     status: 'scheduled',
   },
@@ -106,7 +118,7 @@ export const mockMatches: Match[] = [
     league: 'La Liga',
     homeTeam: 'Valencia',
     awayTeam: 'Villarreal',
-    date: new Date('2026-04-12'),
+    date: addDays(baseMockDate, 2),
     time: '16:00',
     status: 'scheduled',
   },
@@ -118,7 +130,7 @@ export const mockMatches: Match[] = [
     league: 'Serie A',
     homeTeam: 'Juventus',
     awayTeam: 'Inter Milan',
-    date: new Date('2026-04-10'),
+    date: addDays(baseMockDate, 0),
     time: '20:45',
     status: 'scheduled',
   },
@@ -128,7 +140,7 @@ export const mockMatches: Match[] = [
     league: 'Serie A',
     homeTeam: 'AC Milan',
     awayTeam: 'Napoli',
-    date: new Date('2026-04-11'),
+    date: addDays(baseMockDate, 1),
     time: '18:00',
     status: 'scheduled',
   },
@@ -138,7 +150,7 @@ export const mockMatches: Match[] = [
     league: 'Serie A',
     homeTeam: 'Roma',
     awayTeam: 'Lazio',
-    date: new Date('2026-04-13'),
+    date: addDays(baseMockDate, 3),
     time: '20:00',
     status: 'scheduled',
   },
@@ -150,7 +162,7 @@ export const mockMatches: Match[] = [
     league: 'Bundesliga',
     homeTeam: 'Bayern Munich',
     awayTeam: 'Borussia Dortmund',
-    date: new Date('2026-04-10'),
+    date: addDays(baseMockDate, 0),
     time: '18:30',
     status: 'scheduled',
   },
@@ -160,7 +172,7 @@ export const mockMatches: Match[] = [
     league: 'Bundesliga',
     homeTeam: 'RB Leipzig',
     awayTeam: 'Bayer Leverkusen',
-    date: new Date('2026-04-12'),
+    date: addDays(baseMockDate, 2),
     time: '15:30',
     status: 'scheduled',
   },
@@ -172,7 +184,7 @@ export const mockMatches: Match[] = [
     league: 'Ligue 1',
     homeTeam: 'Paris Saint-Germain',
     awayTeam: 'Olympique Marseille',
-    date: new Date('2026-04-10'),
+    date: addDays(baseMockDate, 0),
     time: '21:00',
     status: 'scheduled',
   },
@@ -182,7 +194,7 @@ export const mockMatches: Match[] = [
     league: 'Ligue 1',
     homeTeam: 'Monaco',
     awayTeam: 'Lyon',
-    date: new Date('2026-04-11'),
+    date: addDays(baseMockDate, 1),
     time: '17:00',
     status: 'scheduled',
   },
@@ -194,7 +206,7 @@ export const mockMatches: Match[] = [
     league: 'Brasileirão Série A',
     homeTeam: 'Flamengo',
     awayTeam: 'Palmeiras',
-    date: new Date('2026-04-10'),
+    date: addDays(baseMockDate, 0),
     time: '21:30',
     status: 'scheduled',
   },
@@ -204,7 +216,7 @@ export const mockMatches: Match[] = [
     league: 'Brasileirão Série A',
     homeTeam: 'São Paulo',
     awayTeam: 'Corinthians',
-    date: new Date('2026-04-10'),
+    date: addDays(baseMockDate, 0),
     time: '19:00',
     status: 'scheduled',
   },
@@ -214,7 +226,7 @@ export const mockMatches: Match[] = [
     league: 'Brasileirão Série A',
     homeTeam: 'Atlético Mineiro',
     awayTeam: 'Fluminense',
-    date: new Date('2026-04-11'),
+    date: addDays(baseMockDate, 1),
     time: '20:00',
     status: 'scheduled',
   },
@@ -224,7 +236,7 @@ export const mockMatches: Match[] = [
     league: 'Brasileirão Série A',
     homeTeam: 'Internacional',
     awayTeam: 'Grêmio',
-    date: new Date('2026-04-12'),
+    date: addDays(baseMockDate, 2),
     time: '18:30',
     status: 'scheduled',
   },
@@ -236,7 +248,7 @@ export const mockMatches: Match[] = [
     league: 'UEFA Champions League',
     homeTeam: 'Real Madrid',
     awayTeam: 'Manchester City',
-    date: new Date('2026-04-15'),
+    date: addDays(baseMockDate, 5),
     time: '21:00',
     status: 'scheduled',
   },
@@ -246,7 +258,7 @@ export const mockMatches: Match[] = [
     league: 'UEFA Champions League',
     homeTeam: 'Bayern Munich',
     awayTeam: 'PSG',
-    date: new Date('2026-04-16'),
+    date: addDays(baseMockDate, 6),
     time: '21:00',
     status: 'scheduled',
   },

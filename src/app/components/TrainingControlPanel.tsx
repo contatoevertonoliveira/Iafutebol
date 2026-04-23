@@ -2,7 +2,7 @@ import { useMemo, useRef, useState, useEffect } from 'react';
 import { 
   Play, Pause, StopCircle, RefreshCw, Download, 
   Bell, BellOff, Settings, BarChart3, Clock,
-  CheckCircle, XCircle, AlertCircle
+  CheckCircle, XCircle, AlertCircle, Loader2
 } from 'lucide-react';
 import { Card } from './ui/card';
 import { Button } from './ui/button';
@@ -11,6 +11,8 @@ import { Progress } from './ui/progress';
 import { Switch } from './ui/switch';
 import { Label } from './ui/label';
 import { toast } from 'sonner';
+import { importTrainingSamplesFromCsvText } from '../services/aiAgents';
+import { loadApiConfig } from '../services/apiConfig';
 import {
   trainingWorker,
   getTrainingAgentConfigs,
@@ -40,6 +42,12 @@ export default function TrainingControlPanel({ className = '' }: TrainingControl
   const [isDownloading, setIsDownloading] = useState(false);
   const [summary, setSummary] = useState(getTrainingSummary());
   const [selectedAgentIds, setSelectedAgentIds] = useState<string[]>([]);
+  const [kaggleCsvFile, setKaggleCsvFile] = useState<File | null>(null);
+  const [isImportingKaggle, setIsImportingKaggle] = useState(false);
+  const [kaggleDatasetRef, setKaggleDatasetRef] = useState('technika148/football-database');
+  const [kaggleFileName, setKaggleFileName] = useState('');
+  const [kaggleFiles, setKaggleFiles] = useState<Array<{ name: string; size?: number }>>([]);
+  const [isListingKaggleFiles, setIsListingKaggleFiles] = useState(false);
   const [trainingQueue, setTrainingQueue] = useState<string[]>(() => {
     try {
       const raw = localStorage.getItem(queueKey);
@@ -69,6 +77,130 @@ export default function TrainingControlPanel({ className = '' }: TrainingControl
     setCurrentSession(trainingWorker.getCurrentSession());
     setDatasets(loadIncrementalDatasets());
     setSummary(getTrainingSummary());
+  };
+
+  const handleImportKaggleCsv = async () => {
+    if (!kaggleCsvFile) {
+      toast.error('Selecione um arquivo CSV');
+      return;
+    }
+
+    setIsImportingKaggle(true);
+    try {
+      const text = await kaggleCsvFile.text();
+      const result = await importTrainingSamplesFromCsvText(text, { maxRows: 50000 });
+      toast.success(
+        `Importação concluída: +${result.added} amostras (puladas: ${result.skipped}, inválidas: ${result.invalid})`,
+      );
+      refreshData();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Erro ao importar CSV');
+    } finally {
+      setIsImportingKaggle(false);
+    }
+  };
+
+  const handleDownloadFromKaggle = async () => {
+    const cfg = loadApiConfig();
+    const username = String(cfg?.kaggleUsername ?? '').trim();
+    const apiKey = String(cfg?.kaggleApiKey ?? '').trim();
+    if (!username || !apiKey) {
+      toast.error('Configure o usuário e a chave do Kaggle em Configurações');
+      return;
+    }
+    const dataset = String(kaggleDatasetRef ?? '').trim();
+    const fileName = String(kaggleFileName ?? '').trim();
+    if (!dataset || !dataset.includes('/')) {
+      toast.error('Dataset inválido. Use owner/dataset-slug');
+      return;
+    }
+    if (!fileName) {
+      toast.error('Informe o nome do arquivo (fileName) do dataset');
+      return;
+    }
+
+    setIsImportingKaggle(true);
+    try {
+      const { projectId, publicAnonKey } = await import('/utils/supabase/info');
+      const res = await fetch(`https://${projectId}.supabase.co/functions/v1/make-server-1119702f/kaggle/download-csv`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${publicAnonKey}`,
+        },
+        body: JSON.stringify({ username, apiKey, dataset, fileName, maxBytes: 12 * 1024 * 1024 }),
+      });
+      const raw = await res.text();
+      let data: any = null;
+      try {
+        data = raw ? JSON.parse(raw) : null;
+      } catch {
+        throw new Error(`Resposta inválida do servidor (${res.status}). ${raw.slice(0, 120)}`);
+      }
+      if (!res.ok || !data?.ok) throw new Error(String(data?.error ?? `Erro ao baixar CSV do Kaggle (${res.status})`));
+
+      const result = await importTrainingSamplesFromCsvText(String(data.csvText ?? ''), { maxRows: 50000 });
+      toast.success(`Kaggle OK (${data.fileName}). +${result.added} amostras`);
+      refreshData();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Erro ao baixar/importar Kaggle');
+    } finally {
+      setIsImportingKaggle(false);
+    }
+  };
+
+  const handleListKaggleFiles = async () => {
+    const cfg = loadApiConfig();
+    const username = String(cfg?.kaggleUsername ?? '').trim();
+    const apiKey = String(cfg?.kaggleApiKey ?? '').trim();
+    if (!username || !apiKey) {
+      toast.error('Configure o usuário e a chave do Kaggle em Configurações');
+      return;
+    }
+    const dataset = String(kaggleDatasetRef ?? '').trim();
+    if (!dataset || !dataset.includes('/')) {
+      toast.error('Dataset inválido. Use owner/dataset-slug');
+      return;
+    }
+
+    setIsListingKaggleFiles(true);
+    try {
+      const { projectId, publicAnonKey } = await import('/utils/supabase/info');
+      const res = await fetch(`https://${projectId}.supabase.co/functions/v1/make-server-1119702f/kaggle/list-files`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${publicAnonKey}`,
+        },
+        body: JSON.stringify({ username, apiKey, dataset }),
+      });
+      const raw = await res.text();
+      let data: any = null;
+      try {
+        data = raw ? JSON.parse(raw) : null;
+      } catch {
+        const hint = raw.toLowerCase().includes('not found') || raw.toLowerCase().includes('cannot')
+          ? ' A Edge Function parece não estar atualizada/deployada com a rota kaggle/list-files.'
+          : '';
+        throw new Error(`Resposta inválida do servidor (${res.status}). ${raw.slice(0, 120)}${hint}`);
+      }
+      if (!res.ok || !data?.ok) throw new Error(String(data?.error ?? `Erro ao listar arquivos do Kaggle (${res.status})`));
+      const files = Array.isArray(data.files) ? (data.files as Array<{ name: string; size?: number }>) : [];
+      setKaggleFiles(files);
+      if (!kaggleFileName) {
+        const preferred =
+          files.find((f) => f.name.toLowerCase().endsWith('.csv') && f.name.toLowerCase().includes('match')) ??
+          files.find((f) => f.name.toLowerCase().endsWith('.csv') && f.name.toLowerCase().includes('result')) ??
+          files.find((f) => f.name.toLowerCase().endsWith('.csv')) ??
+          null;
+        if (preferred) setKaggleFileName(preferred.name);
+      }
+      toast.success(`Arquivos encontrados: ${files.length}`);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Erro ao listar arquivos do Kaggle');
+    } finally {
+      setIsListingKaggleFiles(false);
+    }
   };
 
   useEffect(() => {
@@ -219,6 +351,79 @@ export default function TrainingControlPanel({ className = '' }: TrainingControl
 
   return (
     <div className={`space-y-6 ${className}`}>
+      <Card className="p-4 border border-yellow-200 bg-yellow-50 text-yellow-900">
+        O treinamento exibido aqui é simulado e serve para testar o fluxo. A performance real dos agentes é calibrada pelo histórico de acertos/erros dos jogos finalizados.
+      </Card>
+
+      <Card className="p-6">
+        <h3 className="text-xl font-bold mb-2">Kaggle (CSV)</h3>
+        <div className="text-sm text-gray-600 mb-4">
+          Importe um CSV real do Kaggle para criar base histórica. O sistema gera previsões dos agentes para essas partidas e salva como amostras de treino.
+        </div>
+
+        <div className="flex flex-col md:flex-row gap-3 md:items-end">
+          <div className="flex-1">
+            <Label>Arquivo CSV</Label>
+            <input
+              type="file"
+              accept=".csv,text/csv"
+              className="mt-2 block w-full text-sm"
+              onChange={(e) => {
+                const file = e.target.files?.[0] ?? null;
+                setKaggleCsvFile(file);
+              }}
+            />
+          </div>
+          <Button onClick={handleImportKaggleCsv} disabled={!kaggleCsvFile || isImportingKaggle} className="bg-blue-700 hover:bg-blue-800">
+            {isImportingKaggle ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Download className="w-4 h-4 mr-2" />}
+            Importar
+          </Button>
+        </div>
+
+        <div className="mt-4 grid md:grid-cols-3 gap-3 items-end">
+          <div className="md:col-span-1">
+            <Label>Dataset (owner/slug)</Label>
+            <input
+              className="mt-2 block w-full text-sm border border-gray-200 rounded-md px-3 py-2"
+              value={kaggleDatasetRef}
+              onChange={(e) => setKaggleDatasetRef(e.target.value)}
+              placeholder="owner/dataset-slug"
+            />
+          </div>
+          <div className="md:col-span-1">
+            <Label>fileName</Label>
+            <input
+              className="mt-2 block w-full text-sm border border-gray-200 rounded-md px-3 py-2"
+              value={kaggleFileName}
+              onChange={(e) => setKaggleFileName(e.target.value)}
+              placeholder="ex: matches.csv"
+              list="kaggle-files"
+            />
+            <datalist id="kaggle-files">
+              {kaggleFiles.map((f) => (
+                <option key={f.name} value={f.name} />
+              ))}
+            </datalist>
+          </div>
+          <div className="md:col-span-1">
+            <div className="flex gap-2">
+              <Button
+                onClick={handleListKaggleFiles}
+                disabled={isListingKaggleFiles || isImportingKaggle}
+                variant="outline"
+                className="flex-1"
+              >
+                {isListingKaggleFiles ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Download className="w-4 h-4 mr-2" />}
+                Listar
+              </Button>
+              <Button onClick={handleDownloadFromKaggle} disabled={isImportingKaggle} variant="outline" className="flex-1">
+                {isImportingKaggle ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Download className="w-4 h-4 mr-2" />}
+                Baixar
+              </Button>
+            </div>
+          </div>
+        </div>
+      </Card>
       {/* Status do Worker */}
       <Card className="p-6">
         <div className="flex items-center justify-between mb-4">
@@ -386,7 +591,7 @@ export default function TrainingControlPanel({ className = '' }: TrainingControl
               />
               
               <div className="flex justify-between text-sm">
-                <span>Melhor Accuracy:</span>
+                <span>Melhor Accuracy (simulado):</span>
                 <span className="font-semibold">{currentSession.bestAccuracy.toFixed(2)}%</span>
               </div>
               
@@ -423,7 +628,7 @@ export default function TrainingControlPanel({ className = '' }: TrainingControl
           </div>
           
           <div className="bg-purple-50 rounded-lg p-4 border border-purple-200">
-            <div className="text-sm text-purple-700 mb-1">Melhoria Média</div>
+            <div className="text-sm text-purple-700 mb-1">Melhoria Média (simulado)</div>
             <div className="text-2xl font-bold text-purple-900">+{summary.averageAccuracyImprovement}%</div>
           </div>
         </div>
@@ -581,7 +786,7 @@ export default function TrainingControlPanel({ className = '' }: TrainingControl
                   <span className="font-semibold">{session.completedEpochs}/{session.totalEpochs}</span>
                 </div>
                 <div>
-                  <span className="text-gray-600">Accuracy:</span>{' '}
+                  <span className="text-gray-600">Accuracy (simulado):</span>{' '}
                   <span className="font-semibold">{session.bestAccuracy.toFixed(2)}%</span>
                 </div>
                 <div>

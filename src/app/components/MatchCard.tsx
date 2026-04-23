@@ -196,6 +196,47 @@ export function MatchCard({
 
   const shouldShowScoreboard = resultAvailable || isLive;
   const hasPrediction = Boolean(prediction);
+  const bttsOpportunity =
+    Boolean(prediction) &&
+    prediction?.btts?.prediction === 'yes' &&
+    typeof prediction?.btts?.confidence === 'number' &&
+    prediction.btts.confidence >= 75;
+
+  const voteSignals = useMemo(() => {
+    if (!prediction) return null;
+    const winner = prediction.winner?.prediction;
+    const winnerConf = typeof prediction.winner?.confidence === 'number' ? prediction.winner.confidence : 0;
+    const rest = Math.max(0, 100 - winnerConf);
+    const half = Math.round(rest / 2);
+
+    const probs =
+      winner === 'home'
+        ? { home: winnerConf, draw: half, away: rest - half }
+        : winner === 'away'
+          ? { away: winnerConf, draw: half, home: rest - half }
+          : { draw: winnerConf, home: half, away: rest - half };
+
+    const over15 =
+      prediction.overUnder?.prediction === 'over' && typeof prediction.overUnder.confidence === 'number'
+        ? Math.round(prediction.overUnder.confidence)
+        : null;
+
+    const bttsYes =
+      prediction.btts?.prediction === 'yes' && typeof prediction.btts.confidence === 'number'
+        ? Math.round(prediction.btts.confidence)
+        : null;
+
+    const layHome = Math.max(0, 100 - probs.home);
+    const layAway = Math.max(0, 100 - probs.away);
+
+    return {
+      probs,
+      over15,
+      bttsYes,
+      layHome,
+      layAway,
+    };
+  }, [prediction]);
 
   const actualWinner = (() => {
     if (!resultAvailable) return null;
@@ -426,11 +467,43 @@ export function MatchCard({
           </div>
         )}
 
-        {isLive && (
-          <div className="mb-4 flex justify-end">
-            <Badge className="bg-green-100 text-green-700 border-green-300">AO VIVO</Badge>
+        {isLive || bttsOpportunity ? (
+          <div className="mb-4 flex justify-end gap-2">
+            {bttsOpportunity ? (
+              <Badge className="bg-emerald-100 text-emerald-800 border-emerald-300">
+                BTTS SIM {Math.round(prediction!.btts.confidence)}%
+              </Badge>
+            ) : null}
+            {isLive ? <Badge className="bg-green-100 text-green-700 border-green-300">AO VIVO</Badge> : null}
           </div>
-        )}
+        ) : null}
+
+        {voteSignals ? (
+          <div className="mb-4 flex flex-wrap gap-2">
+            <Badge variant="outline" className="tabular-nums">
+              Casa {Math.round(voteSignals.probs.home)}%
+            </Badge>
+            <Badge variant="outline" className="tabular-nums">
+              Fora {Math.round(voteSignals.probs.away)}%
+            </Badge>
+            {voteSignals.bttsYes !== null ? (
+              <Badge className="bg-emerald-100 text-emerald-800 border-emerald-300 tabular-nums">
+                BTTS {voteSignals.bttsYes}%
+              </Badge>
+            ) : null}
+            {voteSignals.over15 !== null ? (
+              <Badge className="bg-blue-100 text-blue-800 border-blue-300 tabular-nums">
+                Over 1.5 {voteSignals.over15}%
+              </Badge>
+            ) : null}
+            <Badge variant="outline" className="tabular-nums">
+              Lay Casa {Math.round(voteSignals.layHome)}%
+            </Badge>
+            <Badge variant="outline" className="tabular-nums">
+              Lay Fora {Math.round(voteSignals.layAway)}%
+            </Badge>
+          </div>
+        ) : null}
 
         {resultAvailable && showResult && hasPrediction && (
           <div className="mb-4 rounded-lg border border-gray-200 bg-white p-3">

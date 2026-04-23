@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Settings as SettingsIcon, Key, CheckCircle, XCircle, Loader2, Trophy, Search } from 'lucide-react';
+import { Settings as SettingsIcon, Key, CheckCircle, XCircle, Loader2, Trophy, Search, Settings2, Link2Off, Plug } from 'lucide-react';
 import { Card } from '../components/ui/card';
 import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
@@ -17,8 +17,13 @@ import { toast } from 'sonner';
 import { ApiFootballMatch, ApiFootballService, ApiFootballLeague } from '../services/apiFootballService';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select';
 
-export default function Settings() {
-  const [tab, setTab] = useState<'apis' | 'competitions'>('apis');
+type SettingsProps = {
+  initialTab?: 'apis' | 'competitions';
+  mode?: 'default' | 'leagues';
+};
+
+export default function Settings({ initialTab = 'apis', mode = 'default' }: SettingsProps) {
+  const [tab, setTab] = useState<'apis' | 'competitions'>(initialTab);
   const [config, setConfig] = useState<ApiConfig>({
     footballDataApiKey: '',
     apiFootballKey: '',
@@ -40,6 +45,8 @@ export default function Settings() {
   const [countryQuery, setCountryQuery] = useState('');
   const [leaguesLastSource, setLeaguesLastSource] = useState<'api' | 'fixtures' | 'cache' | 'none'>('none');
   const [leaguesLastError, setLeaguesLastError] = useState<string>('');
+  const [mobileExpandedApi, setMobileExpandedApi] = useState<'api-football' | 'football-data' | 'openligadb' | null>(null);
+  const [leaguesProgress, setLeaguesProgress] = useState<{ page: number; total: number; count: number } | null>(null);
 
   const derivedLeagues = (() => {
     try {
@@ -84,20 +91,120 @@ export default function Settings() {
     }
   })();
 
-  const fetchLeagues = async (opts?: { country?: string }) => {
+  const leaguesCacheMaxAgeMs = 1000 * 60 * 60 * 24;
+  const getLeaguesCacheKey = (country?: string) => {
+    const c = String(country ?? '').trim();
+    if (!c) return 'apiFootball_leagues_cache_v2_all';
+    const normalized = c.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+    return `apiFootball_leagues_cache_v2_country_${normalized || 'unknown'}`;
+  };
+
+  const readLeaguesCache = (cacheKey: string) => {
+    try {
+      const raw = localStorage.getItem(cacheKey);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw) as { fetchedAt: string; items: ApiFootballLeague[] };
+      if (!parsed?.fetchedAt || !Array.isArray(parsed.items)) return null;
+      const age = Date.now() - new Date(parsed.fetchedAt).getTime();
+      return { ...parsed, isFresh: age >= 0 && age < leaguesCacheMaxAgeMs };
+    } catch {
+      return null;
+    }
+  };
+
+  const readLeaguesCacheFromSupabase = async (country?: string) => {
+    try {
+      const { projectId, publicAnonKey } = await import('/utils/supabase/info');
+      const res = await fetch(
+        `https://${projectId}.supabase.co/functions/v1/make-server-1119702f/cache/api-football/leagues/get`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${publicAnonKey}`,
+          },
+          body: JSON.stringify({ country: country ?? null }),
+        },
+      );
+
+      if (!res.ok) return null;
+      const data = (await res.json()) as { ok?: boolean; value?: { fetchedAt: string; items: ApiFootballLeague[] } | null };
+      const value = data?.value ?? null;
+      if (!value?.fetchedAt || !Array.isArray(value.items)) return null;
+      const age = Date.now() - new Date(value.fetchedAt).getTime();
+      return { ...value, isFresh: age >= 0 && age < leaguesCacheMaxAgeMs };
+    } catch {
+      return null;
+    }
+  };
+
+  const writeLeaguesCacheToSupabase = async (payload: { country?: string; fetchedAt: string; items: ApiFootballLeague[] }) => {
+    try {
+      const { projectId, publicAnonKey } = await import('/utils/supabase/info');
+      await fetch(
+        `https://${projectId}.supabase.co/functions/v1/make-server-1119702f/cache/api-football/leagues/set`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${publicAnonKey}`,
+          },
+          body: JSON.stringify({
+            country: payload.country ?? null,
+            payload: { fetchedAt: payload.fetchedAt, items: payload.items },
+          }),
+        },
+      );
+    } catch {}
+  };
+
+  const fetchLeagues = async (opts?: { country?: string; force?: boolean }) => {
     if (!config.apiFootballKey?.trim()) return;
+    const cacheKey = getLeaguesCacheKey(opts?.country);
+    if (!opts?.force) {
+      const cached = readLeaguesCache(cacheKey);
+      if (cached?.items?.length) {
+        setLeaguesLastError('');
+        setLeaguesProgress(null);
+        setLeaguesLastSource('cache');
+        setLeagues(cached.items);
+        return;
+      }
+      const remoteCached = await readLeaguesCacheFromSupabase(opts?.country);
+      if (remoteCached?.items?.length) {
+        setLeaguesLastError('');
+        setLeaguesProgress(null);
+        setLeaguesLastSource('cache');
+        setLeagues(remoteCached.items);
+        try {
+          localStorage.setItem(cacheKey, JSON.stringify({ fetchedAt: remoteCached.fetchedAt, items: remoteCached.items }));
+          if (!opts?.country) {
+            localStorage.setItem('apiFootball_leagues_cache_v2', JSON.stringify({ fetchedAt: remoteCached.fetchedAt, items: remoteCached.items }));
+          }
+        } catch {}
+        return;
+      }
+    }
     setIsLoadingLeagues(true);
     setLeaguesLastError('');
+    setLeaguesProgress(null);
     try {
       const service = new ApiFootballService(config.apiFootballKey.trim());
-      let items = await service.getLeaguesCatalog({ current: true, country: opts?.country, maxPages: 10 });
+      const maxPages = opts?.country ? 25 : 10;
+      let items = await service.getLeaguesCatalogWithProgress(
+        { country: opts?.country, current: true, maxPages },
+        (p) => setLeaguesProgress(p),
+      );
       if (items.length === 0) {
         const seasons = await service.getSeasons().catch(() => []);
         const latestSeason = seasons.length > 0 ? Math.max(...seasons) : new Date().getFullYear();
-        items = await service.getLeaguesCatalog({ season: latestSeason, country: opts?.country, maxPages: 10 });
+        items = await service.getLeaguesCatalogWithProgress(
+          { season: latestSeason, country: opts?.country, current: true, maxPages },
+          (p) => setLeaguesProgress(p),
+        );
       }
-      if (items.length === 0) {
-        items = await service.getLeaguesCatalog({ country: opts?.country, maxPages: 10 });
+      if (items.length === 0 && opts?.country) {
+        items = await service.getLeaguesCatalogWithProgress({ current: true, maxPages }, (p) => setLeaguesProgress(p));
       }
       if (items.length === 0) {
         const dayKey = (d: Date) =>
@@ -110,7 +217,7 @@ export default function Settings() {
 
         const from = dayKey(new Date());
         const to = dayKey(new Date(Date.now() + 7 * 24 * 60 * 60 * 1000));
-        const fixtures = await service.getFixtures({ from, to, timezone: 'America/Sao_Paulo' });
+        const fixtures = await service.getFixtures({ from, to, timezone: 'America/Sao_Paulo', maxPages: 3 });
         const byId = new Map<number, ApiFootballLeague>();
         for (const f of fixtures as ApiFootballMatch[]) {
           const l = f?.league;
@@ -137,9 +244,14 @@ export default function Settings() {
         return a.name.localeCompare(b.name);
       });
       setLeagues(items);
+      const fetchedAt = new Date().toISOString();
       try {
-        localStorage.setItem('apiFootball_leagues_cache_v1', JSON.stringify({ fetchedAt: new Date().toISOString(), items }));
+        localStorage.setItem(cacheKey, JSON.stringify({ fetchedAt, items }));
+        if (!opts?.country) {
+          localStorage.setItem('apiFootball_leagues_cache_v2', JSON.stringify({ fetchedAt, items }));
+        }
       } catch {}
+      void writeLeaguesCacheToSupabase({ country: opts?.country, fetchedAt, items });
       toast.success(items.length > 0 ? `Lista atualizada (${items.length})` : 'Lista atualizada (0)');
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Erro ao carregar campeonatos da API-Football';
@@ -147,6 +259,7 @@ export default function Settings() {
       toast.error(msg);
     } finally {
       setIsLoadingLeagues(false);
+      setLeaguesProgress(null);
     }
   };
 
@@ -164,25 +277,20 @@ export default function Settings() {
   }, []);
 
   useEffect(() => {
+    setTab(initialTab);
+  }, [initialTab]);
+
+  useEffect(() => {
     if (tab !== 'competitions') return;
     if (!config.apiFootballKey?.trim()) return;
 
-    const cacheKey = 'apiFootball_leagues_cache_v1';
-    const maxAgeMs = 1000 * 60 * 60 * 24;
-    const cached = (() => {
-      try {
-        const raw = localStorage.getItem(cacheKey);
-        if (!raw) return null;
-        const parsed = JSON.parse(raw) as { fetchedAt: string; items: ApiFootballLeague[] };
-        if (!parsed?.fetchedAt || !Array.isArray(parsed.items)) return null;
-        const age = Date.now() - new Date(parsed.fetchedAt).getTime();
-        return { ...parsed, isFresh: age >= 0 && age < maxAgeMs };
-      } catch {
-        return null;
-      }
-    })();
+    const cached =
+      readLeaguesCache(getLeaguesCacheKey()) ??
+      readLeaguesCache('apiFootball_leagues_cache_v2') ??
+      readLeaguesCache('apiFootball_leagues_cache_v1');
 
-    if (cached?.isFresh) {
+    if (cached?.items?.length) {
+      setLeaguesLastSource('cache');
       setLeagues(cached.items);
       return;
     }
@@ -268,8 +376,470 @@ export default function Settings() {
     }, 500);
   };
 
+  if (mode === 'leagues') {
+    const allLeagues = leagues.length > 0 ? leagues : derivedLeagues;
+    const q = leagueSearch.trim().toLowerCase();
+    const filtered = allLeagues.filter((l) => {
+      if (!q) return true;
+      return `${l.name} ${l.country} ${l.type}`.toLowerCase().includes(q);
+    });
+
+    const isElite = (l: ApiFootballLeague) => {
+      const name = l.name.toLowerCase();
+      const country = l.country.toLowerCase();
+      if (country.includes('england') && name.includes('premier league')) return true;
+      if (country.includes('spain') && name.includes('la liga')) return true;
+      if (country.includes('germany') && name.includes('bundesliga')) return true;
+      if (country.includes('italy') && name.includes('serie a')) return true;
+      if (country.includes('france') && name.includes('ligue 1')) return true;
+      return false;
+    };
+
+    const eliteLeagues = filtered.filter(isElite);
+    const regionalLeagues = filtered.filter((l) => !isElite(l));
+
+    const disabledIds = new Set(config.apiFootballDisabledLeagueIds ?? []);
+    const setLeagueActive = (leagueId: number, active: boolean) => {
+      const next = new Set(config.apiFootballDisabledLeagueIds ?? []);
+      if (active) next.delete(leagueId);
+      else next.add(leagueId);
+      setConfig({ ...config, apiFootballDisabledLeagueIds: Array.from(next) });
+    };
+
+    const LeagueCard = ({ league }: { league: ApiFootballLeague }) => {
+      const active = !disabledIds.has(league.id);
+      const image = league.logo || league.flag || '';
+
+      return (
+        <div className="bg-white border border-gray-200 rounded-2xl shadow-sm">
+          <div className="px-4 py-4 flex items-center justify-between gap-3">
+            <div className="flex items-center gap-3 min-w-0">
+              <div className="w-11 h-11 rounded-xl bg-gray-100 overflow-hidden flex items-center justify-center shrink-0">
+                {image ? (
+                  <img src={image} alt={league.name} className="w-full h-full object-cover" />
+                ) : (
+                  <div className="w-6 h-6 rounded-full bg-gray-200" />
+                )}
+              </div>
+              <div className="min-w-0">
+                <div className="font-semibold text-gray-900 truncate">{league.name}</div>
+                <div className="text-xs text-gray-600 truncate">
+                  {league.country} • temporada {league.season}
+                </div>
+              </div>
+            </div>
+            <Switch checked={active} onCheckedChange={(checked) => setLeagueActive(league.id, checked)} />
+          </div>
+          <div className="px-4 pb-4 flex items-center justify-between text-[11px] text-gray-500">
+            <div className="font-semibold tracking-wide">DADOS: API-FOOTBALL</div>
+            <div className="w-4 h-4 rounded-full border border-gray-200 bg-gray-50" />
+          </div>
+        </div>
+      );
+    };
+
+    return (
+      <div className="min-h-screen bg-gray-50 px-4 pt-4 pb-28 md:hidden">
+        <div className="mb-4">
+          <div className="text-3xl font-bold text-gray-900">Ativação de Ligas</div>
+          <div className="text-sm text-gray-600 mt-2">
+            Personalize seu feed. Ative as ligas que deseja monitorar para receber insights em tempo real.
+          </div>
+        </div>
+
+        <div className="mb-5">
+          <div className="bg-white border border-gray-200 rounded-2xl shadow-sm px-3 py-3 flex items-center gap-2">
+            <div className="w-9 h-9 rounded-xl bg-gray-50 border border-gray-200 flex items-center justify-center shrink-0">
+              <Search className="w-4 h-4 text-gray-500" />
+            </div>
+            <Input
+              value={leagueSearch}
+              onChange={(e) => setLeagueSearch(e.target.value)}
+              placeholder="Buscar liga..."
+              className="border-0 shadow-none focus-visible:ring-0 px-0"
+            />
+          </div>
+        </div>
+
+        <div className="mb-5 flex items-center justify-between gap-3">
+          <Button
+            variant="outline"
+            disabled={!config.apiFootballKey?.trim() || isLoadingLeagues}
+            onClick={async () => {
+              await fetchLeagues({ force: true });
+            }}
+          >
+            {isLoadingLeagues ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : null}
+            Atualizar lista
+          </Button>
+          <div className="text-xs text-gray-600 tabular-nums">
+            {leagues.length > 0 ? `${leagues.length} ligas` : derivedLeagues.length > 0 ? `${derivedLeagues.length} (cache)` : '—'}
+          </div>
+        </div>
+
+        {!config.apiFootballKey?.trim() ? (
+          <div className="bg-orange-50 border border-orange-200 rounded-2xl p-4 text-sm text-orange-800">
+            Configure sua API key da API-Football em Perfil para listar e ativar ligas.
+          </div>
+        ) : isLoadingLeagues ? (
+          <div className="bg-white border border-gray-200 rounded-2xl p-4 flex items-center gap-3 text-gray-700">
+            <Loader2 className="w-5 h-5 animate-spin" />
+            <div>
+              <div>
+                Carregando ligas
+                {leaguesProgress ? ` (${leaguesProgress.page}/${leaguesProgress.total})` : ''}...
+              </div>
+              {leaguesProgress ? (
+                <div className="text-xs text-gray-500 mt-1 tabular-nums">Itens: {leaguesProgress.count}</div>
+              ) : null}
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-6">
+            {leaguesLastError ? (
+              <div className="bg-red-50 border border-red-200 rounded-2xl p-4 text-sm text-red-800">
+                Erro ao carregar ligas: {leaguesLastError}
+              </div>
+            ) : null}
+            {eliteLeagues.length > 0 && (
+              <div>
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-3">
+                    <div className="w-8 h-1 rounded-full bg-blue-600" />
+                    <div className="text-sm font-extrabold tracking-widest text-gray-900">ELITE LEAGUES</div>
+                  </div>
+                  <div className="text-[11px] font-bold px-3 py-1 rounded-full bg-blue-50 text-blue-700 border border-blue-200">
+                    AI PRIORITY
+                  </div>
+                </div>
+                <div className="space-y-3">
+                  {eliteLeagues.map((l) => (
+                    <LeagueCard key={l.id} league={l} />
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {regionalLeagues.length > 0 && (
+              <div>
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-3">
+                    <div className="w-8 h-1 rounded-full bg-gray-300" />
+                    <div className="text-sm font-extrabold tracking-widest text-gray-900">REGIONAL &amp; EMERGING</div>
+                  </div>
+                  <div className="text-[11px] font-bold px-3 py-1 rounded-full bg-gray-100 text-gray-700 border border-gray-200">
+                    STANDARD
+                  </div>
+                </div>
+                <div className="space-y-3">
+                  {regionalLeagues.map((l) => (
+                    <LeagueCard key={l.id} league={l} />
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {eliteLeagues.length === 0 && regionalLeagues.length === 0 && (
+              <div className="bg-white border border-gray-200 rounded-2xl p-4 text-sm text-gray-700">
+                Nenhuma liga encontrada.
+              </div>
+            )}
+          </div>
+        )}
+
+        <div className="fixed left-0 right-0 bottom-16 px-4 md:hidden">
+          <div className="max-w-md mx-auto">
+            <Button
+              onClick={handleSave}
+              disabled={isSaving}
+              className="w-full h-12 rounded-2xl bg-blue-600 hover:bg-blue-700 text-white font-bold shadow-lg"
+            >
+              {isSaving ? (
+                <>
+                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                  Salvando...
+                </>
+              ) : (
+                'Salvar Alterações'
+              )}
+            </Button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const hasApiFootball = Boolean(config.apiFootballKey?.trim());
+  const hasFootballData = Boolean(config.footballDataApiKey?.trim());
+  const hasOpenLigaDb = config.openLigaDbEnabled ?? true;
+  const activeSourcesCount = Number(hasApiFootball) + Number(hasFootballData) + Number(hasOpenLigaDb);
+  const apiOverallStatus = activeSourcesCount > 0 ? 'Online' : 'Offline';
+
+  const MobileApiCard = ({
+    title,
+    badgeText,
+    badgeClassName,
+    statusText,
+    statusTone,
+    isConfigured,
+    onOpenSettings,
+    onDisconnect,
+  }: {
+    title: string;
+    badgeText: string;
+    badgeClassName: string;
+    statusText: string;
+    statusTone: 'ok' | 'warn' | 'off';
+    isConfigured: boolean;
+    onOpenSettings: () => void;
+    onDisconnect?: () => void;
+  }) => {
+    const statusClass =
+      statusTone === 'ok'
+        ? 'text-green-700'
+        : statusTone === 'warn'
+          ? 'text-orange-700'
+          : 'text-gray-600';
+
+    return (
+      <div className="bg-white border border-gray-200 rounded-2xl shadow-sm">
+        <div className="px-4 py-4 flex items-start justify-between gap-3">
+          <div className="flex items-start gap-3 min-w-0">
+            <div className="w-12 h-12 rounded-2xl bg-gray-100 border border-gray-200 shrink-0 overflow-hidden">
+              <div className="w-full h-full bg-gradient-to-br from-gray-200 to-gray-100" />
+            </div>
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                <div className="font-semibold text-gray-900 truncate">{title}</div>
+                <div className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${badgeClassName}`}>{badgeText}</div>
+              </div>
+              <div className="mt-2 grid grid-cols-2 gap-x-6 gap-y-1 text-[11px] text-gray-600">
+                <div>
+                  <div className="text-gray-500">Chave</div>
+                  <div className="font-semibold">{isConfigured ? 'Configurada' : 'Não configurada'}</div>
+                </div>
+                <div>
+                  <div className="text-gray-500">Status</div>
+                  <div className={`font-semibold ${statusClass}`}>{statusText}</div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={onOpenSettings}
+              className="w-10 h-10 rounded-xl bg-gray-50 border border-gray-200 flex items-center justify-center"
+              aria-label="Configurar"
+              title="Configurar"
+            >
+              <Settings2 className="w-4 h-4 text-gray-700" />
+            </button>
+            {onDisconnect && (
+              <button
+                type="button"
+                onClick={onDisconnect}
+                className="w-10 h-10 rounded-xl bg-gray-50 border border-gray-200 flex items-center justify-center"
+                aria-label="Desconectar"
+                title="Desconectar"
+              >
+                <Link2Off className="w-4 h-4 text-gray-700" />
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const mobileApis = (
+    <div className="min-h-screen bg-gray-50 px-4 pt-4 pb-28 md:hidden">
+      <div className="mb-4">
+        <div className="text-3xl font-bold text-gray-900">Gerenciamento de APIs</div>
+        <div className="text-sm text-gray-600 mt-2">
+          Centralize as chaves de integração para alimentar o algoritmo preditivo.
+        </div>
+      </div>
+
+      <div className="bg-white border border-gray-200 rounded-2xl shadow-sm p-4 mb-4">
+        <div className="flex items-start gap-3">
+          <div className="w-12 h-12 rounded-2xl bg-blue-600 flex items-center justify-center shrink-0">
+            <Plug className="w-6 h-6 text-white" />
+          </div>
+          <div className="min-w-0">
+            <div className="text-lg font-bold text-gray-900">Nova Conexão</div>
+            <div className="text-sm text-gray-600 mt-1">
+              Adicione ou atualize suas chaves para ampliar as fontes de dados.
+            </div>
+          </div>
+        </div>
+        <Button
+          className="w-full mt-4 h-11 rounded-2xl bg-blue-600 hover:bg-blue-700"
+          onClick={() => setMobileExpandedApi('api-football')}
+        >
+          <Key className="w-4 h-4 mr-2" />
+          Adicionar Chave API
+        </Button>
+      </div>
+
+      <div className="space-y-3 mb-5">
+        <MobileApiCard
+          title="API-Football"
+          badgeText="PREMIUM"
+          badgeClassName="bg-blue-50 text-blue-700 border-blue-200"
+          statusText={hasApiFootball ? (validationStatusApiFootball === 'invalid' ? 'Inválida' : 'Ativa') : 'Desativada'}
+          statusTone={hasApiFootball ? (validationStatusApiFootball === 'invalid' ? 'warn' : 'ok') : 'off'}
+          isConfigured={hasApiFootball}
+          onOpenSettings={() => setMobileExpandedApi((prev) => (prev === 'api-football' ? null : 'api-football'))}
+          onDisconnect={
+            hasApiFootball
+              ? () => {
+                  setConfig({ ...config, apiFootballKey: '' });
+                  setValidationStatusApiFootball('idle');
+                  toast.success('API-Football removida');
+                }
+              : undefined
+          }
+        />
+
+        {mobileExpandedApi === 'api-football' && (
+          <div className="bg-white border border-gray-200 rounded-2xl shadow-sm p-4">
+            <div className="text-sm font-bold text-gray-900 mb-3">Configurar API-Football</div>
+            <Label htmlFor="mobile_apiFootballKey">API Key</Label>
+            <div className="flex gap-2 mt-2">
+              <Input
+                id="mobile_apiFootballKey"
+                type="password"
+                placeholder="Insira sua API key"
+                value={config.apiFootballKey}
+                onChange={(e) => {
+                  setConfig({ ...config, apiFootballKey: e.target.value });
+                  setValidationStatusApiFootball('idle');
+                }}
+              />
+              <Button
+                variant="outline"
+                disabled={isValidatingApiFootball || !config.apiFootballKey.trim()}
+                onClick={handleValidateApiFootballKey}
+              >
+                {isValidatingApiFootball ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Validar'}
+              </Button>
+            </div>
+          </div>
+        )}
+
+        <MobileApiCard
+          title="Football-Data.org"
+          badgeText="FREE TIER"
+          badgeClassName="bg-gray-100 text-gray-700 border-gray-200"
+          statusText={hasFootballData ? (validationStatus === 'invalid' ? 'Inválida' : 'Ativa') : 'Desativada'}
+          statusTone={hasFootballData ? (validationStatus === 'invalid' ? 'warn' : 'ok') : 'off'}
+          isConfigured={hasFootballData}
+          onOpenSettings={() => setMobileExpandedApi((prev) => (prev === 'football-data' ? null : 'football-data'))}
+          onDisconnect={
+            hasFootballData
+              ? () => {
+                  setConfig({ ...config, footballDataApiKey: '' });
+                  setValidationStatus('idle');
+                  toast.success('Football-Data removida');
+                }
+              : undefined
+          }
+        />
+
+        {mobileExpandedApi === 'football-data' && (
+          <div className="bg-white border border-gray-200 rounded-2xl shadow-sm p-4">
+            <div className="text-sm font-bold text-gray-900 mb-3">Configurar Football-Data.org</div>
+            <Label htmlFor="mobile_footballDataApiKey">API Key</Label>
+            <div className="flex gap-2 mt-2">
+              <Input
+                id="mobile_footballDataApiKey"
+                type="password"
+                placeholder="Insira sua API key"
+                value={config.footballDataApiKey}
+                onChange={(e) => {
+                  setConfig({ ...config, footballDataApiKey: e.target.value });
+                  setValidationStatus('idle');
+                }}
+              />
+              <Button variant="outline" disabled={isValidating || !config.footballDataApiKey.trim()} onClick={handleValidateApiKey}>
+                {isValidating ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Validar'}
+              </Button>
+            </div>
+          </div>
+        )}
+
+        <div className="bg-white border border-gray-200 rounded-2xl shadow-sm">
+          <div className="px-4 py-4 flex items-start justify-between gap-3">
+            <div className="flex items-start gap-3 min-w-0">
+              <div className="w-12 h-12 rounded-2xl bg-gray-100 border border-gray-200 shrink-0 overflow-hidden">
+                <div className="w-full h-full bg-gradient-to-br from-blue-200 to-blue-50" />
+              </div>
+              <div className="min-w-0">
+                <div className="font-semibold text-gray-900 truncate">OpenLigaDB</div>
+                <div className="mt-2 text-[11px] text-gray-600">
+                  <div className="text-gray-500">Status</div>
+                  <div className={`font-semibold ${hasOpenLigaDb ? 'text-green-700' : 'text-gray-600'}`}>
+                    {hasOpenLigaDb ? 'Ativa' : 'Desativada'}
+                  </div>
+                </div>
+              </div>
+            </div>
+            <Switch
+              checked={hasOpenLigaDb}
+              onCheckedChange={(checked) => {
+                setConfig({ ...config, openLigaDbEnabled: checked });
+              }}
+            />
+          </div>
+        </div>
+      </div>
+
+      <div className="space-y-3">
+        <div className="bg-white border border-gray-200 rounded-2xl shadow-sm p-4">
+          <div className="text-[11px] font-bold tracking-widest text-gray-500">STATUS DAS CONEXÕES</div>
+          <div className="text-2xl font-extrabold text-gray-900 mt-1">{apiOverallStatus}</div>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <div className="bg-white border border-gray-200 rounded-2xl shadow-sm p-4">
+            <div className="text-[11px] font-bold tracking-widest text-gray-500">FONTES ATIVAS</div>
+            <div className="text-2xl font-extrabold text-gray-900 mt-1 tabular-nums">{activeSourcesCount}</div>
+          </div>
+          <div className="bg-white border border-gray-200 rounded-2xl shadow-sm p-4">
+            <div className="text-[11px] font-bold tracking-widest text-gray-500">LIGAS ATIVAS</div>
+            <div className="text-2xl font-extrabold text-gray-900 mt-1 tabular-nums">
+              {hasApiFootball ? '—' : '-'}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="fixed left-0 right-0 bottom-16 px-4 md:hidden">
+        <div className="max-w-md mx-auto">
+          <Button
+            onClick={handleSave}
+            disabled={isSaving}
+            className="w-full h-12 rounded-2xl bg-blue-600 hover:bg-blue-700 text-white font-bold shadow-lg"
+          >
+            {isSaving ? (
+              <>
+                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                Salvando...
+              </>
+            ) : (
+              'Salvar Alterações'
+            )}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+
   return (
-    <div className="min-h-screen bg-gray-50 p-6">
+    <>
+      {mobileApis}
+      <div className="hidden md:block">
+        <div className="min-h-screen bg-gray-50 p-6">
       <div className="max-w-4xl mx-auto">
         {/* Header */}
         <div className="mb-8">
@@ -309,7 +879,7 @@ export default function Settings() {
                   variant="outline"
                   disabled={!config.apiFootballKey?.trim() || isLoadingLeagues}
                   onClick={async () => {
-                    await fetchLeagues();
+                    await fetchLeagues({ force: true });
                   }}
                 >
                   {isLoadingLeagues ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : null}
@@ -324,7 +894,15 @@ export default function Settings() {
               ) : isLoadingLeagues ? (
                 <div className="bg-white border border-gray-200 rounded-lg p-6 flex items-center gap-3 text-gray-700">
                   <Loader2 className="w-5 h-5 animate-spin" />
-                  Carregando campeonatos...
+                  <div>
+                    <div>
+                      Carregando campeonatos
+                      {leaguesProgress ? ` (${leaguesProgress.page}/${leaguesProgress.total})` : ''}...
+                    </div>
+                    {leaguesProgress ? (
+                      <div className="text-xs text-gray-500 mt-1 tabular-nums">Itens: {leaguesProgress.count}</div>
+                    ) : null}
+                  </div>
                 </div>
               ) : (
                 <>
@@ -921,6 +1499,8 @@ export default function Settings() {
         </div>
         )}
       </div>
-    </div>
+        </div>
+      </div>
+    </>
   );
 }

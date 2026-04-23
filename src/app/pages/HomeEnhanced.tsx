@@ -5,16 +5,14 @@ import { PredictionDetails } from '../components/PredictionDetails';
 import { FilterBar } from '../components/FilterBar';
 import { PremiumCarousel } from '../components/PremiumCarousel';
 import { AgentAnalysis } from '../components/AgentAnalysis';
-import { ApiStatus } from '../components/ApiStatus';
 import { DraggableWindow } from '../components/DraggableWindow';
-import { BarChart3, Brain, Globe, Loader2, RefreshCw, ShieldCheck, Target, TrendingUp } from 'lucide-react';
+import { BarChart3, Brain, Globe, Loader2, ShieldCheck, Target, TrendingUp } from 'lucide-react';
 import { MobileMatchCard } from '../components/MobileMatchCard';
 import { getDynamicAgentProfiles, AgentEnsemble, AgentPrediction, learnFromMatchResult, recordTrainingSample } from '../services/aiAgents';
 import { loadApiConfig } from '../services/apiConfig';
 import { FootballDataService, FootballMatch } from '../services/footballDataService';
 import { ApiFootballService, ApiFootballMatch } from '../services/apiFootballService';
 import { OpenLigaDbService, OpenLigaMatch } from '../services/openLigaDbService';
-import { Button } from '../components/ui/button';
 import { toast } from 'sonner';
 import { useLocation, useNavigate } from 'react-router';
 
@@ -66,6 +64,8 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
   const zCounterRef = useRef(70);
   const favoritesKey = 'favorite_matches_v1';
   const [favoriteMatchIds, setFavoriteMatchIds] = useState<string[]>([]);
+  const requestedFixturesKey = 'requested_fixtures_v1';
+  const isSyncingRequestedRef = useRef(false);
 
   useEffect(() => {
     realMatchesRef.current = realMatches;
@@ -147,13 +147,11 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
         const awayScore = m.score?.fullTime?.away;
         if (typeof homeScore !== 'number' || typeof awayScore !== 'number') continue;
 
-        const realWinner = homeScore > awayScore ? 'home' : (homeScore < awayScore ? 'away' : 'draw');
-        
         // Obter as previsões individuais que foram geradas para essa partida
         const predictions = await ensemble.predictWithAllAgents(m);
         
         // Ensinar aos agentes o resultado real
-        learnFromMatchResult(predictions, realWinner);
+        learnFromMatchResult(m, predictions);
         recordTrainingSample(m, predictions);
 
         evaluated.push(id);
@@ -189,7 +187,8 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
 
   const getDateRange = () => {
     const dateFrom = getDayKey(new Date());
-    const dateTo = getDayKey(new Date(Date.now() + 7 * 24 * 60 * 60 * 1000));
+    const horizonDays = selectedDate === 'today' ? 1 : selectedDate === 'week' ? 7 : selectedDate === 'month' ? 30 : 30;
+    const dateTo = getDayKey(new Date(Date.now() + horizonDays * 24 * 60 * 60 * 1000));
     return { dateFrom, dateTo };
   };
 
@@ -272,6 +271,10 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
   }, []);
 
   useEffect(() => {
+    setSelectedDate(initialSelectedDate);
+  }, [initialSelectedDate]);
+
+  useEffect(() => {
     const onConfigChanged = () => {
       try {
         localStorage.removeItem('matchesCache_v1');
@@ -294,6 +297,81 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
     window.addEventListener('manualRefreshMatches' as any, onManualRefresh as any);
     return () => window.removeEventListener('manualRefreshMatches' as any, onManualRefresh as any);
   }, []);
+
+  const syncRequestedFixtures = async () => {
+    if (isSyncingRequestedRef.current) return;
+    isSyncingRequestedRef.current = true;
+    try {
+      const config = loadApiConfig();
+      const apiFootballKey = config?.apiFootballKey?.trim();
+      if (!apiFootballKey) return;
+
+      const disabled = new Set((config?.apiFootballDisabledLeagueIds ?? []).map(Number).filter(Number.isFinite));
+
+      const fixtureIds = (() => {
+        try {
+          const raw = localStorage.getItem(requestedFixturesKey);
+          if (!raw) return [] as number[];
+          const parsed = JSON.parse(raw) as { version: number; items: Record<string, { fixtureId: number }> };
+          if (!parsed || parsed.version !== 1 || !parsed.items) return [] as number[];
+          return Object.keys(parsed.items)
+            .map((k) => Number(parsed.items[k]?.fixtureId ?? k))
+            .filter(Number.isFinite);
+        } catch {
+          return [] as number[];
+        }
+      })();
+
+      if (fixtureIds.length === 0) return;
+
+      const existing = new Set(realMatchesRef.current.map((m) => String(m.id)));
+      const needed = fixtureIds.filter((id) => !existing.has(String(id))).slice(0, 30);
+      if (needed.length === 0) return;
+
+      const service = new ApiFootballService(apiFootballKey);
+      const fetched: FootballMatch[] = [];
+      for (const id of needed) {
+        const res = await service.getFixturesOnce({ fixtureId: id, timezone: TIME_ZONE });
+        const fixture = Array.isArray(res) ? res[0] : null;
+        if (!fixture) continue;
+        const converted = convertApiFootballMatchToFootballMatch(fixture);
+        if (disabled.size > 0 && disabled.has(Number(converted.competition.id))) continue;
+        fetched.push(converted);
+      }
+
+      if (fetched.length === 0) return;
+      const processed = processCrests(fetched);
+
+      setRealMatches((prev) => {
+        const map = new Map<number, FootballMatch>();
+        for (const m of prev) map.set(m.id, m);
+        for (const m of processed) map.set(m.id, m);
+        return Array.from(map.values());
+      });
+
+      if (apiSource === 'mock') setApiSource('api-football');
+
+      try {
+        const preds = await generatePredictionsForMatches('api-football', processed);
+        setRealPredictions((prev) => ({ ...prev, ...preds }));
+      } catch {}
+
+      setLastUpdatedAt(new Date());
+    } finally {
+      isSyncingRequestedRef.current = false;
+    }
+  };
+
+  useEffect(() => {
+    void syncRequestedFixtures();
+    const onRequested = () => void syncRequestedFixtures();
+    window.addEventListener('requestedFixturesChanged' as any, onRequested as any);
+    window.addEventListener('focus', onRequested);
+    return () => {
+      window.removeEventListener('requestedFixturesChanged' as any, onRequested as any);
+      window.removeEventListener('focus', onRequested);
+    };
+  }, [apiSource]);
 
   const convertApiFootballMatchToFootballMatch = (m: ApiFootballMatch): FootballMatch => {
     const status = m.fixture?.status?.short || 'NS';
@@ -448,7 +526,7 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
     };
   };
 
-  const generatePredictionsForMatches = async (source: ApiSource, matches: FootballMatch[]) => {
+  const generatePredictionsForMatches = async (source: ApiSource, matches: FootballMatch[], opts?: { force?: boolean }) => {
     const storeKey = 'predictionStore_v1';
     const store = (() => {
       try {
@@ -473,7 +551,11 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
     for (const m of matches) {
       const id = m.id.toString();
       const key = `${source}:${id}`;
-      if (store.items[key]?.prediction) continue;
+      if (opts?.force) {
+        delete store.items[key];
+      } else if (store.items[key]?.prediction) {
+        continue;
+      }
       const consensus = await ensemble.getConsensusPrediction(m);
       store.items[key] = {
         createdAt: new Date().toISOString(),
@@ -537,7 +619,8 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
       if (apiFootballKey) {
         try {
           const service = new ApiFootballService(apiFootballKey);
-          const fixtures = await service.getFixtures({ from: dateFrom, to: dateTo, timezone: TIME_ZONE });
+          const maxPages = selectedDate === 'today' ? 3 : selectedDate === 'week' ? 5 : 10;
+          const fixtures = await service.getFixtures({ from: dateFrom, to: dateTo, timezone: TIME_ZONE, maxPages });
           const matches = fixtures.map(convertApiFootballMatchToFootballMatch);
           successfulSource = successfulSource ?? 'api-football';
           if (matches.length > 0) {
@@ -547,6 +630,20 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
               disabled.length > 0 ? processedMatches.filter((m) => !disabled.includes(m.competition.id)) : processedMatches;
             setApiSource('api-football');
             setRealMatches(visibleMatches);
+            if (visibleMatches.length === 0 && processedMatches.length > 0 && disabled.length > 0) {
+              setRealPredictions({});
+              setLastUpdatedAt(new Date());
+              writeCache({
+                dateFrom,
+                dateTo,
+                apiSource: 'api-football',
+                matches: [],
+                predictions: {},
+                configHash: getConfigHash('api-football', config),
+              });
+              toast.warning('Todos os campeonatos estão desativados. Ative pelo menos um em Ligas para ver jogos.');
+              return;
+            }
             const predictionsById = await generatePredictionsForMatches('api-football', visibleMatches);
             setRealPredictions(predictionsById);
             setLastUpdatedAt(new Date());
@@ -561,6 +658,7 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
             toast.success(`${matches.length} partidas carregadas (API-Football)`);
             return;
           }
+          toast.info(`API-Football não retornou partidas para o período ${dateFrom} → ${dateTo}`);
         } catch (error) {
           console.warn('⚠️ API-Football falhou, tentando próxima opção...', error);
         }
@@ -833,21 +931,37 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
     const config = loadApiConfig();
     const disabledIds = new Set((config?.apiFootballDisabledLeagueIds ?? []).map(Number).filter(Number.isFinite));
     try {
-      const raw = localStorage.getItem('apiFootball_leagues_cache_v1');
+      const raw = localStorage.getItem('apiFootball_leagues_cache_v2') ?? localStorage.getItem('apiFootball_leagues_cache_v1');
       if (!raw) return { countries: [] as string[], leagues: [] as string[] };
       const parsed = JSON.parse(raw) as { fetchedAt: string; items: Array<{ id: number; name: string; country: string }> };
       const items = Array.isArray(parsed?.items) ? parsed.items : [];
 
       const countries = new Set<string>();
       const leagues = new Set<string>();
+      let enabledCount = 0;
       for (const l of items) {
         const id = Number((l as any).id);
         if (!Number.isFinite(id)) continue;
-        if (disabledIds.has(id)) continue;
+        if (!disabledIds.has(id)) enabledCount += 1;
         const country = String((l as any).country ?? '').trim();
         const name = String((l as any).name ?? '').trim();
-        if (country) countries.add(country);
-        if (name) leagues.add(name);
+        if (!disabledIds.has(id) || enabledCount === 0) {
+          if (country) countries.add(country);
+          if (name) leagues.add(name);
+        }
+      }
+
+      if (enabledCount === 0) {
+        countries.clear();
+        leagues.clear();
+        for (const l of items) {
+          const id = Number((l as any).id);
+          if (!Number.isFinite(id)) continue;
+          const country = String((l as any).country ?? '').trim();
+          const name = String((l as any).name ?? '').trim();
+          if (country) countries.add(country);
+          if (name) leagues.add(name);
+        }
       }
 
       return {
@@ -1280,7 +1394,11 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
         setRealMatches((prev) => prev.map((m) => (m.id.toString() === matchId ? updated : m)));
         updateCacheMatch(matchId, updated);
         setLastUpdatedAt(new Date());
-        toast.success('Partida atualizada');
+        try {
+          const preds = await generatePredictionsForMatches('api-football', [updated], { force: true });
+          setRealPredictions((prev) => ({ ...prev, ...preds }));
+        } catch {}
+        toast.success('Partida e previsão atualizadas');
         return;
       }
 
@@ -1325,47 +1443,12 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
           onStatusChange={setSelectedStatus}
           groupMode={groupMode}
           onGroupModeChange={setGroupMode}
+          onRefresh={handleManualRefreshMatches}
+          isRefreshing={isLoadingMatches}
         />
       </div>
 
       <div className="p-4 md:p-6">
-        {/* Header */}
-        <div className="mb-4 md:mb-6 hidden md:block">
-          <div className="flex items-start justify-between gap-4 mb-2">
-            <div className="flex items-center gap-3">
-              <Brain className="w-8 h-8 text-purple-600" />
-              <h1 className="text-3xl font-bold text-gray-900">
-                Previsões de Futebol com IA
-              </h1>
-            </div>
-            <Button
-              onClick={handleManualRefreshMatches}
-              disabled={isLoadingMatches}
-              className="shrink-0"
-            >
-              {isLoadingMatches ? (
-                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-              ) : (
-                <RefreshCw className="w-4 h-4 mr-2" />
-              )}
-              Atualizar partidas
-            </Button>
-          </div>
-          <p className="text-gray-600">
-            Análises detalhadas geradas por 5 agentes de IA especializados em diferentes aspectos do futebol
-          </p>
-          {lastUpdatedAt && (
-            <p className="text-sm text-gray-500 mt-2">
-              Última atualização: {lastUpdatedAt.toLocaleString('pt-BR')}
-            </p>
-          )}
-        </div>
-
-        {/* API Status */}
-        <div className="hidden md:block">
-          <ApiStatus />
-        </div>
-
         {/* Carrossel Premium */}
         <div className="hidden md:block">
           {premiumMatches.length > 0 && (

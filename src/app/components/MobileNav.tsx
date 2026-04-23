@@ -5,6 +5,7 @@ import {
   Brain,
   Calendar,
   Cpu,
+  Globe,
   Home,
   Menu,
   Settings,
@@ -21,6 +22,7 @@ export function MobileNav() {
     { to: '/week', icon: TrendingUp, label: 'Esta Semana' },
     { to: '/month', icon: BarChart3, label: 'Este Mês' },
     { to: '/panorama', icon: Activity, label: 'Panorama do Dia' },
+    { to: '/general', icon: Globe, label: 'Jogos em Geral' },
     { to: '/leagues', icon: Trophy, label: 'Ligas' },
     { to: '/agents', icon: Brain, label: 'Agentes IA' },
     { to: '/training', icon: Cpu, label: 'Treinamento' },
@@ -101,4 +103,3 @@ export function MobileNav() {
     </div>
   );
 }
-

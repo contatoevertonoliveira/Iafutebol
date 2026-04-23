@@ -2,6 +2,7 @@ import { Hono } from "npm:hono";
 import { cors } from "npm:hono/cors";
 import { logger } from "npm:hono/logger";
 import * as kv from "./kv_store.ts";
+import { unzipSync } from "npm:fflate@0.8.2";
 const app = new Hono();
 
 app.use('*', logger(console.log));
@@ -219,6 +220,158 @@ app.post("/validate-api/api-football", async (c) => {
       },
       500,
     );
+  }
+});
+
+const kaggleBasicAuth = (username: unknown, apiKey: unknown) => {
+  const u = String(username ?? "").trim();
+  const k = String(apiKey ?? "").trim();
+  if (!u || !k) return null;
+  const token = btoa(`${u}:${k}`);
+  return `Basic ${token}`;
+};
+
+async function kaggleDownloadDatasetFile(params: {
+  username: unknown;
+  apiKey: unknown;
+  dataset: unknown;
+  fileName: unknown;
+  maxBytes?: unknown;
+}): Promise<{ csvText: string; fileName: string }> {
+  const auth = kaggleBasicAuth(params.username, params.apiKey);
+  if (!auth) throw new Error("Credenciais do Kaggle não fornecidas");
+
+  const dataset = String(params.dataset ?? "").trim();
+  const fileName = String(params.fileName ?? "").trim();
+  if (!dataset || !dataset.includes("/")) throw new Error("Dataset inválido. Use owner/dataset-slug");
+  if (!fileName) throw new Error("fileName não fornecido");
+
+  const [owner, slug] = dataset.split("/", 2);
+  if (!owner || !slug) throw new Error("Dataset inválido. Use owner/dataset-slug");
+
+  const maxBytes =
+    typeof params.maxBytes === "number"
+      ? params.maxBytes
+      : Number.isFinite(Number(params.maxBytes))
+        ? Number(params.maxBytes)
+        : 12 * 1024 * 1024;
+
+  const url = `https://www.kaggle.com/api/v1/datasets/download/${encodeURIComponent(owner)}/${encodeURIComponent(slug)}?file_name=${encodeURIComponent(fileName)}`;
+  const res = await fetch(url, {
+    method: "GET",
+    headers: {
+      Authorization: auth,
+    },
+    redirect: "follow",
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Kaggle error: ${res.status} ${errText}`.slice(0, 600));
+  }
+
+  const contentType = res.headers.get("content-type") || "";
+  const buf = new Uint8Array(await res.arrayBuffer());
+  if (buf.byteLength > maxBytes) {
+    throw new Error(`Arquivo muito grande (${buf.byteLength} bytes). Aumente maxBytes ou use um CSV menor.`);
+  }
+
+  if (contentType.includes("text/csv") || contentType.includes("application/csv")) {
+    return { csvText: new TextDecoder().decode(buf), fileName };
+  }
+
+  let chosenName = "";
+  let chosenBytes: Uint8Array | null = null;
+  try {
+    const files = unzipSync(buf);
+    const names = Object.keys(files);
+    const preferred = names.find((n) => n.toLowerCase().endsWith(".csv") && n.toLowerCase().includes(fileName.toLowerCase()));
+    const csv = preferred ?? names.find((n) => n.toLowerCase().endsWith(".csv")) ?? "";
+    if (!csv) throw new Error("ZIP sem CSV");
+    chosenName = csv;
+    chosenBytes = files[csv];
+  } catch (_e) {
+    const text = new TextDecoder().decode(buf);
+    if (!text.includes(",")) {
+      throw new Error("Resposta não é CSV nem ZIP com CSV");
+    }
+    return { csvText: text, fileName };
+  }
+
+  const csvText = new TextDecoder().decode(chosenBytes ?? new Uint8Array());
+  return { csvText, fileName: chosenName || fileName };
+}
+
+async function kaggleListDatasetFiles(params: {
+  username: unknown;
+  apiKey: unknown;
+  dataset: unknown;
+}): Promise<Array<{ name: string; size?: number }>> {
+  const auth = kaggleBasicAuth(params.username, params.apiKey);
+  if (!auth) throw new Error("Credenciais do Kaggle não fornecidas");
+
+  const dataset = String(params.dataset ?? "").trim();
+  if (!dataset || !dataset.includes("/")) throw new Error("Dataset inválido. Use owner/dataset-slug");
+  const [owner, slug] = dataset.split("/", 2);
+  if (!owner || !slug) throw new Error("Dataset inválido. Use owner/dataset-slug");
+
+  const url = `https://www.kaggle.com/api/v1/datasets/list/${encodeURIComponent(owner)}/${encodeURIComponent(slug)}/files.json`;
+  const res = await fetch(url, {
+    method: "GET",
+    headers: { Authorization: auth },
+    redirect: "follow",
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Kaggle error: ${res.status} ${errText}`.slice(0, 600));
+  }
+
+  const data = await res.json();
+  const files = Array.isArray(data?.datasetFiles) ? data.datasetFiles : Array.isArray(data) ? data : [];
+  return files
+    .map((f: any) => ({
+      name: String(f?.name ?? f?.fileName ?? f?.ref ?? "").trim(),
+      size: Number.isFinite(Number(f?.size ?? f?.totalBytes)) ? Number(f?.size ?? f?.totalBytes) : undefined,
+    }))
+    .filter((f: any) => f?.name);
+}
+
+app.post("/make-server-1119702f/kaggle/download-csv", async (c) => {
+  try {
+    const body = await c.req.json();
+    const { csvText, fileName } = await kaggleDownloadDatasetFile(body);
+    return c.json({ ok: true, fileName, csvText });
+  } catch (error) {
+    return c.json({ ok: false, error: error?.message ?? "Erro ao baixar CSV do Kaggle" }, 400);
+  }
+});
+app.post("/kaggle/download-csv", async (c) => {
+  try {
+    const body = await c.req.json();
+    const { csvText, fileName } = await kaggleDownloadDatasetFile(body);
+    return c.json({ ok: true, fileName, csvText });
+  } catch (error) {
+    return c.json({ ok: false, error: error?.message ?? "Erro ao baixar CSV do Kaggle" }, 400);
+  }
+});
+
+app.post("/make-server-1119702f/kaggle/list-files", async (c) => {
+  try {
+    const body = await c.req.json();
+    const files = await kaggleListDatasetFiles(body);
+    return c.json({ ok: true, files });
+  } catch (error) {
+    return c.json({ ok: false, error: error?.message ?? "Erro ao listar arquivos do Kaggle" }, 400);
+  }
+});
+app.post("/kaggle/list-files", async (c) => {
+  try {
+    const body = await c.req.json();
+    const files = await kaggleListDatasetFiles(body);
+    return c.json({ ok: true, files });
+  } catch (error) {
+    return c.json({ ok: false, error: error?.message ?? "Erro ao listar arquivos do Kaggle" }, 400);
   }
 });
 
@@ -475,5 +628,61 @@ app.post("/proxy/api-football", async (c) => {
     );
   }
 });
+
+const normalizeLeagueCountryKey = (country: unknown) => {
+  const c = String(country ?? "").trim();
+  if (!c) return "all";
+  return c.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "unknown";
+};
+
+const leaguesCacheKey = (country: unknown) => `api-football:leagues:${normalizeLeagueCountryKey(country)}`;
+
+const validateLeaguesCachePayload = (payload: any) => {
+  const fetchedAt = String(payload?.fetchedAt ?? "");
+  if (!fetchedAt) return { ok: false, error: "fetchedAt é obrigatório" } as const;
+  const t = new Date(fetchedAt).getTime();
+  if (!Number.isFinite(t)) return { ok: false, error: "fetchedAt inválido" } as const;
+
+  if (!Array.isArray(payload?.items)) return { ok: false, error: "items deve ser um array" } as const;
+  if (payload.items.length > 10000) return { ok: false, error: "items muito grande" } as const;
+
+  const approxSize = JSON.stringify(payload).length;
+  if (approxSize > 2_000_000) return { ok: false, error: "payload muito grande" } as const;
+
+  return { ok: true } as const;
+};
+
+const leaguesCacheGetHandler = async (c: any) => {
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const key = leaguesCacheKey(body?.country);
+    const value = await kv.get(key);
+    return c.json({ ok: true, value: value ?? null });
+  } catch (error) {
+    console.error("❌ Erro ao ler cache de ligas:", error);
+    return c.json({ ok: false, error: error.message || "Erro ao ler cache" }, 500);
+  }
+};
+
+const leaguesCacheSetHandler = async (c: any) => {
+  try {
+    const body = await c.req.json();
+    const key = leaguesCacheKey(body?.country);
+    const payload = body?.payload;
+    const validation = validateLeaguesCachePayload(payload);
+    if (!validation.ok) return c.json({ ok: false, error: validation.error }, 400);
+
+    await kv.set(key, payload);
+    return c.json({ ok: true });
+  } catch (error) {
+    console.error("❌ Erro ao salvar cache de ligas:", error);
+    return c.json({ ok: false, error: error.message || "Erro ao salvar cache" }, 500);
+  }
+};
+
+app.post("/make-server-1119702f/cache/api-football/leagues/get", leaguesCacheGetHandler);
+app.post("/cache/api-football/leagues/get", leaguesCacheGetHandler);
+app.post("/make-server-1119702f/cache/api-football/leagues/set", leaguesCacheSetHandler);
+app.post("/cache/api-football/leagues/set", leaguesCacheSetHandler);
 
 Deno.serve(app.fetch);

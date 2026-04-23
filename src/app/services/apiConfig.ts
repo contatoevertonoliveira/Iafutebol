@@ -55,7 +55,7 @@ export function loadApiConfig(): ApiConfig | null {
 
   const envConfig = getEnvApiConfig();
   if (envConfig) {
-    const merged = {
+    const defaults = {
       footballDataApiKey: '',
       apiFootballKey: '',
       openLigaDbEnabled: true,
@@ -63,11 +63,25 @@ export function loadApiConfig(): ApiConfig | null {
       kaggleApiKey: '',
       agentTrainingEnabled: false,
       apiFootballDisabledLeagueIds: [],
-      ...envConfig,
-      ...(storedConfig ?? {}),
     } satisfies ApiConfig;
 
-    return merged;
+    const storedFootballDataKey = String(storedConfig?.footballDataApiKey ?? '').trim();
+    const storedApiFootballKey = String(storedConfig?.apiFootballKey ?? '').trim();
+    const envFootballDataKey = String(envConfig.footballDataApiKey ?? '').trim();
+    const envApiFootballKey = String(envConfig.apiFootballKey ?? '').trim();
+
+    const merged = {
+      ...defaults,
+      ...(storedConfig ?? {}),
+      footballDataApiKey: storedFootballDataKey || envFootballDataKey,
+      apiFootballKey: storedApiFootballKey || envApiFootballKey,
+      openLigaDbEnabled: (storedConfig?.openLigaDbEnabled ?? envConfig.openLigaDbEnabled ?? true) as boolean,
+    } satisfies ApiConfig;
+
+    return {
+      ...merged,
+      apiFootballDisabledLeagueIds: Array.isArray(merged.apiFootballDisabledLeagueIds) ? merged.apiFootballDisabledLeagueIds : [],
+    };
   }
 
   return storedConfig;

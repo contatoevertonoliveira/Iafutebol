@@ -1,4 +1,4 @@
-import { Calendar, Globe, Trophy } from 'lucide-react';
+import { Calendar, Globe, Loader2, RefreshCw, Trophy } from 'lucide-react';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
 import { Button } from './ui/button';
 
@@ -15,6 +15,8 @@ interface FilterBarProps {
   onStatusChange: (value: 'all' | 'live' | 'upcoming' | 'finished') => void;
   groupMode: 'leagues' | 'championships';
   onGroupModeChange: (value: 'leagues' | 'championships') => void;
+  onRefresh?: () => void;
+  isRefreshing?: boolean;
 }
 
 export function FilterBar({
@@ -30,6 +32,8 @@ export function FilterBar({
   onStatusChange,
   groupMode,
   onGroupModeChange,
+  onRefresh,
+  isRefreshing,
 }: FilterBarProps) {
   return (
     <div className="bg-white border-b border-gray-200 p-4 sticky top-0 z-10 shadow-sm">
@@ -96,6 +100,19 @@ export function FilterBar({
             </SelectContent>
           </Select>
         </div>
+
+        {onRefresh && (
+          <div className="shrink-0 min-w-[180px] flex items-end">
+            <Button onClick={onRefresh} disabled={isRefreshing} className="h-10">
+              {isRefreshing ? (
+                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+              ) : (
+                <RefreshCw className="w-4 h-4 mr-2" />
+              )}
+              Atualizar
+            </Button>
+          </div>
+        )}
       </div>
 
       <div className="mt-4 flex flex-wrap items-center gap-4">

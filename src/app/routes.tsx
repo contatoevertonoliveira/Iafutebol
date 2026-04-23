@@ -6,6 +6,7 @@ import AIAgentsPage from './pages/AIAgentsPage';
 import TrainingDashboard from './pages/TrainingDashboard';
 import DailyOverviewPage from './pages/DailyOverviewPage';
 import MobileAnalysisPage from './pages/MobileAnalysisPage';
+import GeneralMatchesPage from './pages/GeneralMatchesPage';
 
 function TodayPage() {
   return <Home initialSelectedDate="today" />;
@@ -20,7 +21,16 @@ function MonthPage() {
 }
 
 function LeaguesPage() {
-  return <Home initialSelectedDate="all" />;
+  return (
+    <>
+      <div className="md:hidden">
+        <Settings initialTab="competitions" mode="leagues" />
+      </div>
+      <div className="hidden md:block">
+        <Home initialSelectedDate="all" />
+      </div>
+    </>
+  );
 }
 
 function FavoritesPage() {
@@ -45,6 +55,7 @@ export const router = createBrowserRouter([
       { path: 'today', Component: TodayPage },
       { path: 'week', Component: WeekPage },
       { path: 'month', Component: MonthPage },
+      { path: 'general', Component: GeneralMatchesPage },
       { path: 'panorama', Component: DailyOverviewPage },
       { path: 'leagues', Component: LeaguesPage },
       { path: 'favorites', Component: FavoritesPage },

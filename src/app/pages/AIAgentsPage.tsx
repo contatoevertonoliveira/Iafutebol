@@ -294,6 +294,7 @@ export default function AIAgentsPage() {
                       {agent.type === 'advanced' && 'Utiliza deep learning com mais de 50 variáveis para identificar padrões complexos não visíveis a olho nu.'}
                       {agent.type === 'ensemble' && 'Combina as previsões de todos os agentes usando ponderação inteligente baseada no histórico de accuracy.'}
                       {agent.type === 'goals' && 'Foca em padrões de gols, ritmo de jogo e tendência de Over/Under, incluindo comportamento por tempo e minutos finais.'}
+                      {agent.type === 'btts' && 'Especialista em Ambas Marcam (BTTS), analisando padrões de gol em casa/fora, consistência ofensiva e vulnerabilidade defensiva.'}
                       {agent.type === 'correctscore' && 'Modela distribuição de gols para sugerir placares corretos mais prováveis e composições para dutching.'}
                     </p>
                   </div>
@@ -307,6 +308,7 @@ export default function AIAgentsPage() {
                       {agent.type === 'advanced' && 'Situações complexas com múltiplas variáveis e padrões sutis.'}
                       {agent.type === 'ensemble' && 'Previsões gerais com maior confiabilidade e consenso entre especialistas.'}
                       {agent.type === 'goals' && 'Mercados de gols: Over/Under, timing de gols, cenários de jogo aberto/fechado.'}
+                      {agent.type === 'btts' && 'Mercado de Ambas Marcam (BTTS), jogos de alta troca de chances e defesas vulneráveis.'}
                       {agent.type === 'correctscore' && 'Placar correto, proteção contra goleadas e composições de dutching.'}
                     </p>
                   </div>
