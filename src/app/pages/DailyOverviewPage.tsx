@@ -56,7 +56,7 @@ export default function DailyOverviewPage() {
     return new Date(raw);
   };
 
-  const cache = useMemo(() => {
+  const readCacheAny = () => {
     const readKey = (key: string) => {
       const raw = localStorage.getItem(key);
       if (!raw) return null;
@@ -69,9 +69,10 @@ export default function DailyOverviewPage() {
         return null;
       }
     };
-
     return readKey('matchesCache_v3') ?? readKey('matchesCache_v2') ?? readKey('matchesCache_v1');
-  }, []);
+  };
+
+  const [cache, setCache] = useState<MatchesCacheV1 | null>(() => readCacheAny());
 
   const cacheMeta = useMemo(() => {
     if (!cache) return null;
@@ -151,7 +152,7 @@ export default function DailyOverviewPage() {
     return { totalFinished, withPrediction: withPrediction.length, totalMarkets, correctMarkets, percent };
   }, [matchRows]);
 
-  const learningSummary = useMemo(() => {
+  const readLearningSummary = () => {
     const raw = localStorage.getItem('agent_learning_history');
     if (!raw) return { total: 0, correct: 0 };
     try {
@@ -163,6 +164,31 @@ export default function DailyOverviewPage() {
     } catch {
       return { total: 0, correct: 0 };
     }
+  };
+
+  const [learningSummary, setLearningSummary] = useState(() => readLearningSummary());
+
+  useEffect(() => {
+    const refresh = () => {
+      setCache(readCacheAny());
+      setLearningSummary(readLearningSummary());
+    };
+    const onStorage = (e: StorageEvent) => {
+      if (!e.key) return;
+      if (e.key.startsWith('matchesCache_v') || e.key === 'agent_learning_history') refresh();
+    };
+    const onFocus = () => refresh();
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') refresh();
+    };
+    window.addEventListener('storage', onStorage);
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      window.removeEventListener('storage', onStorage);
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
   }, []);
 
   useEffect(() => {
@@ -248,10 +274,22 @@ export default function DailyOverviewPage() {
                 <p className="text-gray-600 text-lg">Resultados do dia e evolução dos agentes</p>
               </div>
             </div>
-            <Button variant="outline" onClick={() => navigate('/')} className="shrink-0">
-              <RefreshCw className="w-4 h-4 mr-2" />
-              Atualizar partidas
-            </Button>
+            <div className="flex items-center gap-2 shrink-0">
+              <Button
+                variant="outline"
+                onClick={() => {
+                  setCache(readCacheAny());
+                  setLearningSummary(readLearningSummary());
+                }}
+              >
+                <RefreshCw className="w-4 h-4 mr-2" />
+                Atualizar panorama
+              </Button>
+              <Button variant="outline" onClick={() => navigate('/')} className="shrink-0">
+                <RefreshCw className="w-4 h-4 mr-2" />
+                Atualizar partidas
+              </Button>
+            </div>
           </div>
           {cacheMeta && (
             <div className="mt-3 text-sm text-gray-600">

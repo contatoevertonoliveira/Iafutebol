@@ -266,14 +266,233 @@ const parseDateToIso = (value: string) => {
   if (!v) return null;
   const d1 = new Date(v);
   if (Number.isFinite(d1.getTime())) return d1.toISOString();
+  const dt = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?/.exec(v);
+  if (dt) {
+    const yyyy = dt[1];
+    const mm = dt[2];
+    const dd = dt[3];
+    const hh = dt[4];
+    const mi = dt[5];
+    const ss = dt[6] ?? '00';
+    return new Date(`${yyyy}-${mm}-${dd}T${hh}:${mi}:${ss}.000Z`).toISOString();
+  }
   const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(v);
   if (m) return new Date(`${m[1]}-${m[2]}-${m[3]}T00:00:00.000Z`).toISOString();
   return null;
 };
 
+const getSupabaseEdgeAuth = async (): Promise<{ baseUrl: string; anonKey: string }> => {
+  const env = import.meta.env as unknown as Record<string, string | boolean | undefined>;
+  const sanitize = (v: string) => v.trim().replaceAll('`', '').replaceAll('"', '').replaceAll("'", '').trim();
+  const fromEnvUrl = sanitize(String(env.VITE_SUPABASE_URL ?? '')).replace(/\/+$/, '');
+  const fromEnvAnon = sanitize(String(env.VITE_SUPABASE_ANON_KEY ?? ''));
+  const looksLikeJwt = fromEnvAnon.split('.').filter(Boolean).length === 3;
+  if (fromEnvUrl && fromEnvAnon && looksLikeJwt) return { baseUrl: fromEnvUrl, anonKey: fromEnvAnon };
+
+  const { projectId, publicAnonKey } = await import('/utils/supabase/info');
+  return { baseUrl: `https://${projectId}.supabase.co`, anonKey: publicAnonKey };
+};
+
+const TRAINING_SAMPLES_SEEN_IDS = new Set<string>();
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+const isRetryableUpsertStatus = (status: number) => status === 429 || (status >= 500 && status <= 599);
+
+const upsertTrainingSamplesToServerOnce = async (
+  items: TrainingSample[],
+): Promise<{ added: number; upserted: number }> => {
+  const { baseUrl, anonKey } = await getSupabaseEdgeAuth();
+
+  const maxRetries = 6;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    let res: Response;
+    try {
+      res = await fetch(`${baseUrl}/functions/v1/make-server-1119702f/training/samples/upsert`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${anonKey}`,
+        },
+        body: JSON.stringify({ items }),
+      });
+    } catch (e) {
+      if (attempt >= maxRetries) {
+        throw e instanceof Error ? e : new Error(String(e));
+      }
+      await sleep(Math.min(8000, 300 * 2 ** attempt) + Math.floor(Math.random() * 150));
+      continue;
+    }
+
+    const raw = await res.text().catch(() => '');
+    if (res.ok) {
+      const data = raw ? (JSON.parse(raw) as any) : null;
+      if (!data?.ok) {
+        throw new Error(String(data?.error ?? 'Falha ao salvar amostras no servidor'));
+      }
+      return {
+        added: Math.max(0, Number(data.added) || 0),
+        upserted: Math.max(0, Number(data.upserted) || 0),
+      };
+    }
+
+    const retryable = isRetryableUpsertStatus(res.status) || raw.includes('SUPABASE_EDGE_RUNTIME_ERROR');
+    if (!retryable || attempt >= maxRetries) {
+      throw new Error(`Falha ao salvar amostras no servidor (${res.status}): ${raw}`.slice(0, 500));
+    }
+
+    const retryAfter = res.headers.get('retry-after');
+    const retryAfterMs = Number.isFinite(Number(retryAfter)) ? Math.max(0, Math.floor(Number(retryAfter) * 1000)) : 0;
+    const backoffMs = Math.min(8000, 300 * 2 ** attempt) + Math.floor(Math.random() * 150);
+    await sleep(Math.max(retryAfterMs, backoffMs));
+  }
+
+  throw new Error('Falha ao salvar amostras no servidor');
+};
+
+export async function upsertTrainingSamplesToServer(
+  items: TrainingSample[],
+): Promise<{ added: number; upserted: number }> {
+  const safeItems = Array.isArray(items) ? items.filter(Boolean) : [];
+  if (safeItems.length === 0) return { added: 0, upserted: 0 };
+
+  const byId = new Map<string, TrainingSample>();
+  for (const it of safeItems) {
+    const id = String((it as any)?.id ?? '').trim();
+    if (!id) continue;
+    byId.set(id, it);
+  }
+  const unique = Array.from(byId.values());
+  if (unique.length === 0) return { added: 0, upserted: 0 };
+
+  const chunkSize = 50;
+  let totalAdded = 0;
+  let totalUpserted = 0;
+  for (let i = 0; i < unique.length; i += chunkSize) {
+    const chunk = unique.slice(i, i + chunkSize);
+    const r = await upsertTrainingSamplesToServerOnce(chunk);
+    totalAdded += r.added;
+    totalUpserted += r.upserted;
+    if (i + chunkSize < unique.length) await sleep(120);
+  }
+  return { added: totalAdded, upserted: totalUpserted };
+}
+
+export async function getTrainingSamplesCountFromServer(): Promise<number | null> {
+  try {
+    const { baseUrl, anonKey } = await getSupabaseEdgeAuth();
+    const res = await fetch(
+      `${baseUrl}/functions/v1/make-server-1119702f/training/samples/count`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${anonKey}`,
+        },
+        body: JSON.stringify({}),
+      },
+    );
+    if (!res.ok) return null;
+    const data = (await res.json().catch(() => null)) as any;
+    if (!data?.ok) return null;
+    const n = Number(data.count);
+    return Number.isFinite(n) ? Math.max(0, Math.floor(n)) : 0;
+  } catch {
+    return null;
+  }
+}
+
+export async function listTrainingSamplesFromServer(opts?: {
+  maxRows?: number;
+}): Promise<TrainingSample[]> {
+  const maxRows = Math.max(1, Math.floor(opts?.maxRows ?? 50000));
+  const { baseUrl, anonKey } = await getSupabaseEdgeAuth();
+
+  const out: TrainingSample[] = [];
+  let offset = 0;
+  while (out.length < maxRows) {
+    const limit = Math.min(500, maxRows - out.length);
+    const res = await fetch(
+      `${baseUrl}/functions/v1/make-server-1119702f/training/samples/list`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${anonKey}`,
+        },
+        body: JSON.stringify({ offset, limit }),
+      },
+    );
+    const raw = await res.text().catch(() => '');
+    if (!res.ok) {
+      throw new Error(`Falha ao ler amostras do servidor (${res.status}): ${raw}`.slice(0, 500));
+    }
+    const data = raw ? (JSON.parse(raw) as any) : null;
+    if (!data?.ok) throw new Error(String(data?.error ?? 'Falha ao ler amostras do servidor'));
+    const items = Array.isArray(data.items) ? (data.items as TrainingSample[]) : [];
+    out.push(...items.filter(Boolean));
+    const next = data.nextOffset;
+    if (typeof next !== 'number' || !Number.isFinite(next) || next <= offset) break;
+    offset = next;
+    if (items.length === 0) break;
+  }
+  return out.slice(0, maxRows);
+}
+
+const buildTrainingSample = (match: FootballMatch, predictions: AgentPrediction[]): TrainingSample | null => {
+  const home = match.score?.fullTime?.home;
+  const away = match.score?.fullTime?.away;
+  if (typeof home !== 'number' || typeof away !== 'number') return null;
+
+  const day = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Sao_Paulo',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date(match.utcDate));
+  const id = match.id.toString();
+  const winner = home > away ? 'home' : home < away ? 'away' : 'draw';
+  const totalGoals = home + away;
+  const btts = home > 0 && away > 0 ? 'yes' : 'no';
+  const line = 2.5;
+  const overUnderOutcome = totalGoals > line ? 'over' : 'under';
+  const correctScore = `${home}-${away}`;
+
+  const sample: TrainingSample = {
+    id,
+    day,
+    utcDate: match.utcDate,
+    league: match.competition?.name ?? 'Unknown',
+    country: match.competition?.area?.name ?? match.competition?.area?.code ?? 'Unknown',
+    homeTeam: match.homeTeam.name,
+    awayTeam: match.awayTeam.name,
+    score: { home, away },
+    outcomes: {
+      winner,
+      totalGoals,
+      btts,
+      overUnder: { line, outcome: overUnderOutcome },
+      correctScore,
+    },
+    agentPredictions: predictions.map((p) => ({
+      agentName: p.agentName,
+      agentType: p.agentType,
+      winner: p.winner,
+      overUnder: p.overUnder,
+      btts: p.btts,
+      correctScore: p.correctScore,
+    })),
+  };
+
+  return sample;
+};
+
 export async function importTrainingSamplesFromCsvText(
   csvText: string,
-  opts?: { maxRows?: number },
+  opts?: {
+    maxRows?: number;
+    onProgress?: (info: { phase: string; processed: number; total: number; percent: number }) => void;
+  },
 ): Promise<{ added: number; skipped: number; invalid: number }> {
   const maxRows = Math.max(100, Math.floor(opts?.maxRows ?? 50000));
   const lines = String(csvText ?? '')
@@ -302,12 +521,32 @@ export async function importTrainingSamplesFromCsvText(
     (h) => h.includes('away') && h.includes('team') && !h.includes('id'),
   ]);
   const idxHomeGoals = guessColumnIndex(headers, [
-    (h) => h === 'home_score' || h === 'home_goals' || h === 'fthg',
-    (h) => h.includes('home') && (h.includes('score') || h.includes('goals')) && !h.includes('team') && !h.includes('id'),
+    (h) =>
+      h === 'home_score' ||
+      h === 'home_goals' ||
+      h === 'home_goal' ||
+      h === 'home_team_goal' ||
+      h === 'home_score_total' ||
+      h === 'fthg',
+    (h) =>
+      h.includes('home') &&
+      (h.includes('score') || h.includes('goals') || h.includes('goal') || h.endsWith('_goal')) &&
+      !h.includes('player') &&
+      !h.includes('id'),
   ]);
   const idxAwayGoals = guessColumnIndex(headers, [
-    (h) => h === 'away_score' || h === 'away_goals' || h === 'ftag',
-    (h) => h.includes('away') && (h.includes('score') || h.includes('goals')) && !h.includes('team') && !h.includes('id'),
+    (h) =>
+      h === 'away_score' ||
+      h === 'away_goals' ||
+      h === 'away_goal' ||
+      h === 'away_team_goal' ||
+      h === 'away_score_total' ||
+      h === 'ftag',
+    (h) =>
+      h.includes('away') &&
+      (h.includes('score') || h.includes('goals') || h.includes('goal') || h.endsWith('_goal')) &&
+      !h.includes('player') &&
+      !h.includes('id'),
   ]);
   const idxLeague = guessColumnIndex(headers, [(h) => h === 'league' || h.includes('competition') || h.includes('league')]);
   const idxCountry = guessColumnIndex(headers, [(h) => h === 'country' || h.includes('nation')]);
@@ -322,8 +561,29 @@ export async function importTrainingSamplesFromCsvText(
   let added = 0;
   let skipped = 0;
   let invalid = 0;
+  let batch: TrainingSample[] = [];
+  let processed = 0;
+  let lastProgressAt = 0;
 
   const total = Math.min(lines.length - 1, maxRows);
+  const report = (phase: string) => {
+    const denom = total > 0 ? total : 1;
+    const percent = Math.max(0, Math.min(100, Math.round((processed / denom) * 100)));
+    opts?.onProgress?.({ phase, processed, total, percent });
+  };
+
+  const flush = async () => {
+    if (batch.length === 0) return;
+    const current = batch;
+    batch = [];
+    report('Enviando lote');
+    const result = await upsertTrainingSamplesToServer(current);
+    added += result.added;
+    skipped += Math.max(0, result.upserted - result.added);
+    report('Processando linhas');
+  };
+
+  report('Preparando');
   for (let i = 0; i < total; i++) {
     const row = parseCsvRow(lines[i + 1]);
     const homeTeam = row[idxHomeTeam] ?? '';
@@ -332,6 +592,7 @@ export async function importTrainingSamplesFromCsvText(
     const ag = Number(row[idxAwayGoals]);
     if (!homeTeam || !awayTeam || !Number.isFinite(hg) || !Number.isFinite(ag)) {
       invalid += 1;
+      processed += 1;
       continue;
     }
 
@@ -361,15 +622,30 @@ export async function importTrainingSamplesFromCsvText(
     };
 
     const preds = await ensemble.predictWithAllAgents(match);
-    const ok = recordTrainingSample(match, preds);
-    if (ok) added += 1;
-    else skipped += 1;
+    const sample = buildTrainingSample(match, preds);
+    if (!sample) {
+      invalid += 1;
+      processed += 1;
+      continue;
+    }
+
+    batch.push(sample);
+    if (batch.length >= 100) await flush();
+    processed += 1;
+
+    const now = Date.now();
+    if (i === 0 || i === total - 1 || i % 50 === 0 || now - lastProgressAt > 600) {
+      lastProgressAt = now;
+      report('Processando linhas');
+    }
 
     if (i % 200 === 0) {
       await new Promise((r) => setTimeout(r, 0));
     }
   }
 
+  await flush();
+  report('Concluído');
   return { added, skipped, invalid };
 }
 
@@ -384,16 +660,40 @@ export async function trainMetaModelFromLocalSamples(opts?: {
   const lr = Math.max(1e-4, Math.min(0.5, opts?.learningRate ?? 0.05));
   const l2 = Math.max(0, Math.min(0.01, opts?.l2 ?? 0.0005));
 
-  const samples = readTrainingSamples().filter((s) => Array.isArray(s.agentPredictions) && s.agentPredictions.length > 0);
+  let remoteSamples: TrainingSample[] = [];
+  try {
+    remoteSamples = await listTrainingSamplesFromServer({ maxRows: 50000 });
+  } catch {}
+  const samples = (remoteSamples.length > 0 ? remoteSamples : readTrainingSamples()).filter(
+    (s) => Array.isArray(s.agentPredictions) && s.agentPredictions.length > 0,
+  );
   const agentNames = AI_AGENTS_BASE.map((a) => a.name);
 
   const winnerClasses: Array<'home' | 'draw' | 'away'> = ['home', 'draw', 'away'];
   const winnerDim = 1 + agentNames.length * 3;
   const binDim = 1 + agentNames.length;
 
-  const winnerW = Array.from({ length: 3 }, () => Array.from({ length: winnerDim }, () => 0));
-  const bttsW = Array.from({ length: binDim }, () => 0);
-  const ouW = Array.from({ length: binDim }, () => 0);
+  let winnerW = Array.from({ length: 3 }, () => Array.from({ length: winnerDim }, () => 0));
+  let bttsW = Array.from({ length: binDim }, () => 0);
+  let ouW = Array.from({ length: binDim }, () => 0);
+  const prev = loadMetaModel();
+  let prevUpdates = 0;
+  if (prev && prev.version === 1 && Array.isArray(prev.agentNames) && prev.agentNames.join('|') === agentNames.join('|')) {
+    const okDims =
+      Array.isArray(prev.winner?.weights) &&
+      prev.winner.weights.length === 3 &&
+      prev.winner.weights.every((w) => Array.isArray(w) && w.length === winnerDim) &&
+      Array.isArray(prev.btts?.weights) &&
+      prev.btts.weights.length === binDim &&
+      Array.isArray(prev.overUnder?.weights) &&
+      prev.overUnder.weights.length === binDim;
+    if (okDims) {
+      winnerW = prev.winner.weights.map((w) => w.slice());
+      bttsW = prev.btts.weights.slice();
+      ouW = prev.overUnder.weights.slice();
+      prevUpdates = typeof prev.updates === 'number' && Number.isFinite(prev.updates) ? prev.updates : 0;
+    }
+  }
 
   const shuffle = <T,>(arr: T[]) => {
     for (let i = arr.length - 1; i > 0; i--) {
@@ -481,10 +781,60 @@ export async function trainMetaModelFromLocalSamples(opts?: {
     btts: { weights: bttsW },
     overUnder: { weights: ouW },
     metrics,
-    updates: 0,
+    updates: prevUpdates + 1,
   };
   saveMetaModel(model);
   return { model, metrics };
+}
+
+export async function hydrateMetaModelFromServer(): Promise<boolean> {
+  try {
+    const { baseUrl, anonKey } = await getSupabaseEdgeAuth();
+    const res = await fetch(
+      `${baseUrl}/functions/v1/make-server-1119702f/training/meta/get`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${anonKey}`,
+        },
+        body: JSON.stringify({}),
+      },
+    );
+    if (!res.ok) return false;
+    const data = (await res.json().catch(() => null)) as any;
+    const model = data?.model ?? null;
+    if (!model || model.version !== 1) return false;
+    localStorage.setItem(META_MODEL_KEY, JSON.stringify(model));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function pushLocalMetaModelToServer(): Promise<boolean> {
+  try {
+    const raw = localStorage.getItem(META_MODEL_KEY);
+    if (!raw) return false;
+    const model = JSON.parse(raw) as any;
+    if (!model || model.version !== 1) return false;
+
+    const { baseUrl, anonKey } = await getSupabaseEdgeAuth();
+    const res = await fetch(
+      `${baseUrl}/functions/v1/make-server-1119702f/training/meta/set`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${anonKey}`,
+        },
+        body: JSON.stringify({ model }),
+      },
+    );
+    return res.ok;
+  } catch {
+    return false;
+  }
 }
 
 const updateMetaModelOnline = (match: FootballMatch, predictions: AgentPrediction[]) => {
@@ -560,74 +910,11 @@ const updateMetaModelOnline = (match: FootballMatch, predictions: AgentPredictio
 };
 
 export function recordTrainingSample(match: FootballMatch, predictions: AgentPrediction[]): boolean {
-  const home = match.score?.fullTime?.home;
-  const away = match.score?.fullTime?.away;
-  if (typeof home !== 'number' || typeof away !== 'number') return false;
-
-  const day = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'America/Sao_Paulo',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).format(new Date(match.utcDate));
-  const id = match.id.toString();
-  const winner = home > away ? 'home' : home < away ? 'away' : 'draw';
-  const totalGoals = home + away;
-  const btts = home > 0 && away > 0 ? 'yes' : 'no';
-  const line = 2.5;
-  const overUnderOutcome = totalGoals > line ? 'over' : 'under';
-  const correctScore = `${home}-${away}`;
-
-  const storeKey = 'training_samples_v1';
-  const store = (() => {
-    try {
-      const raw = localStorage.getItem(storeKey);
-      if (!raw) return { version: 1 as const, items: {} as Record<string, TrainingSample> };
-      const parsed = JSON.parse(raw) as { version: number; items: Record<string, TrainingSample> };
-      if (!parsed || parsed.version !== 1 || !parsed.items) {
-        return { version: 1 as const, items: {} as Record<string, TrainingSample> };
-      }
-      return { version: 1 as const, items: parsed.items };
-    } catch {
-      return { version: 1 as const, items: {} as Record<string, TrainingSample> };
-    }
-  })();
-
-  if (store.items[id]) return false;
-
-  const sample: TrainingSample = {
-    id,
-    day,
-    utcDate: match.utcDate,
-    league: match.competition?.name ?? 'Unknown',
-    country: match.competition?.area?.name ?? match.competition?.area?.code ?? 'Unknown',
-    homeTeam: match.homeTeam.name,
-    awayTeam: match.awayTeam.name,
-    score: { home, away },
-    outcomes: {
-      winner,
-      totalGoals,
-      btts,
-      overUnder: { line, outcome: overUnderOutcome },
-      correctScore,
-    },
-    agentPredictions: predictions.map((p) => ({
-      agentName: p.agentName,
-      agentType: p.agentType,
-      winner: p.winner,
-      overUnder: p.overUnder,
-      btts: p.btts,
-      correctScore: p.correctScore,
-    })),
-  };
-
-  store.items[id] = sample;
-  try {
-    localStorage.setItem(storeKey, JSON.stringify(store));
-  } catch {
-    return false;
-  }
-
+  const sample = buildTrainingSample(match, predictions);
+  if (!sample) return false;
+  if (TRAINING_SAMPLES_SEEN_IDS.has(sample.id)) return false;
+  TRAINING_SAMPLES_SEEN_IDS.add(sample.id);
+  void upsertTrainingSamplesToServer([sample]).catch(() => {});
   return true;
 }
 

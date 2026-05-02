@@ -260,11 +260,20 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
     const cached = readCache(dateFrom, dateTo);
 
     if (cached) {
-      setApiSource(cached.apiSource);
-      setRealMatches(cached.matches);
-      setRealPredictions(cached.predictions);
-      setLastUpdatedAt(new Date(cached.generatedAt));
-      if (cached.isFresh) return;
+      const cachedMatches = Array.isArray(cached.matches) ? cached.matches : [];
+      const isEmptyRemoteCache = cached.apiSource !== 'mock' && cachedMatches.length === 0;
+
+      if (isEmptyRemoteCache) {
+        try {
+          localStorage.removeItem(cacheKey);
+        } catch {}
+      } else {
+        setApiSource(cached.apiSource);
+        setRealMatches(cachedMatches);
+        setRealPredictions(cached.predictions);
+        setLastUpdatedAt(new Date(cached.generatedAt));
+        if (cached.isFresh) return;
+      }
     }
 
     loadMatchesWithFallback(config);
@@ -341,7 +350,6 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
 
       if (fetched.length === 0) return;
       const processed = processCrests(fetched);
-
       setRealMatches((prev) => {
         const map = new Map<number, FootballMatch>();
         for (const m of prev) map.set(m.id, m);
@@ -722,16 +730,9 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
       }
 
       if (successfulSource) {
-        setApiSource(successfulSource);
+        setApiSource('mock');
         setRealMatches([]);
         setLastUpdatedAt(new Date());
-        writeCache({
-          dateFrom,
-          dateTo,
-          apiSource: successfulSource,
-          matches: [],
-          predictions: {},
-        });
         toast.info('Nenhuma partida encontrada para o período selecionado');
         return;
       }
@@ -1238,6 +1239,33 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
       setIsLoadingAgents(false);
     }, 1500);
   };
+
+  const openMatchIdFromQuery = useMemo(() => {
+    const params = new URLSearchParams(location.search);
+    const v = params.get('open') ?? params.get('matchId');
+    const id = String(v ?? '').trim();
+    return id ? id : null;
+  }, [location.search]);
+
+  useEffect(() => {
+    if (!favoritesOnly) return;
+    if (!openMatchIdFromQuery) return;
+
+    try {
+      const current = new Set(favoriteMatchIds);
+      if (!current.has(openMatchIdFromQuery)) {
+        const next = Array.from(current);
+        next.push(openMatchIdFromQuery);
+        localStorage.setItem(favoritesKey, JSON.stringify(next));
+        window.dispatchEvent(new Event('favoritesChanged'));
+      }
+    } catch {}
+
+    if (selectedMatchId !== openMatchIdFromQuery) {
+      setSelectedMatchId(openMatchIdFromQuery);
+      loadAgentAnalysis(openMatchIdFromQuery);
+    }
+  }, [favoritesOnly, openMatchIdFromQuery, favoriteMatchIds, selectedMatchId]);
 
   const handleViewDetails = (matchId: string) => {
     setSelectedMatchId(matchId);

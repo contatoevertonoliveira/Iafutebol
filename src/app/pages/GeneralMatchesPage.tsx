@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Globe, Loader2, RefreshCcw, Search, Trophy } from 'lucide-react';
+import { useNavigate } from 'react-router';
+import { Clock, Dices, ExternalLink, Globe, Loader2, RefreshCcw, Search, Trophy } from 'lucide-react';
 import { toast } from 'sonner';
 import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
@@ -12,6 +13,7 @@ import { loadApiConfig } from '../services/apiConfig';
 import { ApiFootballLeague, ApiFootballMatch, ApiFootballService } from '../services/apiFootballService';
 import { TeamLogo } from '../components/TeamLogo';
 import { cn } from '../components/ui/utils';
+import type { Prediction } from '../data/mockData';
 
 type MatchBucket = 'all' | 'live' | 'scheduled' | 'finished';
 
@@ -21,6 +23,18 @@ type FixtureStatsResponseItem = {
 };
 
 const TIME_ZONE = 'America/Sao_Paulo';
+
+type ApiSource = 'api-football' | 'football-data' | 'openligadb' | 'mock';
+
+type MatchesCache = {
+  version: number;
+  generatedAt: string;
+  dateFrom: string;
+  dateTo: string;
+  apiSource: ApiSource;
+  matches: Array<{ id: number }>;
+  predictions: Record<string, Prediction>;
+};
 
 const getDayKey = (d: Date) =>
   new Intl.DateTimeFormat('en-CA', { timeZone: TIME_ZONE, year: 'numeric', month: '2-digit', day: '2-digit' }).format(d);
@@ -71,6 +85,54 @@ const requestFixturePrediction = (fixtureId: string) => {
       window.dispatchEvent(new Event('favoritesChanged'));
     }
   } catch {}
+};
+
+const readRequestedFixtureIds = (): Set<string> => {
+  try {
+    const raw = localStorage.getItem('requested_fixtures_v1');
+    if (!raw) return new Set();
+    const parsed = JSON.parse(raw) as { version?: number; items?: Record<string, { fixtureId?: number }> };
+    if (!parsed || parsed.version !== 1 || !parsed.items) return new Set();
+    return new Set(Object.keys(parsed.items).map(String));
+  } catch {
+    return new Set();
+  }
+};
+
+const readPredictionsCache = (): Record<string, Prediction> => {
+  const keys = ['matchesCache_v3', 'matchesCache_v2', 'matchesCache_v1'];
+  for (const k of keys) {
+    try {
+      const raw = localStorage.getItem(k);
+      if (!raw) continue;
+      const parsed = JSON.parse(raw) as MatchesCache;
+      if (!parsed || !parsed.predictions || typeof parsed.predictions !== 'object') continue;
+      return parsed.predictions;
+    } catch {}
+  }
+  return {};
+};
+
+const formatWinnerShort = (p: Prediction | null | undefined) => {
+  const w = p?.winner?.prediction;
+  if (w === 'home') return 'Casa';
+  if (w === 'away') return 'Fora';
+  if (w === 'draw') return 'Empate';
+  return '';
+};
+
+const formatBttsShort = (p: Prediction | null | undefined) => {
+  const b = p?.btts?.prediction;
+  if (b === 'yes') return 'BTTS Sim';
+  if (b === 'no') return 'BTTS Não';
+  return '';
+};
+
+const formatOverUnderShort = (p: Prediction | null | undefined) => {
+  const ou = p?.overUnder;
+  if (!ou) return '';
+  const line = Number.isFinite(Number(ou.line)) ? Number(ou.line) : 2.5;
+  return ou.prediction === 'over' ? `Over ${line}` : `Under ${line}`;
 };
 
 const readLeaguesCatalogCache = (): ApiFootballLeague[] => {
@@ -133,6 +195,7 @@ const statusLabel = (m: ApiFootballMatch) => {
 };
 
 export default function GeneralMatchesPage() {
+  const navigate = useNavigate();
   const [config, setConfig] = useState(() => loadApiConfig());
   const [date, setDate] = useState(() => getDayKey(new Date()));
   const [bucket, setBucket] = useState<MatchBucket>('all');
@@ -150,6 +213,34 @@ export default function GeneralMatchesPage() {
   const [selected, setSelected] = useState<ApiFootballMatch | null>(null);
   const [statsByFixtureId, setStatsByFixtureId] = useState<Record<string, FixtureStatsResponseItem[] | null>>({});
   const [loadingStatsId, setLoadingStatsId] = useState<string | null>(null);
+  const [predictionsByMatchId, setPredictionsByMatchId] = useState<Record<string, Prediction>>(() => readPredictionsCache());
+  const [requestedFixtureIds, setRequestedFixtureIds] = useState<Set<string>>(() => readRequestedFixtureIds());
+
+  useEffect(() => {
+    const refresh = () => {
+      setRequestedFixtureIds(readRequestedFixtureIds());
+      setPredictionsByMatchId(readPredictionsCache());
+    };
+    const onRequested = () => refresh();
+    const onStorage = (e: StorageEvent) => {
+      if (!e.key) return;
+      if (e.key === 'requested_fixtures_v1' || e.key.startsWith('matchesCache_v')) refresh();
+    };
+    window.addEventListener('requestedFixturesChanged' as any, onRequested as any);
+    window.addEventListener('storage', onStorage);
+    window.addEventListener('focus', refresh);
+    return () => {
+      window.removeEventListener('requestedFixturesChanged' as any, onRequested as any);
+      window.removeEventListener('storage', onStorage);
+      window.removeEventListener('focus', refresh);
+    };
+  }, []);
+
+  const openPredictionShortcut = (fixtureId: string) => {
+    const id = String(fixtureId ?? '').trim();
+    if (!id) return;
+    navigate(`/favorites?open=${encodeURIComponent(id)}`);
+  };
 
   useEffect(() => {
     const onConfig = () => {
@@ -158,7 +249,7 @@ export default function GeneralMatchesPage() {
         for (let i = localStorage.length - 1; i >= 0; i -= 1) {
           const k = localStorage.key(i);
           if (!k) continue;
-          if (k.startsWith('generalFixturesCache_v1:') || k.startsWith('generalFixturesCache_v2:')) {
+          if (k.startsWith('generalFixturesCache_v1:') || k.startsWith('generalFixturesCache_v2:') || k.startsWith('generalFixturesCache_v3:')) {
             localStorage.removeItem(k);
           }
         }
@@ -205,7 +296,9 @@ export default function GeneralMatchesPage() {
       return;
     }
 
-    const cacheKey = `generalFixturesCache_v2:${date}:${activeLeagueKey || 'all'}`;
+    const isToday = date === getDayKey(new Date());
+    const includeLive = bucket === 'live' || isToday;
+    const cacheKey = `generalFixturesCache_v3:${date}:${activeLeagueKey || 'all'}:${includeLive ? 'live' : 'date'}`;
     const cacheMaxAgeMs = 1000 * 60 * 3;
 
     if (!opts?.force) {
@@ -233,42 +326,31 @@ export default function GeneralMatchesPage() {
     setError('');
     try {
       const service = new ApiFootballService(apiFootballKey);
-      const from = date;
-      const to = addDaysYmd(date, 1);
-      const seasonsFallback = new Date().getFullYear();
+      const dateItems = await service.getFixtures({ date, timezone: TIME_ZONE, maxPages: 5 });
+      const dayItems = dateItems.filter((m) => fixtureLocalDayKey(m) === date);
 
-      let items: ApiFootballMatch[] = [];
-      if (activeLeagues.length > 0 && activeLeagues.length <= 50) {
+      let merged = dayItems;
+      if (includeLive) {
+        const liveItems = await service.getFixtures({ live: 'all', timezone: TIME_ZONE, maxPages: 5 });
         const unique = new Map<number, ApiFootballMatch>();
-        const queue = activeLeagues.slice();
-        const concurrency = 4;
-        const workers = Array.from({ length: Math.min(concurrency, queue.length) }).map(async () => {
-          while (queue.length > 0) {
-            const league = queue.shift();
-            if (!league) return;
-            const leagueId = Number(league.id);
-            const season = Number(league.season) || seasonsFallback;
-            if (!Number.isFinite(leagueId)) continue;
-            const chunk = await service.getFixturesOnce({ league: leagueId, season, from, to, timezone: TIME_ZONE });
-            for (const m of chunk) {
-              const id = Number(m?.fixture?.id);
-              if (!Number.isFinite(id)) continue;
-              if (!unique.has(id)) unique.set(id, m);
-            }
-          }
-        });
-        await Promise.all(workers);
-        items = Array.from(unique.values());
-      } else {
-        items = await service.getFixturesOnce({ date, timezone: TIME_ZONE });
+        for (const m of dayItems) {
+          const id = Number(m?.fixture?.id);
+          if (!Number.isFinite(id)) continue;
+          unique.set(id, m);
+        }
+        for (const m of liveItems) {
+          const id = Number(m?.fixture?.id);
+          if (!Number.isFinite(id)) continue;
+          if (!unique.has(id)) unique.set(id, m);
+        }
+        merged = Array.from(unique.values());
       }
 
-      const dayItems = items.filter((m) => fixtureLocalDayKey(m) === date);
-      setFixtures(dayItems);
+      setFixtures(merged);
       const fetchedAt = new Date().toISOString();
       setLastUpdatedAt(new Date(fetchedAt));
       try {
-        localStorage.setItem(cacheKey, JSON.stringify({ fetchedAt, items: dayItems }));
+        localStorage.setItem(cacheKey, JSON.stringify({ fetchedAt, items: merged }));
       } catch {}
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Erro ao carregar jogos da API-Football';
@@ -281,7 +363,7 @@ export default function GeneralMatchesPage() {
 
   useEffect(() => {
     void loadFixtures();
-  }, [date, apiFootballKey, activeLeagueKey]);
+  }, [date, apiFootballKey, activeLeagueKey, bucket]);
 
   const allowedFixtures = useMemo(() => {
     let items = fixtures;
@@ -442,6 +524,24 @@ export default function GeneralMatchesPage() {
             </div>
           </div>
           <div className="flex items-center gap-2">
+            <Button
+              disabled={!apiFootballKey || isLoading || filtered.length === 0}
+              onClick={() => {
+                const candidates = filtered.filter((m) => String(m?.fixture?.id ?? '').trim());
+                if (candidates.length === 0) {
+                  toast.error('Nenhum jogo disponível para previsão');
+                  return;
+                }
+                const pick = candidates[Math.floor(Math.random() * candidates.length)];
+                const id = String(pick.fixture.id);
+                requestFixturePrediction(id);
+                toast.success('Previsão solicitada. Abrindo a análise...');
+                openPredictionShortcut(id);
+              }}
+            >
+              <Dices className="w-4 h-4 mr-2" />
+              Previsão aleatória
+            </Button>
             <Button
               variant="outline"
               disabled={!apiFootballKey || isLoading}
@@ -633,6 +733,29 @@ export default function GeneralMatchesPage() {
                         const goalsAway = m?.goals?.away;
                         const b = toBucket(m);
                         const status = statusLabel(m);
+                        const prediction = fixtureId ? predictionsByMatchId[fixtureId] ?? null : null;
+                        const hasPrediction = Boolean(prediction);
+                        const wasRequested = fixtureId ? requestedFixtureIds.has(fixtureId) : false;
+                        const venue = String(m?.fixture?.venue?.name ?? '').trim();
+                        const elapsed = m?.fixture?.status?.elapsed;
+                        const extra = m?.fixture?.status?.extra;
+                        const minute =
+                          typeof elapsed === 'number' && Number.isFinite(elapsed)
+                            ? typeof extra === 'number' && Number.isFinite(extra) && extra > 0
+                              ? `${Math.floor(elapsed)}+${Math.floor(extra)}'`
+                              : `${Math.floor(elapsed)}'`
+                            : null;
+                        const short = String(m?.fixture?.status?.short ?? '').toUpperCase();
+                        const phase =
+                          short === 'HT'
+                            ? 'Intervalo'
+                            : short === '1H'
+                              ? '1º Tempo'
+                              : short === '2H'
+                                ? '2º Tempo'
+                                : short === 'ET'
+                                  ? 'Prorrogação'
+                                  : '';
                         const score =
                           goalsHome !== null && goalsHome !== undefined && goalsAway !== null && goalsAway !== undefined
                             ? `${goalsHome} - ${goalsAway}`
@@ -641,48 +764,117 @@ export default function GeneralMatchesPage() {
                         return (
                           <div
                             key={fixtureId || `${home?.id}-${away?.id}-${m.fixture?.timestamp}`}
-                            className="w-full px-3 py-3 hover:bg-gray-50 transition-colors flex items-center gap-3"
+                            className="w-full px-3 py-3"
                           >
-                            <button className="flex items-center gap-3 min-w-0 flex-1 text-left" onClick={() => void openDetails(m)}>
-                              <div className="w-12 text-xs text-gray-600 tabular-nums">{formatKickoff(m)}</div>
-                              <div className="flex items-center gap-2 min-w-0 flex-1">
-                                <div className="flex items-center gap-2 min-w-0 flex-1">
-                                  <TeamLogo teamName={home?.name ?? '—'} logoUrl={home?.logo ?? ''} size="xs" showName={false} />
-                                  <div className="truncate text-sm font-semibold text-gray-900">{home?.name ?? '—'}</div>
+                            <div className="rounded-2xl bg-white border border-gray-200 shadow-sm hover:shadow-md transition-shadow px-4 py-3">
+                              <button className="w-full text-left" onClick={() => void openDetails(m)}>
+                                <div className="flex items-center justify-between gap-3">
+                                  <div className="text-[11px] text-gray-500 truncate">
+                                    {venue ? venue : '—'}
+                                  </div>
+                                  <div className="flex items-center gap-1 text-[11px] text-gray-500 tabular-nums">
+                                    <Clock className="w-3.5 h-3.5" />
+                                    {formatKickoff(m)}
+                                  </div>
                                 </div>
-                                <div className="w-16 text-center font-bold tabular-nums text-sm text-gray-900">{score}</div>
-                                <div className="flex items-center gap-2 min-w-0 flex-1 justify-end">
-                                  <div className="truncate text-sm font-semibold text-gray-900 text-right">{away?.name ?? '—'}</div>
-                                  <TeamLogo teamName={away?.name ?? '—'} logoUrl={away?.logo ?? ''} size="xs" showName={false} />
+
+                                <div className="mt-2 mx-auto w-full max-w-[560px]">
+                                  <div className="grid grid-cols-[1fr_104px_1fr] items-center gap-2">
+                                    <div className="flex flex-col items-center gap-1 min-w-0">
+                                      <TeamLogo teamName={home?.name ?? '—'} logoUrl={home?.logo ?? ''} size="sm" showName={false} />
+                                      <div className="truncate text-sm font-semibold text-gray-900">{home?.name ?? '—'}</div>
+                                    </div>
+
+                                    <div className="flex flex-col items-center justify-center">
+                                      <div className="text-[11px] text-gray-500 font-semibold tabular-nums">
+                                        {phase ? `${phase}${minute ? ` • ${minute}` : ''}` : minute ? minute : status}
+                                      </div>
+                                      <div className="mt-0.5 text-lg font-bold text-gray-900 tabular-nums tracking-tight">{score}</div>
+                                    </div>
+
+                                    <div className="flex flex-col items-center gap-1 min-w-0">
+                                      <TeamLogo teamName={away?.name ?? '—'} logoUrl={away?.logo ?? ''} size="sm" showName={false} />
+                                      <div className="truncate text-sm font-semibold text-gray-900">{away?.name ?? '—'}</div>
+                                    </div>
+                                  </div>
+                                </div>
+
+                                {hasPrediction ? (
+                                  <div className="mt-3 flex flex-wrap justify-center gap-2">
+                                    <Badge variant="outline" className="text-[11px]">
+                                      {formatWinnerShort(prediction)}
+                                    </Badge>
+                                    <Badge variant="outline" className="text-[11px]">
+                                      {formatOverUnderShort(prediction)}
+                                    </Badge>
+                                    <Badge variant="outline" className="text-[11px]">
+                                      {formatBttsShort(prediction)}
+                                    </Badge>
+                                    <Badge variant="outline" className="text-[11px] tabular-nums">
+                                      IA {Math.round(Number(prediction?.aiConfidence ?? 0))}%
+                                    </Badge>
+                                  </div>
+                                ) : null}
+                              </button>
+
+                              <div className="mt-3 flex items-center justify-between gap-3">
+                                <div className="flex items-center gap-2">
+                                  <Badge
+                                    className={cn(
+                                      b === 'live'
+                                        ? 'bg-green-100 text-green-800 border-green-300'
+                                        : b === 'finished'
+                                          ? 'bg-gray-100 text-gray-800 border-gray-300'
+                                          : 'bg-blue-100 text-blue-800 border-blue-300',
+                                    )}
+                                  >
+                                    {b === 'live' ? 'AO VIVO' : b === 'finished' ? 'FINALIZADO' : 'EM BREVE'}
+                                  </Badge>
+                                  {wasRequested && !hasPrediction ? (
+                                    <Badge variant="outline" className="text-[11px]">
+                                      Gerando…
+                                    </Badge>
+                                  ) : null}
+                                  {hasPrediction ? (
+                                    <Badge variant="outline" className="text-[11px]">
+                                      IA pronta
+                                    </Badge>
+                                  ) : null}
+                                </div>
+
+                                <div className="flex items-center gap-2">
+                                  {fixtureId ? (
+                                    <Button
+                                      size="sm"
+                                      className={cn(hasPrediction || wasRequested ? 'bg-blue-700 hover:bg-blue-800' : '')}
+                                      variant={hasPrediction || wasRequested ? 'default' : 'outline'}
+                                      onClick={(e) => {
+                                        e.preventDefault();
+                                        e.stopPropagation();
+                                        if (!hasPrediction) requestFixturePrediction(fixtureId);
+                                        toast.success(hasPrediction ? 'Abrindo a análise...' : 'Previsão solicitada. Abrindo a análise...');
+                                        openPredictionShortcut(fixtureId);
+                                      }}
+                                    >
+                                      <ExternalLink className="w-4 h-4 mr-2" />
+                                      {hasPrediction || wasRequested ? 'Abrir previsão' : 'Gerar previsão'}
+                                    </Button>
+                                  ) : null}
+
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    onClick={(e) => {
+                                      e.preventDefault();
+                                      e.stopPropagation();
+                                      void openDetails(m);
+                                    }}
+                                  >
+                                    Detalhes
+                                  </Button>
                                 </div>
                               </div>
-                              <Badge
-                                className={cn(
-                                  b === 'live'
-                                    ? 'bg-red-100 text-red-800 border-red-300'
-                                    : b === 'finished'
-                                      ? 'bg-green-100 text-green-800 border-green-300'
-                                      : 'bg-blue-100 text-blue-800 border-blue-300',
-                                )}
-                              >
-                                {status}
-                              </Badge>
-                            </button>
-
-                            {fixtureId ? (
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                onClick={(e) => {
-                                  e.preventDefault();
-                                  e.stopPropagation();
-                                  requestFixturePrediction(fixtureId);
-                                  toast.success('Previsão solicitada. A partida foi adicionada ao Dashboard.');
-                                }}
-                              >
-                                Previsão
-                              </Button>
-                            ) : null}
+                            </div>
                           </div>
                         );
                       })}

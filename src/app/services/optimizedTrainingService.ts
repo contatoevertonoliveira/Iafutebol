@@ -1,6 +1,6 @@
 import { loadApiConfig, saveApiConfig } from './apiConfig';
 import { toast } from 'sonner';
-import { trainMetaModelFromLocalSamples } from './aiAgents';
+import { getTrainingSamplesCountFromServer, pushLocalMetaModelToServer, trainMetaModelFromLocalSamples } from './aiAgents';
 
 // ==================== TIPOS E INTERFACES ====================
 
@@ -36,6 +36,7 @@ export interface TrainingSession {
   checkpoints: TrainingCheckpoint[];
   datasetVersion: string;
   simulated?: boolean;
+  errorMessage?: string;
   config: AgentTrainingConfig;
 }
 
@@ -67,6 +68,45 @@ const TRAINING_CHECKPOINTS_KEY = 'training_checkpoints';
 const INCREMENTAL_DATASETS_KEY = 'incremental_datasets';
 const NOTIFICATION_CONFIG_KEY = 'notification_config';
 const WORKER_STATUS_KEY = 'training_worker_status';
+
+const isQuotaExceededError = (error: unknown) => {
+  const e = error as any;
+  const name = String(e?.name ?? '');
+  const msg = String(e?.message ?? '');
+  return name === 'QuotaExceededError' || msg.toLowerCase().includes('exceeded the quota');
+};
+
+const clampSessionForStorage = (s: TrainingSession, maxCheckpoints: number): TrainingSession => {
+  const cps = Array.isArray(s.checkpoints) ? s.checkpoints : [];
+  return {
+    ...s,
+    checkpoints: cps.length > maxCheckpoints ? cps.slice(-maxCheckpoints) : cps,
+  };
+};
+
+const persistSessionsWithBackoff = (sessions: TrainingSession[]): void => {
+  const variants: Array<{ maxSessions: number; maxCheckpoints: number }> = [
+    { maxSessions: 200, maxCheckpoints: 25 },
+    { maxSessions: 80, maxCheckpoints: 15 },
+    { maxSessions: 40, maxCheckpoints: 8 },
+    { maxSessions: 20, maxCheckpoints: 4 },
+    { maxSessions: 10, maxCheckpoints: 2 },
+  ];
+
+  for (const v of variants) {
+    try {
+      const sliced = sessions.slice(-v.maxSessions).map((s) => clampSessionForStorage(s, v.maxCheckpoints));
+      localStorage.setItem(TRAINING_SESSIONS_KEY, JSON.stringify(sliced));
+      return;
+    } catch (e) {
+      if (!isQuotaExceededError(e)) throw e;
+    }
+  }
+
+  try {
+    localStorage.removeItem(TRAINING_SESSIONS_KEY);
+  } catch {}
+};
 
 // Configurações padrão dos agentes
 const DEFAULT_AGENT_CONFIGS: AgentTrainingConfig[] = [
@@ -238,7 +278,13 @@ export function loadTrainingSessions(): TrainingSession[] {
 }
 
 export function saveTrainingSessions(sessions: TrainingSession[]): void {
-  localStorage.setItem(TRAINING_SESSIONS_KEY, JSON.stringify(sessions));
+  try {
+    persistSessionsWithBackoff(sessions);
+  } catch {
+    try {
+      localStorage.removeItem(TRAINING_SESSIONS_KEY);
+    } catch {}
+  }
 }
 
 export function createTrainingSession(agentId: string): TrainingSession {
@@ -259,6 +305,7 @@ export function createTrainingSession(agentId: string): TrainingSession {
     checkpoints: [],
     datasetVersion: 'latest',
     simulated: agentId !== 'metamodel',
+    errorMessage: undefined,
     config,
   };
 
@@ -286,13 +333,24 @@ export function saveCheckpoint(sessionId: string, checkpoint: TrainingCheckpoint
   const sessionIndex = sessions.findIndex(s => s.sessionId === sessionId);
   
   if (sessionIndex !== -1) {
-    sessions[sessionIndex].checkpoints.push(checkpoint);
+    const cps = Array.isArray(sessions[sessionIndex].checkpoints) ? sessions[sessionIndex].checkpoints : [];
+    cps.push(checkpoint);
+    sessions[sessionIndex].checkpoints = cps.length > 25 ? cps.slice(-25) : cps;
     saveTrainingSessions(sessions);
     
     // Também salvar em storage separado para backup
     const allCheckpoints = loadAllCheckpoints();
     allCheckpoints.push({ sessionId, ...checkpoint });
-    localStorage.setItem(TRAINING_CHECKPOINTS_KEY, JSON.stringify(allCheckpoints));
+    const trimmed = allCheckpoints.length > 2000 ? allCheckpoints.slice(-2000) : allCheckpoints;
+    try {
+      localStorage.setItem(TRAINING_CHECKPOINTS_KEY, JSON.stringify(trimmed));
+    } catch (e) {
+      if (isQuotaExceededError(e)) {
+        try {
+          localStorage.setItem(TRAINING_CHECKPOINTS_KEY, JSON.stringify(trimmed.slice(-500)));
+        } catch {}
+      }
+    }
   }
 }
 
@@ -463,11 +521,13 @@ export class TrainingWorker {
     // Iniciar treinamento em background (não bloqueia UI)
     this.runTrainingInBackground(session.sessionId).catch(error => {
       console.error('Erro no treinamento:', error);
+      const msg = error instanceof Error ? error.message : String(error);
       updateTrainingSession(session.sessionId, { 
         status: 'failed',
-        endTime: new Date().toISOString()
+        endTime: new Date().toISOString(),
+        errorMessage: msg
       });
-      sendNotification('error', `Treinamento falhou: ${error.message}`, session);
+      sendNotification('error', `Treinamento falhou: ${msg}`, session);
     });
 
     return session.sessionId;
@@ -513,11 +573,13 @@ export class TrainingWorker {
     this.isRunning = true;
     this.runTrainingInBackground(session.sessionId).catch(error => {
       console.error('Erro ao retomar treinamento:', error);
+      const msg = error instanceof Error ? error.message : String(error);
       updateTrainingSession(session.sessionId, { 
         status: 'failed',
-        endTime: new Date().toISOString()
+        endTime: new Date().toISOString(),
+        errorMessage: msg
       });
-      sendNotification('error', `Falha ao retomar treinamento: ${error.message}`, session);
+      sendNotification('error', `Falha ao retomar treinamento: ${msg}`, session);
     });
   }
 
@@ -554,7 +616,7 @@ export class TrainingWorker {
     }
 
     // Atualizar status para running
-    updateTrainingSession(sessionId, { status: 'running' });
+    updateTrainingSession(sessionId, { status: 'running', errorMessage: undefined });
 
     // Configurar abort controller para permitir pausa/interrupção
     this.abortController = new AbortController();
@@ -567,7 +629,8 @@ export class TrainingWorker {
 
     try {
       if (session.agentId === 'metamodel') {
-        const sampleCount = readLocalTrainingSampleCountForAgent('metamodel');
+        const serverCount = await getTrainingSamplesCountFromServer();
+        const sampleCount = serverCount ?? readLocalTrainingSampleCountForAgent('metamodel');
         if (sampleCount < 30) {
           throw new Error(`Dados insuficientes para treino real. Amostras com resultado: ${sampleCount}`);
         }
@@ -620,6 +683,8 @@ export class TrainingWorker {
           simulated: false,
         });
 
+        await pushLocalMetaModelToServer().catch(() => {});
+
         const finalSession = loadTrainingSessions().find((s) => s.sessionId === sessionId);
         if (finalSession && finalSession.status === 'completed') {
           sendNotification(
@@ -632,9 +697,14 @@ export class TrainingWorker {
         return;
       }
 
-      // Baixar dataset incremental (se necessário)
-      const dataset = await downloadIncrementalDataset('european-soccer-database');
-      console.log(`📊 Dataset: ${dataset.totalMatches} partidas (${dataset.newMatches} novas)`);
+      let dataset: IncrementalDataset | null = null;
+      try {
+        dataset = await downloadIncrementalDataset('european-soccer-database');
+        console.log(`📊 Dataset: ${dataset.totalMatches} partidas (${dataset.newMatches} novas)`);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        console.warn(`Dataset incremental indisponível: ${msg}`);
+      }
 
       // Loop de treinamento
       for (let epoch = session.completedEpochs + 1; epoch <= config.maxEpochs; epoch++) {
@@ -733,13 +803,15 @@ export class TrainingWorker {
 
     } catch (error) {
       console.error('Erro durante treinamento:', error);
+      const msg = error instanceof Error ? error.message : String(error);
       updateTrainingSession(sessionId, {
         status: 'failed',
         endTime: new Date().toISOString(),
+        errorMessage: msg
       });
       
       sendNotification('error',
-        `Erro no treinamento de ${session.agentId}: ${error instanceof Error ? error.message : 'Erro desconhecido'}`,
+        `Erro no treinamento de ${session.agentId}: ${msg}`,
         session
       );
       throw error;

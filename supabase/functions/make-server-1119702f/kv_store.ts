@@ -62,11 +62,22 @@ export const mset = async (keys: string[], values: any[]): Promise<void> => {
 
 export const mget = async (keys: string[]): Promise<any[]> => {
   const supabase = client();
-  const { data, error } = await supabase.from("kv_store_1119702f").select("value").in("key", keys);
+  const safeKeys = Array.isArray(keys) ? keys.filter((k) => typeof k === "string" && k.length > 0) : [];
+  if (safeKeys.length === 0) return [];
+  const { data, error } = await supabase
+    .from("kv_store_1119702f")
+    .select("key,value")
+    .in("key", safeKeys);
   if (error) {
     throw new Error(error.message);
   }
-  return data?.map((d) => d.value) ?? [];
+  const map = new Map<string, any>();
+  for (const row of data ?? []) {
+    const k = String((row as any)?.key ?? "");
+    if (!k) continue;
+    map.set(k, (row as any)?.value);
+  }
+  return safeKeys.map((k) => (map.has(k) ? map.get(k) : null));
 };
 
 export const mdel = async (keys: string[]): Promise<void> => {

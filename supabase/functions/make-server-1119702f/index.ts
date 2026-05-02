@@ -2,6 +2,7 @@ import { Hono } from "npm:hono";
 import { cors } from "npm:hono/cors";
 import { logger } from "npm:hono/logger";
 import * as kv from "./kv_store.ts";
+import { createClient } from "jsr:@supabase/supabase-js@2.49.8";
 import { unzipSync } from "npm:fflate@0.8.2";
 const app = new Hono();
 
@@ -652,6 +653,139 @@ const validateLeaguesCachePayload = (payload: any) => {
   return { ok: true } as const;
 };
 
+const requireBearer = (c: any) => {
+  const auth = String(c.req.header("authorization") ?? "");
+  if (!auth.toLowerCase().startsWith("bearer ")) {
+    return c.json({ ok: false, error: "Unauthorized" }, 401);
+  }
+  return null;
+};
+
+const KV_TABLE = "kv_store_1119702f";
+const supabaseClient = () =>
+  createClient(Deno.env.get("SUPABASE_URL") ?? "", Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "");
+
+const TRAINING_META_KEY = "iafutebol/meta_model_v1";
+
+const validateMetaModelPayload = (model: any) => {
+  if (!model || typeof model !== "object") return { ok: false, error: "model inválido" } as const;
+  if (model.version !== 1) return { ok: false, error: "versão inválida" } as const;
+  const approxSize = JSON.stringify(model).length;
+  if (approxSize > 300_000) return { ok: false, error: "model muito grande" } as const;
+  return { ok: true } as const;
+};
+
+const TRAINING_SAMPLES_PREFIX = "iafutebol/training_samples_v1/item/";
+
+const validateTrainingSamplesPayload = (items: any) => {
+  if (!Array.isArray(items)) return { ok: false, error: "items deve ser um array" } as const;
+  if (items.length === 0) return { ok: false, error: "items vazio" } as const;
+  if (items.length > 200) return { ok: false, error: "items grande demais" } as const;
+  const approxSize = JSON.stringify(items).length;
+  if (approxSize > 900_000) return { ok: false, error: "payload muito grande" } as const;
+  for (const s of items) {
+    const id = String(s?.id ?? "").trim();
+    const utcDate = String(s?.utcDate ?? "").trim();
+    const homeTeam = String(s?.homeTeam ?? "").trim();
+    const awayTeam = String(s?.awayTeam ?? "").trim();
+    if (!id || !utcDate || !homeTeam || !awayTeam) return { ok: false, error: "amostra inválida" } as const;
+  }
+  return { ok: true } as const;
+};
+
+const trainingSamplesUpsertHandler = async (c: any) => {
+  const authError = requireBearer(c);
+  if (authError) return authError;
+  try {
+    const body = await c.req.json();
+    const items = body?.items ?? null;
+    const validation = validateTrainingSamplesPayload(items);
+    if (!validation.ok) return c.json({ ok: false, error: validation.error }, 400);
+
+    const keys = (items as any[]).map((s) => `${TRAINING_SAMPLES_PREFIX}${String(s.id)}`);
+    const existing = await kv.mget(keys);
+    let added = 0;
+    for (let i = 0; i < existing.length; i++) if (existing[i] == null) added += 1;
+    await kv.mset(keys, items);
+    return c.json({ ok: true, added, upserted: (items as any[]).length });
+  } catch (error) {
+    console.error("❌ Erro ao salvar training samples:", error);
+    return c.json({ ok: false, error: error.message || "Erro ao salvar training samples" }, 500);
+  }
+};
+
+const trainingSamplesCountHandler = async (c: any) => {
+  const authError = requireBearer(c);
+  if (authError) return authError;
+  try {
+    const supabase = supabaseClient();
+    const { count, error } = await supabase
+      .from(KV_TABLE)
+      .select("key", { count: "exact", head: true })
+      .like("key", `${TRAINING_SAMPLES_PREFIX}%`);
+    if (error) throw new Error(error.message);
+    return c.json({ ok: true, count: Number.isFinite(Number(count)) ? Number(count) : 0 });
+  } catch (error) {
+    console.error("❌ Erro ao contar training samples:", error);
+    return c.json({ ok: false, error: error.message || "Erro ao contar training samples" }, 500);
+  }
+};
+
+const trainingSamplesListHandler = async (c: any) => {
+  const authError = requireBearer(c);
+  if (authError) return authError;
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const limitRaw = Number(body?.limit);
+    const offsetRaw = Number(body?.offset);
+    const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(500, Math.floor(limitRaw))) : 200;
+    const offset = Number.isFinite(offsetRaw) ? Math.max(0, Math.floor(offsetRaw)) : 0;
+
+    const supabase = supabaseClient();
+    const { data, error } = await supabase
+      .from(KV_TABLE)
+      .select("key,value")
+      .like("key", `${TRAINING_SAMPLES_PREFIX}%`)
+      .order("key", { ascending: true })
+      .range(offset, offset + limit - 1);
+    if (error) throw new Error(error.message);
+    const items = Array.isArray(data) ? data.map((r: any) => r?.value).filter((v: any) => v) : [];
+    const nextOffset = items.length === limit ? offset + limit : null;
+    return c.json({ ok: true, items, nextOffset });
+  } catch (error) {
+    console.error("❌ Erro ao listar training samples:", error);
+    return c.json({ ok: false, error: error.message || "Erro ao listar training samples" }, 500);
+  }
+};
+
+const trainingMetaGetHandler = async (c: any) => {
+  const authError = requireBearer(c);
+  if (authError) return authError;
+  try {
+    const model = await kv.get(TRAINING_META_KEY);
+    return c.json({ ok: true, model: model ?? null });
+  } catch (error) {
+    console.error("❌ Erro ao ler meta model:", error);
+    return c.json({ ok: false, error: error.message || "Erro ao ler meta model" }, 500);
+  }
+};
+
+const trainingMetaSetHandler = async (c: any) => {
+  const authError = requireBearer(c);
+  if (authError) return authError;
+  try {
+    const body = await c.req.json();
+    const model = body?.model ?? null;
+    const validation = validateMetaModelPayload(model);
+    if (!validation.ok) return c.json({ ok: false, error: validation.error }, 400);
+    await kv.set(TRAINING_META_KEY, model);
+    return c.json({ ok: true });
+  } catch (error) {
+    console.error("❌ Erro ao salvar meta model:", error);
+    return c.json({ ok: false, error: error.message || "Erro ao salvar meta model" }, 500);
+  }
+};
+
 const leaguesCacheGetHandler = async (c: any) => {
   try {
     const body = await c.req.json().catch(() => ({}));
@@ -684,5 +818,17 @@ app.post("/make-server-1119702f/cache/api-football/leagues/get", leaguesCacheGet
 app.post("/cache/api-football/leagues/get", leaguesCacheGetHandler);
 app.post("/make-server-1119702f/cache/api-football/leagues/set", leaguesCacheSetHandler);
 app.post("/cache/api-football/leagues/set", leaguesCacheSetHandler);
+
+app.post("/make-server-1119702f/training/meta/get", trainingMetaGetHandler);
+app.post("/training/meta/get", trainingMetaGetHandler);
+app.post("/make-server-1119702f/training/meta/set", trainingMetaSetHandler);
+app.post("/training/meta/set", trainingMetaSetHandler);
+
+app.post("/make-server-1119702f/training/samples/upsert", trainingSamplesUpsertHandler);
+app.post("/training/samples/upsert", trainingSamplesUpsertHandler);
+app.post("/make-server-1119702f/training/samples/count", trainingSamplesCountHandler);
+app.post("/training/samples/count", trainingSamplesCountHandler);
+app.post("/make-server-1119702f/training/samples/list", trainingSamplesListHandler);
+app.post("/training/samples/list", trainingSamplesListHandler);
 
 Deno.serve(app.fetch);
