@@ -630,6 +630,279 @@ app.post("/proxy/api-football", async (c) => {
   }
 });
 
+const deepseekProxy = async (c: any) => {
+  try {
+    const { url, apiKey, body } = await c.req.json();
+
+    if (!apiKey) {
+      return c.json({ error: "API key não fornecida" }, 400);
+    }
+
+    if (!url || typeof url !== "string") {
+      return c.json({ error: "URL não fornecida" }, 400);
+    }
+
+    const allowedPrefix = "https://api.deepseek.com/v1/";
+    if (!url.startsWith(allowedPrefix)) {
+      return c.json({ error: "URL não permitida" }, 400);
+    }
+
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body ?? {}),
+    });
+
+    const contentType = response.headers.get("content-type") || "";
+    const isJson = contentType.includes("application/json");
+
+    if (isJson) {
+      const data = await response.json();
+      if (!response.ok) {
+        return c.json(
+          {
+            error: `API retornou status ${response.status}`,
+            details: data,
+          },
+          response.status,
+        );
+      }
+      return c.json(data);
+    }
+
+    const text = await response.text();
+    if (!response.ok) {
+      return c.json(
+        {
+          error: `API retornou status ${response.status}`,
+          details: text,
+        },
+        response.status,
+      );
+    }
+
+    return c.body(text, 200, {
+      "Content-Type": contentType || "text/plain; charset=utf-8",
+    });
+  } catch (error) {
+    console.error("❌ Erro no proxy DeepSeek:", error);
+    return c.json(
+      { error: error.message || "Erro ao fazer proxy para DeepSeek" },
+      500,
+    );
+  }
+};
+app.post("/proxy/deepseek", deepseekProxy);
+app.post("/make-server-1119702f/proxy/deepseek", deepseekProxy);
+
+const openaiProxy = async (c: any) => {
+  try {
+    const { url, apiKey, body } = await c.req.json();
+
+    if (!apiKey) {
+      return c.json({ error: "API key não fornecida" }, 400);
+    }
+
+    if (!url || typeof url !== "string") {
+      return c.json({ error: "URL não fornecida" }, 400);
+    }
+
+    const allowedPrefix = "https://api.openai.com/v1/";
+    if (!url.startsWith(allowedPrefix)) {
+      return c.json({ error: "URL não permitida" }, 400);
+    }
+
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body ?? {}),
+    });
+
+    const contentType = response.headers.get("content-type") || "";
+    const isJson = contentType.includes("application/json");
+
+    if (isJson) {
+      const data = await response.json();
+      if (!response.ok) {
+        return c.json(
+          {
+            error: `API retornou status ${response.status}`,
+            details: data,
+          },
+          response.status,
+        );
+      }
+      return c.json(data);
+    }
+
+    const text = await response.text();
+    if (!response.ok) {
+      return c.json(
+        {
+          error: `API retornou status ${response.status}`,
+          details: text,
+        },
+        response.status,
+      );
+    }
+
+    return c.body(text, 200, {
+      "Content-Type": contentType || "text/plain; charset=utf-8",
+    });
+  } catch (error) {
+    console.error("❌ Erro no proxy OpenAI:", error);
+    return c.json(
+      { error: error.message || "Erro ao fazer proxy para OpenAI" },
+      500,
+    );
+  }
+};
+app.post("/proxy/openai", openaiProxy);
+app.post("/make-server-1119702f/proxy/openai", openaiProxy);
+
+const anthropicProxy = async (c: any) => {
+  try {
+    const { url, apiKey, body } = await c.req.json();
+
+    if (!apiKey) {
+      return c.json({ error: "API key não fornecida" }, 400);
+    }
+
+    if (!url || typeof url !== "string") {
+      return c.json({ error: "URL não fornecida" }, 400);
+    }
+
+    const allowedPrefix = "https://api.anthropic.com/v1/";
+    if (!url.startsWith(allowedPrefix)) {
+      return c.json({ error: "URL não permitida" }, 400);
+    }
+
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body ?? {}),
+    });
+
+    const contentType = response.headers.get("content-type") || "";
+    const isJson = contentType.includes("application/json");
+
+    if (isJson) {
+      const data = await response.json();
+      if (!response.ok) {
+        return c.json(
+          {
+            error: `API retornou status ${response.status}`,
+            details: data,
+          },
+          response.status,
+        );
+      }
+      return c.json(data);
+    }
+
+    const text = await response.text();
+    if (!response.ok) {
+      return c.json(
+        {
+          error: `API retornou status ${response.status}`,
+          details: text,
+        },
+        response.status,
+      );
+    }
+
+    return c.body(text, 200, {
+      "Content-Type": contentType || "text/plain; charset=utf-8",
+    });
+  } catch (error) {
+    console.error("❌ Erro no proxy Anthropic:", error);
+    return c.json(
+      { error: error.message || "Erro ao fazer proxy para Anthropic" },
+      500,
+    );
+  }
+};
+app.post("/proxy/anthropic", anthropicProxy);
+app.post("/make-server-1119702f/proxy/anthropic", anthropicProxy);
+
+const googleProxy = async (c: any) => {
+  try {
+    const { url, apiKey, body } = await c.req.json();
+
+    if (!apiKey) {
+      return c.json({ error: "API key não fornecida" }, 400);
+    }
+
+    if (!url || typeof url !== "string") {
+      return c.json({ error: "URL não fornecida" }, 400);
+    }
+
+    const allowedPrefix = "https://generativelanguage.googleapis.com/";
+    if (!url.startsWith(allowedPrefix)) {
+      return c.json({ error: "URL não permitida" }, 400);
+    }
+
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "x-goog-api-key": apiKey,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body ?? {}),
+    });
+
+    const contentType = response.headers.get("content-type") || "";
+    const isJson = contentType.includes("application/json");
+
+    if (isJson) {
+      const data = await response.json();
+      if (!response.ok) {
+        return c.json(
+          {
+            error: `API retornou status ${response.status}`,
+            details: data,
+          },
+          response.status,
+        );
+      }
+      return c.json(data);
+    }
+
+    const text = await response.text();
+    if (!response.ok) {
+      return c.json(
+        {
+          error: `API retornou status ${response.status}`,
+          details: text,
+        },
+        response.status,
+      );
+    }
+
+    return c.body(text, 200, {
+      "Content-Type": contentType || "text/plain; charset=utf-8",
+    });
+  } catch (error) {
+    console.error("❌ Erro no proxy Google:", error);
+    return c.json(
+      { error: error.message || "Erro ao fazer proxy para Google" },
+      500,
+    );
+  }
+};
+app.post("/proxy/google", googleProxy);
+app.post("/make-server-1119702f/proxy/google", googleProxy);
+
 const normalizeLeagueCountryKey = (country: unknown) => {
   const c = String(country ?? "").trim();
   if (!c) return "all";

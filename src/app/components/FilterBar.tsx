@@ -1,4 +1,4 @@
-import { Calendar, Globe, Loader2, RefreshCw, Trophy } from 'lucide-react';
+import { Calendar, Globe, Loader2, Plus, RefreshCw, Trophy } from 'lucide-react';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
 import { Button } from './ui/button';
 
@@ -17,6 +17,7 @@ interface FilterBarProps {
   onGroupModeChange: (value: 'leagues' | 'championships') => void;
   onRefresh?: () => void;
   isRefreshing?: boolean;
+  onAddMatch?: () => void;
 }
 
 export function FilterBar({
@@ -34,6 +35,7 @@ export function FilterBar({
   onGroupModeChange,
   onRefresh,
   isRefreshing,
+  onAddMatch,
 }: FilterBarProps) {
   return (
     <div className="bg-white border-b border-gray-200 p-4 sticky top-0 z-10 shadow-sm">
@@ -101,8 +103,14 @@ export function FilterBar({
           </Select>
         </div>
 
-        {onRefresh && (
-          <div className="shrink-0 min-w-[180px] flex items-end">
+        <div className="shrink-0 min-w-[180px] flex items-end gap-2">
+          {onAddMatch ? (
+            <Button variant="outline" onClick={onAddMatch} className="h-10">
+              <Plus className="w-4 h-4 mr-2" />
+              Adicionar jogo
+            </Button>
+          ) : null}
+          {onRefresh ? (
             <Button onClick={onRefresh} disabled={isRefreshing} className="h-10">
               {isRefreshing ? (
                 <Loader2 className="w-4 h-4 mr-2 animate-spin" />
@@ -111,8 +119,8 @@ export function FilterBar({
               )}
               Atualizar
             </Button>
-          </div>
-        )}
+          ) : null}
+        </div>
       </div>
 
       <div className="mt-4 flex flex-wrap items-center gap-4">

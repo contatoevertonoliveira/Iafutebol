@@ -32,12 +32,23 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
     kaggleApiKey: '',
     agentTrainingEnabled: false,
     apiFootballDisabledLeagueIds: [],
+    llmEnabled: false,
+    llmProvider: 'none',
+    deepseekApiKey: '',
+    deepseekModel: 'deepseek-chat',
+    openaiApiKey: '',
+    openaiModel: 'gpt-4o-mini',
+    anthropicApiKey: '',
+    anthropicModel: 'claude-3-5-sonnet-latest',
+    googleApiKey: '',
+    googleModel: 'gemma-4-26b-a4b-it',
   });
   const [isValidating, setIsValidating] = useState(false);
   const [validationStatus, setValidationStatus] = useState<'idle' | 'valid' | 'invalid'>('idle');
   const [isValidatingApiFootball, setIsValidatingApiFootball] = useState(false);
   const [validationStatusApiFootball, setValidationStatusApiFootball] = useState<'idle' | 'valid' | 'invalid'>('idle');
   const [isSaving, setIsSaving] = useState(false);
+  const [isTestingLlm, setIsTestingLlm] = useState(false);
   const [leagues, setLeagues] = useState<ApiFootballLeague[]>([]);
   const [isLoadingLeagues, setIsLoadingLeagues] = useState(false);
   const [leagueSearch, setLeagueSearch] = useState('');
@@ -47,6 +58,70 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
   const [leaguesLastError, setLeaguesLastError] = useState<string>('');
   const [mobileExpandedApi, setMobileExpandedApi] = useState<'api-football' | 'football-data' | 'openligadb' | null>(null);
   const [leaguesProgress, setLeaguesProgress] = useState<{ page: number; total: number; count: number } | null>(null);
+
+  const googleModelPresets = ['gemma-4-26b-a4b-it', 'gemma-4-31b-it'] as const;
+  const testGoogleLlm = async () => {
+    if (isTestingLlm) return;
+    const apiKey = String(config.googleApiKey ?? '').trim();
+    const model = String(config.googleModel ?? '').trim() || googleModelPresets[0];
+    if (!apiKey) {
+      toast.error('Informe a API key do Gemini para testar.');
+      return;
+    }
+    if (!model) {
+      toast.error('Selecione um modelo para testar.');
+      return;
+    }
+    setIsTestingLlm(true);
+    try {
+      const { projectId, publicAnonKey } = await import('/utils/supabase/info');
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
+      const body = {
+        systemInstruction: { parts: [{ text: 'Responda com exatamente uma linha e sem explicações.' }] },
+        contents: [
+          {
+            role: 'user',
+            parts: [{ text: 'Retorne exatamente: OK GEMMA 4' }],
+          },
+        ],
+        generationConfig: { temperature: 0.0, maxOutputTokens: 16 },
+      };
+
+      const res = await fetch(`https://${projectId}.supabase.co/functions/v1/make-server-1119702f/proxy/google`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${publicAnonKey}`,
+        },
+        body: JSON.stringify({ url, apiKey, body }),
+      });
+
+      if (!res.ok) {
+        if (res.status === 404) {
+          throw new Error(
+            'Proxy Google (Gemini/Gemma) não encontrado no Supabase (404). Isso normalmente significa que a Edge Function ainda não foi atualizada/deployada com o endpoint /proxy/google.',
+          );
+        }
+        const t = await res.text().catch(() => '');
+        throw new Error(`HTTP ${res.status} ${res.statusText}${t ? ` - ${t}` : ''}`);
+      }
+      const data = (await res.json().catch(() => null)) as any;
+      const parts = Array.isArray(data?.candidates?.[0]?.content?.parts) ? data.candidates[0].content.parts : [];
+      const text = parts.map((p: any) => String(p?.text ?? '')).join('\n').trim();
+
+      const normalized = text.replace(/\s+/g, ' ').trim();
+      if (normalized.toUpperCase().includes('OK GEMMA 4')) {
+        toast.success('Teste do Gemini/Gemma OK', { description: text ? text.slice(0, 180) : 'Resposta sem texto' });
+      } else {
+        toast.warning('Teste do Gemini/Gemma retornou algo inesperado', { description: text ? text.slice(0, 220) : 'Resposta sem texto' });
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      toast.error('Falha no teste do Gemini/Gemma', { description: msg });
+    } finally {
+      setIsTestingLlm(false);
+    }
+  };
 
   const derivedLeagues = (() => {
     try {
@@ -367,13 +442,17 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
   };
 
   const handleSave = () => {
+    if (isSaving) return;
     setIsSaving(true);
-    saveApiConfig(config);
-    
-    setTimeout(() => {
-      setIsSaving(false);
+    try {
+      saveApiConfig(config);
       toast.success('Configurações salvas com sucesso!');
-    }, 500);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Falha ao salvar configurações';
+      toast.error('Não foi possível salvar', { description: msg });
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   if (mode === 'leagues') {
@@ -1396,6 +1475,178 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
                   <li>✓ Tracking de evolução e performance</li>
                 </ul>
               </div>
+            </div>
+          </Card>
+
+          {/* IAs Externas (LLMs) */}
+          <Card className="p-6">
+            <div className="mb-6">
+              <h2 className="text-xl font-bold flex items-center gap-2 mb-2">
+                <Key className="w-5 h-5 text-indigo-600" />
+                IAs Externas (DeepSeek / ChatGPT / Claude)
+              </h2>
+              <p className="text-sm text-gray-600">
+                Ative um motor externo para reforçar insights no chat de Bots (refinamento contínuo de estratégias).
+              </p>
+            </div>
+
+            <div className="space-y-4">
+              <div className="flex items-center justify-between p-4 bg-indigo-50 border border-indigo-200 rounded-lg">
+                <div>
+                  <Label htmlFor="llmEnabled" className="text-base font-semibold">
+                    Ativar IA externa no chat de Bots
+                  </Label>
+                  <p className="text-sm text-gray-600 mt-1">
+                    Quando ativado, o chat do menu Bots usa a IA selecionada e mantém fallback local se falhar.
+                  </p>
+                </div>
+                <Switch
+                  id="llmEnabled"
+                  checked={Boolean(config.llmEnabled)}
+                  onCheckedChange={(checked) => setConfig({ ...config, llmEnabled: checked })}
+                />
+              </div>
+
+              <div className="grid md:grid-cols-2 gap-4">
+                <div>
+                  <Label>Fornecedor</Label>
+                  <Select
+                    value={String(config.llmProvider ?? 'none')}
+                    onValueChange={(v) => setConfig({ ...config, llmProvider: v as any })}
+                  >
+                    <SelectTrigger className="mt-2">
+                      <SelectValue placeholder="Selecione" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none">Nenhum</SelectItem>
+                      <SelectItem value="deepseek">DeepSeek</SelectItem>
+                      <SelectItem value="google">Google Gemini</SelectItem>
+                      <SelectItem value="openai">ChatGPT (OpenAI)</SelectItem>
+                      <SelectItem value="anthropic">Claude (Anthropic)</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div>
+                  <Label>Modelo</Label>
+                  {config.llmProvider === 'google' ? (
+                    <div className="mt-2 space-y-2">
+                      <Select
+                        value={
+                          googleModelPresets.includes(String(config.googleModel ?? '').trim() as any)
+                            ? String(config.googleModel ?? '').trim()
+                            : googleModelPresets[0]
+                        }
+                        onValueChange={(v) => setConfig({ ...config, googleModel: v })}
+                      >
+                        <SelectTrigger>
+                          <SelectValue placeholder="Selecione o modelo" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {googleModelPresets.map((m) => (
+                            <SelectItem key={m} value={m}>
+                              {m}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  ) : (
+                    <Input
+                      className="mt-2"
+                      value={
+                        config.llmProvider === 'deepseek'
+                          ? String(config.deepseekModel ?? '')
+                          : config.llmProvider === 'openai'
+                            ? String(config.openaiModel ?? '')
+                            : config.llmProvider === 'anthropic'
+                              ? String(config.anthropicModel ?? '')
+                              : ''
+                      }
+                      onChange={(e) => {
+                        const value = e.target.value;
+                        if (config.llmProvider === 'deepseek') setConfig({ ...config, deepseekModel: value });
+                        if (config.llmProvider === 'openai') setConfig({ ...config, openaiModel: value });
+                        if (config.llmProvider === 'anthropic') setConfig({ ...config, anthropicModel: value });
+                      }}
+                      placeholder={
+                        config.llmProvider === 'deepseek'
+                          ? 'deepseek-chat'
+                          : config.llmProvider === 'openai'
+                            ? 'gpt-4o-mini'
+                            : config.llmProvider === 'anthropic'
+                              ? 'claude-3-5-sonnet-latest'
+                              : 'Selecione um fornecedor'
+                      }
+                      disabled={!config.llmProvider || config.llmProvider === 'none'}
+                    />
+                  )}
+                </div>
+              </div>
+
+              {config.llmProvider === 'deepseek' ? (
+                <div>
+                  <Label>API Key (DeepSeek)</Label>
+                  <Input
+                    type="password"
+                    className="mt-2"
+                    value={String(config.deepseekApiKey ?? '')}
+                    onChange={(e) => setConfig({ ...config, deepseekApiKey: e.target.value })}
+                    placeholder="Cole sua API key do DeepSeek"
+                  />
+                </div>
+              ) : null}
+
+              {config.llmProvider === 'google' ? (
+                <div>
+                  <Label>API Key (Google Gemini)</Label>
+                  <Input
+                    type="password"
+                    className="mt-2"
+                    value={String(config.googleApiKey ?? '')}
+                    onChange={(e) => setConfig({ ...config, googleApiKey: e.target.value })}
+                    placeholder="Cole sua API key do Gemini"
+                  />
+                  <div className="mt-3">
+                    <Button variant="outline" onClick={testGoogleLlm} disabled={isTestingLlm || !String(config.googleApiKey ?? '').trim()}>
+                      {isTestingLlm ? (
+                        <>
+                          <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                          Testando...
+                        </>
+                      ) : (
+                        'Testar Gemma 4'
+                      )}
+                    </Button>
+                  </div>
+                </div>
+              ) : null}
+
+              {config.llmProvider === 'openai' ? (
+                <div>
+                  <Label>API Key (OpenAI)</Label>
+                  <Input
+                    type="password"
+                    className="mt-2"
+                    value={String(config.openaiApiKey ?? '')}
+                    onChange={(e) => setConfig({ ...config, openaiApiKey: e.target.value })}
+                    placeholder="Cole sua API key da OpenAI"
+                  />
+                </div>
+              ) : null}
+
+              {config.llmProvider === 'anthropic' ? (
+                <div>
+                  <Label>API Key (Anthropic)</Label>
+                  <Input
+                    type="password"
+                    className="mt-2"
+                    value={String(config.anthropicApiKey ?? '')}
+                    onChange={(e) => setConfig({ ...config, anthropicApiKey: e.target.value })}
+                    placeholder="Cole sua API key da Anthropic"
+                  />
+                </div>
+              ) : null}
             </div>
           </Card>
 

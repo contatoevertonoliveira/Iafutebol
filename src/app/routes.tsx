@@ -7,6 +7,7 @@ import TrainingDashboard from './pages/TrainingDashboard';
 import DailyOverviewPage from './pages/DailyOverviewPage';
 import MobileAnalysisPage from './pages/MobileAnalysisPage';
 import GeneralMatchesPage from './pages/GeneralMatchesPage';
+import BotsPage from './pages/BotsPage';
 
 function TodayPage() {
   return <Home initialSelectedDate="today" />;
@@ -60,6 +61,7 @@ export const router = createBrowserRouter([
       { path: 'leagues', Component: LeaguesPage },
       { path: 'favorites', Component: FavoritesPage },
       { path: 'agents', Component: AIAgentsPage },
+      { path: 'bots', Component: BotsPage },
       { path: 'settings', Component: Settings },
       { path: 'training', Component: TrainingDashboard },
       { path: 'analysis/:matchId', Component: MobileAnalysisPage },

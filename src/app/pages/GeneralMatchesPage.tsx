@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router';
-import { Clock, Dices, ExternalLink, Globe, Loader2, RefreshCcw, Search, Trophy } from 'lucide-react';
+import { Clock, Dices, Globe, Loader2, RefreshCcw, Search, Trophy } from 'lucide-react';
 import { toast } from 'sonner';
 import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
@@ -182,6 +182,19 @@ const formatKickoff = (m: ApiFootballMatch) => {
   const date = raw ? new Date(raw) : new Date(NaN);
   if (!Number.isFinite(date.getTime())) return '—';
   return new Intl.DateTimeFormat('pt-BR', { timeZone: TIME_ZONE, hour: '2-digit', minute: '2-digit' }).format(date);
+};
+
+const formatFixtureLabel = (m: ApiFootballMatch) => {
+  const raw = String(m?.fixture?.date ?? '');
+  const date = raw ? new Date(raw) : new Date(NaN);
+  if (!Number.isFinite(date.getTime())) return '—';
+  const dateShort = new Intl.DateTimeFormat('pt-BR', { timeZone: TIME_ZONE, day: '2-digit', month: '2-digit' }).format(date);
+  const time = formatKickoff(m);
+  const todayKey = getDayKey(new Date());
+  const yesterdayKey = getDayKey(new Date(Date.now() - 24 * 60 * 60 * 1000));
+  const key = getDayKey(date);
+  const word = key === todayKey ? 'Hoje' : key === yesterdayKey ? 'Ontem' : '';
+  return `${dateShort}${word ? ` • ${word}` : ''} • ${time}`;
 };
 
 const statusLabel = (m: ApiFootballMatch) => {
@@ -512,7 +525,7 @@ export default function GeneralMatchesPage() {
 
   return (
     <div className="min-h-screen bg-gray-50 p-4 md:p-6">
-      <div className="max-w-6xl mx-auto space-y-4">
+      <div className="max-w-7xl mx-auto space-y-4">
         <div className="flex items-start justify-between gap-3">
           <div>
             <div className="flex items-center gap-2">
@@ -758,119 +771,100 @@ export default function GeneralMatchesPage() {
                                   : '';
                         const score =
                           goalsHome !== null && goalsHome !== undefined && goalsAway !== null && goalsAway !== undefined
-                            ? `${goalsHome} - ${goalsAway}`
-                            : '—';
+                            ? `${goalsHome} × ${goalsAway}`
+                            : '×';
 
                         return (
                           <div
                             key={fixtureId || `${home?.id}-${away?.id}-${m.fixture?.timestamp}`}
-                            className="w-full px-3 py-3"
+                            className="w-full"
                           >
-                            <div className="rounded-2xl bg-white border border-gray-200 shadow-sm hover:shadow-md transition-shadow px-4 py-3">
-                              <button className="w-full text-left" onClick={() => void openDetails(m)}>
+                            <div className="bg-white hover:bg-gray-50 transition-colors">
+                              <button className="w-full text-left px-4 py-3" onClick={() => void openDetails(m)}>
                                 <div className="flex items-center justify-between gap-3">
-                                  <div className="text-[11px] text-gray-500 truncate">
-                                    {venue ? venue : '—'}
-                                  </div>
-                                  <div className="flex items-center gap-1 text-[11px] text-gray-500 tabular-nums">
+                                  <div className="text-[11px] text-gray-500 truncate">{venue || '—'}</div>
+                                  <div className="text-[11px] text-gray-500 tabular-nums flex items-center gap-1">
                                     <Clock className="w-3.5 h-3.5" />
-                                    {formatKickoff(m)}
+                                    {formatFixtureLabel(m)}
                                   </div>
                                 </div>
 
-                                <div className="mt-2 mx-auto w-full max-w-[560px]">
-                                  <div className="grid grid-cols-[1fr_104px_1fr] items-center gap-2">
-                                    <div className="flex flex-col items-center gap-1 min-w-0">
+                                <div className="mt-3 mx-auto w-full max-w-[980px]">
+                                  <div className="grid grid-cols-[1fr_140px_1fr] items-center gap-3">
+                                    <div className="flex items-center justify-end gap-2 min-w-0">
+                                      <div className="text-sm md:text-base font-medium text-gray-900 leading-tight text-right">
+                                        {home?.name ?? '—'}
+                                      </div>
                                       <TeamLogo teamName={home?.name ?? '—'} logoUrl={home?.logo ?? ''} size="sm" showName={false} />
-                                      <div className="truncate text-sm font-semibold text-gray-900">{home?.name ?? '—'}</div>
                                     </div>
 
                                     <div className="flex flex-col items-center justify-center">
                                       <div className="text-[11px] text-gray-500 font-semibold tabular-nums">
                                         {phase ? `${phase}${minute ? ` • ${minute}` : ''}` : minute ? minute : status}
                                       </div>
-                                      <div className="mt-0.5 text-lg font-bold text-gray-900 tabular-nums tracking-tight">{score}</div>
+                                      <div className="mt-0.5 text-2xl font-bold text-gray-900 tabular-nums tracking-tight">
+                                        {score}
+                                      </div>
                                     </div>
 
-                                    <div className="flex flex-col items-center gap-1 min-w-0">
+                                    <div className="flex items-center justify-start gap-2 min-w-0">
                                       <TeamLogo teamName={away?.name ?? '—'} logoUrl={away?.logo ?? ''} size="sm" showName={false} />
-                                      <div className="truncate text-sm font-semibold text-gray-900">{away?.name ?? '—'}</div>
+                                      <div className="text-sm md:text-base font-medium text-gray-900 leading-tight">
+                                        {away?.name ?? '—'}
+                                      </div>
                                     </div>
                                   </div>
                                 </div>
-
-                                {hasPrediction ? (
-                                  <div className="mt-3 flex flex-wrap justify-center gap-2">
-                                    <Badge variant="outline" className="text-[11px]">
-                                      {formatWinnerShort(prediction)}
-                                    </Badge>
-                                    <Badge variant="outline" className="text-[11px]">
-                                      {formatOverUnderShort(prediction)}
-                                    </Badge>
-                                    <Badge variant="outline" className="text-[11px]">
-                                      {formatBttsShort(prediction)}
-                                    </Badge>
-                                    <Badge variant="outline" className="text-[11px] tabular-nums">
-                                      IA {Math.round(Number(prediction?.aiConfidence ?? 0))}%
-                                    </Badge>
-                                  </div>
-                                ) : null}
                               </button>
 
-                              <div className="mt-3 flex items-center justify-between gap-3">
-                                <div className="flex items-center gap-2">
-                                  <Badge
-                                    className={cn(
-                                      b === 'live'
-                                        ? 'bg-green-100 text-green-800 border-green-300'
-                                        : b === 'finished'
-                                          ? 'bg-gray-100 text-gray-800 border-gray-300'
-                                          : 'bg-blue-100 text-blue-800 border-blue-300',
-                                    )}
-                                  >
-                                    {b === 'live' ? 'AO VIVO' : b === 'finished' ? 'FINALIZADO' : 'EM BREVE'}
-                                  </Badge>
-                                  {wasRequested && !hasPrediction ? (
-                                    <Badge variant="outline" className="text-[11px]">
-                                      Gerando…
-                                    </Badge>
-                                  ) : null}
-                                  {hasPrediction ? (
-                                    <Badge variant="outline" className="text-[11px]">
-                                      IA pronta
-                                    </Badge>
-                                  ) : null}
-                                </div>
-
-                                <div className="flex items-center gap-2">
-                                  {fixtureId ? (
-                                    <Button
-                                      size="sm"
-                                      className={cn(hasPrediction || wasRequested ? 'bg-blue-700 hover:bg-blue-800' : '')}
-                                      variant={hasPrediction || wasRequested ? 'default' : 'outline'}
-                                      onClick={(e) => {
-                                        e.preventDefault();
-                                        e.stopPropagation();
-                                        if (!hasPrediction) requestFixturePrediction(fixtureId);
-                                        toast.success(hasPrediction ? 'Abrindo a análise...' : 'Previsão solicitada. Abrindo a análise...');
-                                        openPredictionShortcut(fixtureId);
-                                      }}
+                              <div className="px-4 pb-3">
+                                <div className="flex items-center justify-between gap-3">
+                                  <div className="flex items-center gap-2">
+                                    <Badge
+                                      className={cn(
+                                        b === 'live'
+                                          ? 'bg-green-100 text-green-800 border-green-300'
+                                          : b === 'finished'
+                                            ? 'bg-gray-100 text-gray-800 border-gray-300'
+                                            : 'bg-blue-100 text-blue-800 border-blue-300',
+                                      )}
                                     >
-                                      <ExternalLink className="w-4 h-4 mr-2" />
-                                      {hasPrediction || wasRequested ? 'Abrir previsão' : 'Gerar previsão'}
-                                    </Button>
-                                  ) : null}
+                                      {b === 'live' ? 'AO VIVO' : b === 'finished' ? 'FINALIZADO' : 'EM BREVE'}
+                                    </Badge>
+                                    {wasRequested && !hasPrediction ? (
+                                      <Badge variant="outline" className="text-[11px]">
+                                        Gerando…
+                                      </Badge>
+                                    ) : null}
+                                    {hasPrediction ? (
+                                      <Badge variant="outline" className="text-[11px]">
+                                        IA pronta
+                                      </Badge>
+                                    ) : null}
+                                  </div>
 
                                   <Button
                                     size="sm"
-                                    variant="outline"
+                                    variant="ghost"
+                                    className="h-8 px-2 text-xs font-semibold text-green-700 hover:bg-green-50"
                                     onClick={(e) => {
                                       e.preventDefault();
                                       e.stopPropagation();
-                                      void openDetails(m);
+                                      if (b === 'finished') {
+                                        void openDetails(m);
+                                        return;
+                                      }
+                                      if (!fixtureId) return;
+                                      if (!hasPrediction) requestFixturePrediction(fixtureId);
+                                      toast.success(hasPrediction ? 'Abrindo a análise...' : 'Previsão solicitada. Abrindo a análise...');
+                                      openPredictionShortcut(fixtureId);
                                     }}
                                   >
-                                    Detalhes
+                                    {b === 'finished'
+                                      ? 'SAIBA COMO FOI'
+                                      : hasPrediction || wasRequested
+                                        ? 'ABRIR PREVISÃO'
+                                        : 'GERAR PREVISÃO'}
                                   </Button>
                                 </div>
                               </div>

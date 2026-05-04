@@ -290,6 +290,7 @@ export class ApiFootballService {
     season?: number;
     team?: number;
     live?: string;
+    last?: number;
     from?: string;
     to?: string;
     timezone?: string;
@@ -303,6 +304,7 @@ export class ApiFootballService {
     if (params?.season) queryParams.season = params.season.toString();
     if (params?.team) queryParams.team = params.team.toString();
     if (params?.live) queryParams.live = params.live;
+    if (params?.last) queryParams.last = params.last.toString();
     if (params?.from) queryParams.from = params.from;
     if (params?.to) queryParams.to = params.to;
     if (params?.timezone) queryParams.timezone = params.timezone;
@@ -317,6 +319,7 @@ export class ApiFootballService {
     season?: number;
     team?: number;
     live?: string;
+    last?: number;
     from?: string;
     to?: string;
     timezone?: string;
@@ -329,6 +332,7 @@ export class ApiFootballService {
     if (params?.season) queryParams.season = params.season.toString();
     if (params?.team) queryParams.team = params.team.toString();
     if (params?.live) queryParams.live = params.live;
+    if (params?.last) queryParams.last = params.last.toString();
     if (params?.from) queryParams.from = params.from;
     if (params?.to) queryParams.to = params.to;
     if (params?.timezone) queryParams.timezone = params.timezone;

@@ -26,6 +26,7 @@ metamodel.json
 upsert.json
 dados/
 supabase/.temp/
+supabase/supabase/
 
 # IDE
 .vscode/

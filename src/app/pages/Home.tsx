@@ -209,6 +209,7 @@ export default function Home() {
                         key={match.id}
                         match={match}
                         prediction={prediction}
+                        apiSource="mock"
                         onViewDetails={setSelectedMatchId}
                       />
                     );

@@ -4,6 +4,7 @@ import {
   TrendingUp, 
   Calendar, 
   BarChart3, 
+  Bot,
   Trophy, 
   Activity,
   Globe,
@@ -23,6 +24,7 @@ export function Sidebar() {
     { to: '/general', icon: Globe, label: 'Jogos em Geral' },
     { to: '/leagues', icon: Trophy, label: 'Ligas' },
     { to: '/agents', icon: Brain, label: 'Agentes IA' },
+    { to: '/bots', icon: Bot, label: 'Bots' },
     { to: '/training', icon: Cpu, label: 'Treinamento' },
     { to: '/favorites', icon: Star, label: 'Favoritos' },
   ];

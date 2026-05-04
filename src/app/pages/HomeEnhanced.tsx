@@ -6,7 +6,7 @@ import { FilterBar } from '../components/FilterBar';
 import { PremiumCarousel } from '../components/PremiumCarousel';
 import { AgentAnalysis } from '../components/AgentAnalysis';
 import { DraggableWindow } from '../components/DraggableWindow';
-import { BarChart3, Brain, Globe, Loader2, ShieldCheck, Target, TrendingUp } from 'lucide-react';
+import { BarChart3, Brain, Globe, Loader2, Plus, Search, ShieldCheck, Target, TrendingUp } from 'lucide-react';
 import { MobileMatchCard } from '../components/MobileMatchCard';
 import { getDynamicAgentProfiles, AgentEnsemble, AgentPrediction, learnFromMatchResult, recordTrainingSample } from '../services/aiAgents';
 import { loadApiConfig } from '../services/apiConfig';
@@ -15,6 +15,10 @@ import { ApiFootballService, ApiFootballMatch } from '../services/apiFootballSer
 import { OpenLigaDbService, OpenLigaMatch } from '../services/openLigaDbService';
 import { toast } from 'sonner';
 import { useLocation, useNavigate } from 'react-router';
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../components/ui/dialog';
+import { Input } from '../components/ui/input';
+import { Button } from '../components/ui/button';
+import { Badge } from '../components/ui/badge';
 
 type MatchStatus = 'scheduled' | 'live' | 'finished';
 type StatusFilter = 'all' | 'live' | 'upcoming' | 'finished';
@@ -66,6 +70,12 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
   const [favoriteMatchIds, setFavoriteMatchIds] = useState<string[]>([]);
   const requestedFixturesKey = 'requested_fixtures_v1';
   const isSyncingRequestedRef = useRef(false);
+  const [addMatchOpen, setAddMatchOpen] = useState(false);
+  const [addMatchQuery, setAddMatchQuery] = useState('');
+  const [addMatchLoading, setAddMatchLoading] = useState(false);
+  const [addMatchError, setAddMatchError] = useState('');
+  const [addMatchFixtures, setAddMatchFixtures] = useState<ApiFootballMatch[]>([]);
+  const [addMatchResults, setAddMatchResults] = useState<ApiFootballMatch[]>([]);
 
   useEffect(() => {
     realMatchesRef.current = realMatches;
@@ -380,6 +390,129 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
       window.removeEventListener('focus', onRequested);
     };
   }, [apiSource]);
+
+  const normalizeSearchText = (value: string) => {
+    return String(value ?? '')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^0-9a-zA-Z\s]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
+  };
+
+  const scoreFixture = (fixture: ApiFootballMatch, query: string) => {
+    const q = normalizeSearchText(query);
+    if (!q) return 0;
+    const tokens = q.split(' ').filter(Boolean);
+    if (tokens.length === 0) return 0;
+    const home = normalizeSearchText(fixture?.teams?.home?.name ?? '');
+    const away = normalizeSearchText(fixture?.teams?.away?.name ?? '');
+    const league = normalizeSearchText(fixture?.league?.name ?? '');
+    const merged = `${home} ${away} ${league}`;
+    let hits = 0;
+    for (const t of tokens) {
+      if (merged.includes(t)) hits += 1;
+    }
+    if (hits === 0) return 0;
+    return hits * 10 - Math.abs(merged.length - q.length) * 0.02;
+  };
+
+  const addRequestedFixture = async (fixtureId: number, opts?: { open?: boolean }) => {
+    try {
+      const raw = localStorage.getItem(requestedFixturesKey);
+      const parsed = raw ? (JSON.parse(raw) as unknown) : null;
+      const next =
+        parsed && typeof parsed === 'object' && (parsed as any).version === 1 && (parsed as any).items
+          ? { version: 1 as const, items: { ...(parsed as any).items } as Record<string, { fixtureId: number }> }
+          : { version: 1 as const, items: {} as Record<string, { fixtureId: number }> };
+
+      next.items[String(fixtureId)] = { fixtureId };
+      localStorage.setItem(requestedFixturesKey, JSON.stringify(next));
+      window.dispatchEvent(new Event('requestedFixturesChanged'));
+      await syncRequestedFixtures();
+      if (opts?.open) setSelectedMatchId(String(fixtureId));
+      toast.success('Jogo adicionado');
+      setAddMatchOpen(false);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Erro ao adicionar jogo');
+    }
+  };
+
+  useEffect(() => {
+    if (!addMatchOpen) return;
+    setAddMatchError('');
+    setAddMatchQuery('');
+    setAddMatchResults([]);
+    const cfg = loadApiConfig();
+    const apiFootballKey = String(cfg?.apiFootballKey ?? '').trim();
+    if (!apiFootballKey) {
+      setAddMatchFixtures([]);
+      setAddMatchError('Configure a API-Football em Configurações para buscar jogos do dia.');
+      return;
+    }
+
+    const disabled = new Set((cfg?.apiFootballDisabledLeagueIds ?? []).map(Number).filter(Number.isFinite));
+    const ymd = getDayKey(new Date());
+
+    const run = async () => {
+      setAddMatchLoading(true);
+      try {
+        const service = new ApiFootballService(apiFootballKey);
+        const [dayFixtures, liveFixtures] = await Promise.all([
+          service.getFixtures({ date: ymd, timezone: TIME_ZONE, maxPages: 6 }),
+          service.getFixtures({ live: 'all', timezone: TIME_ZONE, maxPages: 4 }),
+        ]);
+        const byId = new Map<number, ApiFootballMatch>();
+        for (const f of [...(dayFixtures ?? []), ...(liveFixtures ?? [])]) {
+          const id = Number(f?.fixture?.id);
+          const leagueId = Number(f?.league?.id);
+          if (!Number.isFinite(id)) continue;
+          if (disabled.size > 0 && Number.isFinite(leagueId) && disabled.has(leagueId)) continue;
+          byId.set(id, f);
+        }
+        const items = Array.from(byId.values());
+        items.sort((a, b) => Number(a?.fixture?.timestamp ?? 0) - Number(b?.fixture?.timestamp ?? 0));
+        setAddMatchFixtures(items);
+        setAddMatchResults(items.slice(0, 30));
+      } catch (e) {
+        setAddMatchFixtures([]);
+        setAddMatchError(e instanceof Error ? e.message : 'Erro ao buscar jogos do dia');
+      } finally {
+        setAddMatchLoading(false);
+      }
+    };
+    void run();
+  }, [addMatchOpen]);
+
+  useEffect(() => {
+    if (!addMatchOpen) return;
+    const id = window.setTimeout(() => {
+      const fixtures = addMatchFixtures ?? [];
+      const q = addMatchQuery;
+      if (!q.trim()) {
+        const sorted = [...fixtures].sort((a, b) => {
+          const as = toMatchStatus(a?.fixture?.status?.short ?? 'NS');
+          const bs = toMatchStatus(b?.fixture?.status?.short ?? 'NS');
+          const rank = (s: MatchStatus) => (s === 'live' ? 0 : s === 'scheduled' ? 1 : 2);
+          const r = rank(as) - rank(bs);
+          if (r !== 0) return r;
+          return Number(a?.fixture?.timestamp ?? 0) - Number(b?.fixture?.timestamp ?? 0);
+        });
+        setAddMatchResults(sorted.slice(0, 30));
+        return;
+      }
+
+      const scored = fixtures
+        .map((f) => ({ f, score: scoreFixture(f, q) }))
+        .filter((x) => x.score > 0)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 40)
+        .map((x) => x.f);
+      setAddMatchResults(scored);
+    }, 140);
+    return () => window.clearTimeout(id);
+  }, [addMatchFixtures, addMatchOpen, addMatchQuery]);
 
   const convertApiFootballMatchToFootballMatch = (m: ApiFootballMatch): FootballMatch => {
     const status = m.fixture?.status?.short || 'NS';
@@ -1473,6 +1606,7 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
           onGroupModeChange={setGroupMode}
           onRefresh={handleManualRefreshMatches}
           isRefreshing={isLoadingMatches}
+          onAddMatch={() => setAddMatchOpen(true)}
         />
       </div>
 
@@ -1522,6 +1656,16 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
                 <div className="text-xs text-gray-600">Agentes</div>
                 <div className="text-sm font-bold text-gray-900 tabular-nums">{getDynamicAgentProfiles().length}</div>
               </div>
+            </div>
+            <div className="mt-3 flex gap-2">
+              <Button variant="outline" className="flex-1 h-9" onClick={() => setAddMatchOpen(true)}>
+                <Plus className="w-4 h-4 mr-2" />
+                Adicionar
+              </Button>
+              <Button className="flex-1 h-9" onClick={handleManualRefreshMatches} disabled={isLoadingMatches}>
+                {isLoadingMatches ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Search className="w-4 h-4 mr-2" />}
+                Atualizar
+              </Button>
             </div>
           </div>
         </div>
@@ -1581,9 +1725,11 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
                     key={match.id}
                     match={match}
                     prediction={prediction}
+                    apiSource={apiSource}
                     onViewDetails={handleViewDetailsMobile}
                     homeCrest={match.homeCrest}
                     awayCrest={match.awayCrest}
+                    footballMatch={apiSource !== 'mock' ? realMatchById[match.id] : undefined}
                   />
                 );
               })}
@@ -1607,6 +1753,7 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
                           key={match.id}
                           match={match}
                           prediction={prediction}
+                          apiSource={apiSource}
                           onViewDetails={handleViewDetails}
                           homeCrest={match.homeCrest}
                           awayCrest={match.awayCrest}
@@ -1626,6 +1773,130 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
           </>
         )}
       </div>
+
+      <Dialog open={addMatchOpen} onOpenChange={setAddMatchOpen}>
+        <DialogContent className="sm:max-w-6xl">
+          <DialogHeader>
+            <DialogTitle>Adicionar jogo do dia</DialogTitle>
+            <DialogDescription>
+              Digite o nome de um time para localizar fixtures do dia na API-Football e adicionar à lista do Início.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="flex items-center gap-2">
+            <div className="flex-1">
+              <Input
+                value={addMatchQuery}
+                onChange={(e) => setAddMatchQuery(e.target.value)}
+                placeholder="Ex.: Juventus, Feyenoord, Milan..."
+              />
+            </div>
+            <Badge variant="secondary" className="tabular-nums">
+              {getDayKey(new Date())}
+            </Badge>
+          </div>
+
+          {addMatchError ? (
+            <div className="p-3 rounded-xl border border-red-200 bg-red-50 text-red-900 text-sm">{addMatchError}</div>
+          ) : null}
+
+          <div className="border rounded-xl overflow-hidden">
+            <div className="max-h-[56vh] overflow-auto">
+              {addMatchLoading ? (
+                <div className="p-6 flex items-center justify-center gap-3 text-gray-600">
+                  <Loader2 className="w-5 h-5 animate-spin" />
+                  Buscando jogos do dia...
+                </div>
+              ) : addMatchResults.length === 0 ? (
+                <div className="p-6 text-sm text-gray-600">Nenhum jogo encontrado para esse texto.</div>
+              ) : (
+                <div className="divide-y bg-white">
+                  {addMatchResults.map((f) => {
+                    const id = String(f.fixture.id);
+                    const kickoff = Number.isFinite(Number(f.fixture.timestamp))
+                      ? new Date(f.fixture.timestamp * 1000)
+                      : new Date(f.fixture.date);
+                    const time = Number.isFinite(kickoff.getTime())
+                      ? kickoff.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
+                      : '--:--';
+                    const dateShort = Number.isFinite(kickoff.getTime())
+                      ? kickoff.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' })
+                      : '--/--';
+                    const todayKey = getDayKey(new Date());
+                    const kickoffKey = Number.isFinite(kickoff.getTime()) ? getDayKey(kickoff) : '';
+                    const yesterdayKey = getDayKey(new Date(Date.now() - 24 * 60 * 60 * 1000));
+                    const dayWord = kickoffKey === todayKey ? 'Hoje' : kickoffKey === yesterdayKey ? 'Ontem' : '';
+                    const statusShort = String(f.fixture.status.short ?? 'NS');
+                    const status = toMatchStatus(statusShort);
+                    const statusLabel = status === 'live' ? 'AO VIVO' : status === 'finished' ? 'FINALIZADO' : 'EM BREVE';
+                    const statusVariant = status === 'live' ? 'default' : status === 'finished' ? 'secondary' : 'outline';
+                    const venue = String(f.fixture?.venue?.name ?? '').trim();
+                    const scoreText =
+                      typeof f.goals?.home === 'number' && typeof f.goals?.away === 'number'
+                        ? `${f.goals.home} × ${f.goals.away}`
+                        : '×';
+                    return (
+                      <div key={id} className="px-4 py-3 hover:bg-gray-50 transition-colors">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="text-[11px] text-gray-500 truncate">{venue || '—'}</div>
+                          <div className="flex items-center gap-2">
+                            <Badge variant={statusVariant as any}>{statusLabel}</Badge>
+                            <div className="text-[11px] text-gray-500 tabular-nums">
+                              {dateShort}
+                              {dayWord ? ` • ${dayWord}` : ''}
+                              {' • '}
+                              {time}
+                            </div>
+                          </div>
+                        </div>
+
+                        <button
+                          className="w-full text-left"
+                          onClick={() => addRequestedFixture(f.fixture.id, { open: true })}
+                        >
+                          <div className="mt-3 mx-auto w-full max-w-[980px]">
+                            <div className="grid grid-cols-[1fr_120px_1fr] items-center gap-3">
+                              <div className="flex items-center justify-end gap-2 min-w-0">
+                                <div className="text-sm font-medium text-gray-900 leading-tight text-right">
+                                  {f.teams.home.name}
+                                </div>
+                                {f.teams.home.logo ? (
+                                  <img src={f.teams.home.logo} alt="" className="w-9 h-9 shrink-0" />
+                                ) : null}
+                              </div>
+
+                              <div className="flex items-center justify-center">
+                                <div className="text-2xl font-bold text-gray-900 tabular-nums tracking-tight">
+                                  {scoreText}
+                                </div>
+                              </div>
+
+                              <div className="flex items-center justify-start gap-2 min-w-0">
+                                {f.teams.away.logo ? (
+                                  <img src={f.teams.away.logo} alt="" className="w-9 h-9 shrink-0" />
+                                ) : null}
+                                <div className="text-sm font-medium text-gray-900 leading-tight">
+                                  {f.teams.away.name}
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="mt-3 flex items-center justify-center">
+                            <div className="text-xs font-semibold text-green-700">
+                              ADICIONAR PARA ANÁLISE
+                            </div>
+                          </div>
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       {selectedMatch && selectedPrediction && (
         <div className="fixed inset-0 z-50 pointer-events-none hidden md:block">
