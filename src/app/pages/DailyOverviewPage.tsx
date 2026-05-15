@@ -8,7 +8,7 @@ import type { FootballMatch } from '../services/footballDataService';
 import type { Prediction } from '../data/mockData';
 import { AgentEnsemble, AI_AGENTS_BASE, getDynamicAgentProfiles } from '../services/aiAgents';
 
-type ApiSource = 'api-football' | 'football-data' | 'openligadb' | 'mock';
+type ApiSource = 'api-football' | 'football-data' | 'openligadb' | 'betfair' | 'mock';
 
 type MatchesCacheV1 = {
   version: 1;

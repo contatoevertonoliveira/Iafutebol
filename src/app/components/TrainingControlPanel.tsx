@@ -199,6 +199,7 @@ export default function TrainingControlPanel({ className = '' }: TrainingControl
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${publicAnonKey}`,
+          apikey: publicAnonKey,
         },
         body: JSON.stringify({ username, apiKey, dataset, fileName, maxBytes: 12 * 1024 * 1024 }),
       });
@@ -249,6 +250,7 @@ export default function TrainingControlPanel({ className = '' }: TrainingControl
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${publicAnonKey}`,
+          apikey: publicAnonKey,
         },
         body: JSON.stringify({ username, apiKey, dataset }),
       });

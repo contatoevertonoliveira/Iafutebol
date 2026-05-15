@@ -179,6 +179,7 @@ export class ApiFootballService {
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${publicAnonKey}`,
+          apikey: publicAnonKey,
         },
         body: JSON.stringify({
           url,

@@ -12,6 +12,7 @@ import {
   Star,
   TrendingUp,
   Trophy,
+  Zap,
 } from 'lucide-react';
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger, SheetClose } from './ui/sheet';
 
@@ -25,6 +26,7 @@ export function MobileNav() {
     { to: '/general', icon: Globe, label: 'Jogos em Geral' },
     { to: '/leagues', icon: Trophy, label: 'Ligas' },
     { to: '/agents', icon: Brain, label: 'Agentes IA' },
+    { to: '/automation', icon: Zap, label: 'Automação' },
     { to: '/training', icon: Cpu, label: 'Treinamento' },
     { to: '/favorites', icon: Star, label: 'Favoritos' },
   ];

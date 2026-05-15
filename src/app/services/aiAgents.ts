@@ -78,6 +78,8 @@ export interface AgentProfile {
     btts: number;
     overUnder: number;
   };
+  marketKeyStats?: Record<string, { total: number; correct: number; accuracy: number }>;
+  topMarkets?: Array<{ key: string; label: string; total: number; correct: number; accuracy: number }>;
   totalPredictions: number;
   correctPredictions: number;
   avatar: string;
@@ -959,6 +961,48 @@ export function getDynamicAgentProfiles(): AgentProfile[] {
     }
   })();
 
+  const historyV3 = (() => {
+    try {
+      const raw = localStorage.getItem('agent_learning_history_v3');
+      if (!raw) return null;
+      const parsed = JSON.parse(raw) as any;
+      if (!parsed || parsed.version !== 3 || !parsed.agents) return null;
+      return parsed as {
+        version: 3;
+        agents: Record<string, { byMarket: Record<string, { total: number; correct: number }> }>;
+      };
+    } catch {
+      return null;
+    }
+  })();
+
+  const marketKeyLabel = (key: string) => {
+    const k = String(key ?? '');
+    if (k.startsWith('winner:')) {
+      const v = k.slice('winner:'.length);
+      if (v === 'home') return 'Vencedor: Casa';
+      if (v === 'away') return 'Vencedor: Visitante';
+      if (v === 'draw') return 'Vencedor: Empate';
+      return 'Vencedor';
+    }
+    if (k.startsWith('btts:')) {
+      const v = k.slice('btts:'.length);
+      if (v === 'yes') return 'Ambos marcam: Sim';
+      if (v === 'no') return 'Ambos marcam: Não';
+      return 'Ambos marcam';
+    }
+    if (k.startsWith('ou:')) {
+      const rest = k.slice('ou:'.length);
+      const [side, line] = rest.split(':', 2);
+      const sideLabel = side === 'over' ? 'Over' : side === 'under' ? 'Under' : 'Over/Under';
+      const lineLabel = line ? ` ${line}` : '';
+      return `${sideLabel}${lineLabel}`;
+    }
+    if (k.startsWith('cs:')) return `Placar exato: ${k.slice('cs:'.length)}`;
+    if (k.startsWith('ah:')) return `Handicap: ${k.slice('ah:'.length)}`;
+    return k || 'Mercado';
+  };
+
   const priorTotal = 25;
 
   return AI_AGENTS_BASE.map(agent => {
@@ -973,6 +1017,7 @@ export function getDynamicAgentProfiles(): AgentProfile[] {
     // 2) Ajuste com base no histórico real (Ver Resultado)
     const agentHistory = history[agent.id];
     const agentHistoryV2 = historyV2?.agents?.[agent.id];
+    const agentHistoryV3 = historyV3?.agents?.[agent.id];
 
     const basePriorCorrect = (priorTotal * currentAccuracy) / 100;
 
@@ -1013,14 +1058,62 @@ export function getDynamicAgentProfiles(): AgentProfile[] {
       return t > 0 ? (c / t) * 100 : currentAccuracy;
     })();
 
+    const marketKeyStats = (() => {
+      const byMarket = agentHistoryV3?.byMarket;
+      if (!byMarket || typeof byMarket !== 'object') return undefined;
+      const out: Record<string, { total: number; correct: number; accuracy: number }> = {};
+      for (const [k, v] of Object.entries(byMarket)) {
+        const total = Math.max(0, Number((v as any)?.total ?? 0));
+        const correct = Math.max(0, Number((v as any)?.correct ?? 0));
+        const accuracy = total > 0 ? (correct / total) * 100 : 0;
+        out[String(k)] = { total, correct, accuracy };
+      }
+      return out;
+    })();
+
+    const topMarkets = (() => {
+      if (!marketKeyStats) return undefined;
+      const items = Object.entries(marketKeyStats)
+        .map(([key, v]) => ({
+          key,
+          label: marketKeyLabel(key),
+          total: v.total,
+          correct: v.correct,
+          accuracy: v.total > 0 ? (v.correct / v.total) * 100 : 0,
+        }))
+        .filter((x) => x.total > 0)
+        .sort((a, b) => b.total - a.total)
+        .slice(0, 6);
+      return items.length ? items : undefined;
+    })();
+
+    const aggByPrefix = (prefix: string) => {
+      if (!marketKeyStats) return null;
+      let total = 0;
+      let correct = 0;
+      for (const [k, v] of Object.entries(marketKeyStats)) {
+        if (!k.startsWith(prefix)) continue;
+        total += v.total;
+        correct += v.correct;
+      }
+      if (total <= 0) return null;
+      return (correct / total) * 100;
+    };
+
+    const winnerAccV3 = aggByPrefix('winner:');
+    const bttsAccV3 = aggByPrefix('btts:');
+    const ouAccV3 = aggByPrefix('ou:');
+
     return {
       ...agent,
       accuracy: Math.min(95, Math.max(40, currentAccuracy)),
       marketAccuracies: {
-        winner: Math.min(95, Math.max(40, winnerAcc)),
-        btts: Math.min(95, Math.max(40, bttsAcc)),
-        overUnder: Math.min(95, Math.max(40, overUnderAcc)),
+        winner: Math.min(95, Math.max(40, winnerAccV3 ?? winnerAcc)),
+        btts: Math.min(95, Math.max(40, bttsAccV3 ?? bttsAcc)),
+        overUnder: Math.min(95, Math.max(40, ouAccV3 ?? overUnderAcc)),
       },
+      marketKeyStats,
+      topMarkets,
       totalPredictions: totalPreds,
       correctPredictions: correctPreds,
     };
@@ -1036,8 +1129,14 @@ export function learnFromMatchResult(match: FootballMatch, predictions: AgentPre
   const realWinner: 'home' | 'away' | 'draw' = homeScore > awayScore ? 'home' : homeScore < awayScore ? 'away' : 'draw';
   const totalGoals = homeScore + awayScore;
   const realBtts: 'yes' | 'no' = homeScore > 0 && awayScore > 0 ? 'yes' : 'no';
-  const line = 2.5;
-  const realOverUnder: 'over' | 'under' = totalGoals > line ? 'over' : 'under';
+  const realOverUnderForLine = (line: number): 'over' | 'under' => (totalGoals > line ? 'over' : 'under');
+  const shouldScoreWinnerMarket = realWinner !== 'draw';
+
+  const formatLineKey = (line: number) => {
+    if (!Number.isFinite(line)) return '2.5';
+    const s = Math.abs(line % 1) < 1e-9 ? line.toFixed(0) : line.toFixed(2);
+    return s.replace(/0+$/g, '').replace(/\.$/g, '');
+  };
 
   const historyRaw = localStorage.getItem('agent_learning_history');
   const history = historyRaw ? JSON.parse(historyRaw) : {};
@@ -1051,13 +1150,24 @@ export function learnFromMatchResult(match: FootballMatch, predictions: AgentPre
     return { version: 2 as const, agents: {} as any };
   })();
 
+  const v3Raw = localStorage.getItem('agent_learning_history_v3');
+  const v3 = (() => {
+    try {
+      const parsed = v3Raw ? (JSON.parse(v3Raw) as any) : null;
+      if (parsed && parsed.version === 3 && parsed.agents) return parsed as any;
+    } catch {}
+    return { version: 3 as const, agents: {} as any };
+  })();
+
   predictions.forEach((p) => {
     const agentBase = AI_AGENTS_BASE.find((a) => a.name === p.agentName);
     if (!agentBase) return;
 
     if (!history[agentBase.id]) history[agentBase.id] = { total: 0, correct: 0 };
-    history[agentBase.id].total += 1;
-    if (p.winner === realWinner) history[agentBase.id].correct += 1;
+    if (shouldScoreWinnerMarket) {
+      history[agentBase.id].total += 1;
+      if (p.winner === realWinner) history[agentBase.id].correct += 1;
+    }
 
     if (!v2.agents[agentBase.id]) {
       v2.agents[agentBase.id] = {
@@ -1073,15 +1183,21 @@ export function learnFromMatchResult(match: FootballMatch, predictions: AgentPre
     }
 
     const rec = v2.agents[agentBase.id];
-    const winnerOk = p.winner === realWinner;
+    const winnerOk = shouldScoreWinnerMarket ? p.winner === realWinner : true;
     const bttsOk = p.btts?.prediction === realBtts;
-    const ouOk = p.overUnder?.prediction === realOverUnder;
+    const ouLine = typeof p.overUnder?.line === 'number' ? p.overUnder.line : 2.5;
+    const ouOk = p.overUnder?.prediction === realOverUnderForLine(ouLine);
+    const csOk = String(p.correctScore?.score ?? '') === `${homeScore}-${awayScore}`;
 
-    rec.total += 1;
-    if (winnerOk) rec.correct += 1;
+    if (shouldScoreWinnerMarket) {
+      rec.total += 1;
+      if (winnerOk) rec.correct += 1;
+    }
 
-    rec.markets.winner.total += 1;
-    if (winnerOk) rec.markets.winner.correct += 1;
+    if (shouldScoreWinnerMarket) {
+      rec.markets.winner.total += 1;
+      if (winnerOk) rec.markets.winner.correct += 1;
+    }
 
     rec.markets.btts.total += 1;
     if (bttsOk) rec.markets.btts.correct += 1;
@@ -1091,10 +1207,28 @@ export function learnFromMatchResult(match: FootballMatch, predictions: AgentPre
 
     rec.recent.push({ ts: new Date().toISOString(), winner: winnerOk, btts: bttsOk, overUnder: ouOk });
     if (rec.recent.length > 200) rec.recent.splice(0, rec.recent.length - 200);
+
+    if (!v3.agents[agentBase.id]) v3.agents[agentBase.id] = { byMarket: {} as any };
+    const rec3 = v3.agents[agentBase.id];
+    if (!rec3.byMarket || typeof rec3.byMarket !== 'object') rec3.byMarket = {} as any;
+
+    const bump = (key: string, ok: boolean) => {
+      const k = String(key ?? '').trim();
+      if (!k) return;
+      if (!rec3.byMarket[k]) rec3.byMarket[k] = { total: 0, correct: 0 };
+      rec3.byMarket[k].total += 1;
+      if (ok) rec3.byMarket[k].correct += 1;
+    };
+
+    if (shouldScoreWinnerMarket) bump(`winner:${p.winner}`, winnerOk);
+    bump(`btts:${p.btts?.prediction}`, bttsOk);
+    bump(`ou:${p.overUnder?.prediction}:${formatLineKey(ouLine)}`, ouOk);
+    bump(`cs:${p.correctScore?.score}`, csOk);
   });
 
   localStorage.setItem('agent_learning_history', JSON.stringify(history));
   localStorage.setItem('agent_learning_history_v2', JSON.stringify(v2));
+  localStorage.setItem('agent_learning_history_v3', JSON.stringify(v3));
   updateMetaModelOnline(match, predictions);
 }
 
@@ -1469,6 +1603,134 @@ export class AgentEnsemble {
     return predictions;
   }
 
+  private parseCorrectScore(score: unknown): { home: number; away: number } | null {
+    const s = String(score ?? '').trim();
+    const m = s.match(/^(\d+)\s*[-x×]\s*(\d+)$/i);
+    if (!m) return null;
+    const home = Number(m[1]);
+    const away = Number(m[2]);
+    if (!Number.isFinite(home) || !Number.isFinite(away)) return null;
+    if (home < 0 || away < 0) return null;
+    if (home > 12 || away > 12) return null;
+    return { home, away };
+  }
+
+  private deriveWinnerFromScore(goals: { home: number; away: number }): 'home' | 'away' | 'draw' {
+    if (goals.home > goals.away) return 'home';
+    if (goals.home < goals.away) return 'away';
+    return 'draw';
+  }
+
+  private deriveBttsFromScore(goals: { home: number; away: number }): 'yes' | 'no' {
+    return goals.home > 0 && goals.away > 0 ? 'yes' : 'no';
+  }
+
+  private deriveOverUnderFromScore(goals: { home: number; away: number }, line: number): 'over' | 'under' {
+    const total = goals.home + goals.away;
+    return total > line ? 'over' : 'under';
+  }
+
+  private pickCoherentCorrectScore(params: {
+    predictions: AgentPrediction[];
+    targetWinner: 'home' | 'away' | 'draw';
+    targetBtts: 'yes' | 'no';
+    targetOverUnder: 'over' | 'under';
+    line: number;
+  }): { score: string; confidence: number } {
+    const { predictions, targetWinner, targetBtts, targetOverUnder, line } = params;
+
+    const getAcc = (agentName: string) => {
+      const agent = this.agents.find((a) => a.profile.name === agentName);
+      return typeof agent?.profile?.accuracy === 'number' && Number.isFinite(agent.profile.accuracy) ? agent.profile.accuracy : 0;
+    };
+
+    const candidates = predictions
+      .map((p) => {
+        const goals = this.parseCorrectScore(p.correctScore?.score);
+        if (!goals) return null;
+        const derivedWinner = this.deriveWinnerFromScore(goals);
+        const derivedBtts = this.deriveBttsFromScore(goals);
+        const derivedOu = this.deriveOverUnderFromScore(goals, line);
+
+        const winnerOk = derivedWinner === targetWinner;
+        const bttsOk = derivedBtts === targetBtts;
+        const ouOk = derivedOu === targetOverUnder;
+
+        const acc = getAcc(p.agentName);
+        const csConf = typeof p.correctScore?.confidence === 'number' ? Math.max(0, Math.min(100, p.correctScore.confidence)) : 45;
+
+        const marketScore = (winnerOk ? 3 : -2) + (bttsOk ? 2 : 0) + (ouOk ? 1 : 0);
+        const qualityScore = marketScore * 100 + acc * 1.0 + csConf * 1.0;
+
+        return {
+          score: String(p.correctScore?.score ?? '').trim(),
+          confidence: Math.round(csConf),
+          qualityScore,
+          winnerOk,
+          bttsOk,
+          ouOk,
+        };
+      })
+      .filter((x): x is NonNullable<typeof x> => Boolean(x))
+      .sort((a, b) => b.qualityScore - a.qualityScore);
+
+    const best = candidates[0] ?? null;
+    if (best && best.winnerOk) return { score: best.score, confidence: best.confidence };
+
+    const pickFrom = (options: string[]) => options[Math.floor(Math.random() * options.length)];
+
+    const wantOver = targetOverUnder === 'over';
+    const wantBtts = targetBtts === 'yes';
+
+    if (targetWinner === 'draw') {
+      if (wantBtts) return { score: wantOver ? pickFrom(['2-2', '3-3']) : '1-1', confidence: 58 };
+      return { score: '0-0', confidence: 58 };
+    }
+
+    if (targetWinner === 'home') {
+      if (wantBtts) return { score: pickFrom(['2-1', '3-1', '3-2']), confidence: 56 };
+      return { score: wantOver ? pickFrom(['3-0', '4-0']) : pickFrom(['1-0', '2-0']), confidence: 56 };
+    }
+
+    if (wantBtts) return { score: pickFrom(['1-2', '1-3', '2-3']), confidence: 56 };
+    return { score: wantOver ? pickFrom(['0-3', '0-4']) : pickFrom(['0-1', '0-2']), confidence: 56 };
+  }
+
+  private coercePredictionCoherence(params: {
+    base: AgentPrediction;
+    predictions: AgentPrediction[];
+  }): AgentPrediction {
+    const line = typeof params.base.overUnder?.line === 'number' ? params.base.overUnder.line : 2.5;
+    const picked = this.pickCoherentCorrectScore({
+      predictions: params.predictions,
+      targetWinner: params.base.winner,
+      targetBtts: params.base.btts.prediction,
+      targetOverUnder: params.base.overUnder.prediction,
+      line,
+    });
+
+    const goals = this.parseCorrectScore(picked.score);
+    if (!goals) return params.base;
+
+    const winner = this.deriveWinnerFromScore(goals);
+    const bttsPrediction = this.deriveBttsFromScore(goals);
+    const ouPrediction = this.deriveOverUnderFromScore(goals, line);
+
+    const next: AgentPrediction = {
+      ...params.base,
+      winner,
+      overUnder: { ...params.base.overUnder, line, prediction: ouPrediction },
+      btts: { ...params.base.btts, prediction: bttsPrediction },
+      correctScore: { score: picked.score, confidence: picked.confidence },
+    };
+
+    if (next.winner !== params.base.winner) next.winnerConfidence = Math.max(40, Math.min(90, Math.round(params.base.winnerConfidence * 0.65)));
+    if (next.btts.prediction !== params.base.btts.prediction) next.btts.confidence = Math.max(40, Math.min(90, Math.round(params.base.btts.confidence * 0.65)));
+    if (next.overUnder.prediction !== params.base.overUnder.prediction) next.overUnder.confidence = Math.max(40, Math.min(90, Math.round(params.base.overUnder.confidence * 0.65)));
+
+    return next;
+  }
+
   /**
    * Combina previsões usando ponderação por accuracy
    */
@@ -1536,7 +1798,7 @@ export class AgentEnsemble {
           return sum + (agent?.profile.accuracy || 0);
         }, 0);
 
-        return {
+        const base: AgentPrediction = {
           agentName: 'Consenso IA',
           agentType: 'ensemble',
           confidence: avgConfidence,
@@ -1558,6 +1820,7 @@ export class AgentEnsemble {
             missingPlayers: predictions.reduce((sum, p) => sum + p.factors.missingPlayers, 0) / predictions.length,
           },
         };
+        return this.coercePredictionCoherence({ base, predictions });
       }
     }
     
@@ -1610,7 +1873,7 @@ export class AgentEnsemble {
 
     const bestCorrectScoreIndex = getBestCorrectScoreIndex();
 
-    return {
+    const base: AgentPrediction = {
       agentName: 'Consenso IA',
       agentType: 'ensemble',
       confidence: avgConfidence,
@@ -1632,6 +1895,7 @@ export class AgentEnsemble {
         missingPlayers: predictions.reduce((sum, p) => sum + p.factors.missingPlayers, 0) / predictions.length,
       },
     };
+    return this.coercePredictionCoherence({ base, predictions });
   }
 
   private getConsensusOverUnder(predictions: AgentPrediction[], totalAccuracy: number) {

@@ -18,12 +18,12 @@ import { ApiFootballMatch, ApiFootballService, ApiFootballLeague } from '../serv
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select';
 
 type SettingsProps = {
-  initialTab?: 'apis' | 'competitions';
+  initialTab?: 'apis' | 'competitions' | 'betfair';
   mode?: 'default' | 'leagues';
 };
 
 export default function Settings({ initialTab = 'apis', mode = 'default' }: SettingsProps) {
-  const [tab, setTab] = useState<'apis' | 'competitions'>(initialTab);
+  const [tab, setTab] = useState<'apis' | 'competitions' | 'betfair'>(initialTab);
   const [config, setConfig] = useState<ApiConfig>({
     footballDataApiKey: '',
     apiFootballKey: '',
@@ -49,6 +49,14 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
   const [validationStatusApiFootball, setValidationStatusApiFootball] = useState<'idle' | 'valid' | 'invalid'>('idle');
   const [isSaving, setIsSaving] = useState(false);
   const [isTestingLlm, setIsTestingLlm] = useState(false);
+  const [isValidatingGoogleKey, setIsValidatingGoogleKey] = useState(false);
+  const [betfairTest, setBetfairTest] = useState<{
+    status: 'idle' | 'testing' | 'ok' | 'error';
+    message: string;
+    tokenPreview: string | null;
+    fetchedAt: string | null;
+    eventTypesCount: number | null;
+  }>({ status: 'idle', message: '', tokenPreview: null, fetchedAt: null, eventTypesCount: null });
   const [leagues, setLeagues] = useState<ApiFootballLeague[]>([]);
   const [isLoadingLeagues, setIsLoadingLeagues] = useState(false);
   const [leagueSearch, setLeagueSearch] = useState('');
@@ -60,6 +68,128 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
   const [leaguesProgress, setLeaguesProgress] = useState<{ page: number; total: number; count: number } | null>(null);
 
   const googleModelPresets = ['gemma-4-26b-a4b-it', 'gemma-4-31b-it'] as const;
+  const validateGoogleGeminiKey = async () => {
+    if (isValidatingGoogleKey) return;
+    const apiKey = String(config.googleApiKey ?? '').trim();
+    const model = String(config.googleModel ?? '').trim() || googleModelPresets[0];
+    if (!apiKey) {
+      toast.error('Informe a API key do Gemini para validar.');
+      return;
+    }
+    setIsValidatingGoogleKey(true);
+    try {
+      const { projectId, publicAnonKey } = await import('/utils/supabase/info');
+      const res = await fetch(`https://${projectId}.supabase.co/functions/v1/make-server-1119702f/validate-api/google-gemini`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${publicAnonKey}`,
+          apikey: publicAnonKey,
+        },
+        body: JSON.stringify({ apiKey, model }),
+      });
+
+      const raw = await res.text().catch(() => '');
+      let data: any = null;
+      try {
+        data = raw ? JSON.parse(raw) : null;
+      } catch {
+        data = null;
+      }
+
+      if (!res.ok || !data?.valid) {
+        const details = data?.details ? (typeof data.details === 'string' ? data.details : JSON.stringify(data.details)) : raw;
+        throw new Error(String(data?.error ?? `HTTP ${res.status} ${res.statusText}`) + (details ? ` - ${details}` : ''));
+      }
+
+      toast.success('Chave do Gemini válida', { description: String(data?.model ?? model) });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      toast.error('Chave do Gemini inválida', { description: msg.slice(0, 220) });
+    } finally {
+      setIsValidatingGoogleKey(false);
+    }
+  };
+
+  const testBetfairConnection = async () => {
+    if (betfairTest.status === 'testing') return;
+    setBetfairTest({ status: 'testing', message: 'Testando…', tokenPreview: null, fetchedAt: null, eventTypesCount: null });
+    try {
+      const { projectId, publicAnonKey } = await import('/utils/supabase/info');
+      const sessionRes = await fetch(`https://${projectId}.supabase.co/functions/v1/make-server-1119702f/betfair/session`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${publicAnonKey}`,
+          apikey: publicAnonKey,
+        },
+        body: '{}',
+      });
+
+      const sessionRaw = await sessionRes.text().catch(() => '');
+      let sessionData: any = null;
+      try {
+        sessionData = sessionRaw ? JSON.parse(sessionRaw) : null;
+      } catch {
+        sessionData = null;
+      }
+      if (!sessionRes.ok || !sessionData?.ok || !sessionData?.hasSession) {
+        const err = String(sessionData?.error ?? `HTTP ${sessionRes.status} ${sessionRes.statusText}`);
+        throw new Error(err);
+      }
+
+      const rpcRes = await fetch(`https://${projectId}.supabase.co/functions/v1/make-server-1119702f/betfair/rpc`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${publicAnonKey}`,
+          apikey: publicAnonKey,
+        },
+        body: JSON.stringify({
+          method: 'SportsAPING/v1.0/listEventTypes',
+          params: { filter: {} },
+        }),
+      });
+
+      const rpcRaw = await rpcRes.text().catch(() => '');
+      let rpcData: any = null;
+      try {
+        rpcData = rpcRaw ? JSON.parse(rpcRaw) : null;
+      } catch {
+        rpcData = null;
+      }
+      if (!rpcRes.ok || !rpcData?.ok) {
+        const err = String(rpcData?.error ?? `HTTP ${rpcRes.status} ${rpcRes.statusText}`);
+        throw new Error(err);
+      }
+
+      const count = Array.isArray(rpcData?.result) ? rpcData.result.length : null;
+      setBetfairTest({
+        status: 'ok',
+        message: 'Conexão OK',
+        tokenPreview: typeof sessionData?.tokenPreview === 'string' ? sessionData.tokenPreview : null,
+        fetchedAt: typeof sessionData?.fetchedAt === 'string' ? sessionData.fetchedAt : null,
+        eventTypesCount: typeof count === 'number' ? count : null,
+      });
+      toast.success('Betfair OK', {
+        description: `Sessão criada${count !== null ? ` • eventTypes: ${count}` : ''}`,
+      });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      const hint =
+        msg.includes('CERT_AUTH_REQUIRED') || msg.toLowerCase().includes('certificado')
+          ? 'Verifique se o .crt está vinculado na conta Betfair e se o CERT/KEY (PEM) nos secrets correspondem ao mesmo par.'
+          : msg.includes('INVALID_USERNAME_OR_PASSWORD')
+            ? 'Verifique BETFAIR_USERNAME/BETFAIR_PASSWORD (e caracteres especiais).'
+            : msg.includes('MIGRATION_REQUIRED') || msg.includes('TERMS_AND_CONDITIONS')
+              ? 'Faça login no site da Betfair e conclua migração/aceites pendentes.'
+              : msg.includes('APP_KEY') || msg.includes('X-Application')
+                ? 'Verifique BETFAIR_APP_KEY (Application Key).'
+                : '';
+      setBetfairTest({ status: 'error', message: `${msg}${hint ? ` • ${hint}` : ''}`, tokenPreview: null, fetchedAt: null, eventTypesCount: null });
+      toast.error('Falha ao conectar na Betfair', { description: hint ? hint : msg.slice(0, 220) });
+    }
+  };
   const testGoogleLlm = async () => {
     if (isTestingLlm) return;
     const apiKey = String(config.googleApiKey ?? '').trim();
@@ -77,14 +207,31 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
       const { projectId, publicAnonKey } = await import('/utils/supabase/info');
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
       const body = {
-        systemInstruction: { parts: [{ text: 'Responda com exatamente uma linha e sem explicações.' }] },
+        systemInstruction: {
+          parts: [
+            {
+              text: 'Preencha e retorne somente o JSON solicitado. Não inclua markdown, listas, explicações ou texto extra.',
+            },
+          ],
+        },
         contents: [
           {
             role: 'user',
-            parts: [{ text: 'Retorne exatamente: OK GEMMA 4' }],
+            parts: [{ text: 'Responda com {"ok":"OK GEMMA 4"}' }],
           },
         ],
-        generationConfig: { temperature: 0.0, maxOutputTokens: 16 },
+        generationConfig: {
+          temperature: 0.0,
+          maxOutputTokens: 32,
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: 'object',
+            properties: {
+              ok: { type: 'string' },
+            },
+            required: ['ok'],
+          },
+        },
       };
 
       const res = await fetch(`https://${projectId}.supabase.co/functions/v1/make-server-1119702f/proxy/google`, {
@@ -92,6 +239,7 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${publicAnonKey}`,
+          'apikey': publicAnonKey,
         },
         body: JSON.stringify({ url, apiKey, body }),
       });
@@ -109,8 +257,28 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
       const parts = Array.isArray(data?.candidates?.[0]?.content?.parts) ? data.candidates[0].content.parts : [];
       const text = parts.map((p: any) => String(p?.text ?? '')).join('\n').trim();
 
-      const normalized = text.replace(/\s+/g, ' ').trim();
-      if (normalized.toUpperCase().includes('OK GEMMA 4')) {
+      const extractJsonObject = (s: string) => {
+        const start = s.indexOf('{');
+        const end = s.lastIndexOf('}');
+        if (start < 0 || end < 0 || end <= start) return null;
+        const candidate = s.slice(start, end + 1);
+        try {
+          return JSON.parse(candidate) as any;
+        } catch {
+          return null;
+        }
+      };
+
+      const parsed =
+        (() => {
+          try {
+            return JSON.parse(text);
+          } catch {
+            return extractJsonObject(text);
+          }
+        })() ?? null;
+      const ok = String(parsed?.ok ?? '').trim();
+      if (ok.toUpperCase() === 'OK GEMMA 4') {
         toast.success('Teste do Gemini/Gemma OK', { description: text ? text.slice(0, 180) : 'Resposta sem texto' });
       } else {
         toast.warning('Teste do Gemini/Gemma retornou algo inesperado', { description: text ? text.slice(0, 220) : 'Resposta sem texto' });
@@ -197,6 +365,7 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
           headers: {
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${publicAnonKey}`,
+            'apikey': publicAnonKey,
           },
           body: JSON.stringify({ country: country ?? null }),
         },
@@ -223,6 +392,7 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
           headers: {
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${publicAnonKey}`,
+            'apikey': publicAnonKey,
           },
           body: JSON.stringify({
             country: payload.country ?? null,
@@ -939,6 +1109,10 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
             <Trophy className="w-4 h-4 mr-2" />
             Campeonatos
           </Button>
+          <Button variant={tab === 'betfair' ? 'default' : 'outline'} onClick={() => setTab('betfair')}>
+            <Plug className="w-4 h-4 mr-2" />
+            Betfair
+          </Button>
         </div>
 
         {tab === 'competitions' && (
@@ -1157,6 +1331,84 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
                   </div>
                 </>
               )}
+            </Card>
+          </div>
+        )}
+
+        {tab === 'betfair' && (
+          <div className="space-y-6">
+            <Card className="p-6">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <h2 className="text-xl font-bold flex items-center gap-2">
+                    <Plug className="w-5 h-5 text-emerald-700" />
+                    Betfair Exchange
+                  </h2>
+                  <p className="text-sm text-gray-600 mt-1">
+                    Teste o login não-interativo (certificado) e uma chamada simples na API (listEventTypes) usando os secrets do Supabase.
+                  </p>
+                </div>
+                <Button variant="outline" onClick={testBetfairConnection} disabled={betfairTest.status === 'testing'}>
+                  {betfairTest.status === 'testing' ? (
+                    <>
+                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                      Testando...
+                    </>
+                  ) : (
+                    'Testar conexão'
+                  )}
+                </Button>
+              </div>
+
+              <div className="mt-4 grid md:grid-cols-3 gap-3">
+                <div className="bg-gray-50 border border-gray-200 rounded-lg p-3">
+                  <div className="text-xs text-gray-600">Status</div>
+                  <div className="mt-1 font-semibold text-gray-900">
+                    {betfairTest.status === 'ok' ? 'OK' : betfairTest.status === 'error' ? 'Erro' : betfairTest.status === 'testing' ? 'Testando…' : '—'}
+                  </div>
+                </div>
+                <div className="bg-gray-50 border border-gray-200 rounded-lg p-3">
+                  <div className="text-xs text-gray-600">Sessão</div>
+                  <div className="mt-1 font-semibold text-gray-900 tabular-nums">{betfairTest.tokenPreview ?? '—'}</div>
+                  <div className="text-[11px] text-gray-600 tabular-nums mt-1">{betfairTest.fetchedAt ?? ''}</div>
+                </div>
+                <div className="bg-gray-50 border border-gray-200 rounded-lg p-3">
+                  <div className="text-xs text-gray-600">Event Types</div>
+                  <div className="mt-1 font-semibold text-gray-900 tabular-nums">
+                    {typeof betfairTest.eventTypesCount === 'number' ? betfairTest.eventTypesCount : '—'}
+                  </div>
+                </div>
+              </div>
+
+              {betfairTest.message ? (
+                <div className={`mt-4 rounded-lg border p-3 text-sm ${betfairTest.status === 'error' ? 'border-red-200 bg-red-50 text-red-900' : 'border-emerald-200 bg-emerald-50 text-emerald-900'}`}>
+                  {betfairTest.message}
+                </div>
+              ) : null}
+
+              <div className="mt-6 border-t pt-4">
+                <div className="text-sm font-semibold text-gray-900">Operações reais (placeOrders)</div>
+                <div className="text-sm text-gray-600 mt-1">
+                  Token local para liberar ações de trade no backend. Necessário para entradas manuais/automação.
+                </div>
+
+                <div className="mt-3">
+                  <Label htmlFor="automationAdminToken">Automation Admin Token</Label>
+                  <Input
+                    id="automationAdminToken"
+                    type="password"
+                    placeholder="Cole aqui o token"
+                    value={String(config.automationAdminToken ?? '')}
+                    onChange={(e) => setConfig({ ...config, automationAdminToken: e.target.value })}
+                    className="mt-2"
+                  />
+                  <div className="mt-2 flex justify-end">
+                    <Button onClick={handleSave} disabled={isSaving}>
+                      {isSaving ? 'Salvando…' : 'Salvar token'}
+                    </Button>
+                  </div>
+                </div>
+              </div>
             </Card>
           </div>
         )}
@@ -1607,7 +1859,21 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
                     onChange={(e) => setConfig({ ...config, googleApiKey: e.target.value })}
                     placeholder="Cole sua API key do Gemini"
                   />
-                  <div className="mt-3">
+                  <div className="mt-3 flex gap-2">
+                    <Button
+                      variant="outline"
+                      onClick={validateGoogleGeminiKey}
+                      disabled={isValidatingGoogleKey || !String(config.googleApiKey ?? '').trim()}
+                    >
+                      {isValidatingGoogleKey ? (
+                        <>
+                          <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                          Validando...
+                        </>
+                      ) : (
+                        'Validar chave'
+                      )}
+                    </Button>
                     <Button variant="outline" onClick={testGoogleLlm} disabled={isTestingLlm || !String(config.googleApiKey ?? '').trim()}>
                       {isTestingLlm ? (
                         <>

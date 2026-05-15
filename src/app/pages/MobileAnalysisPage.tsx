@@ -7,7 +7,7 @@ import { TeamLogo } from '../components/TeamLogo';
 import { AgentEnsemble, getDynamicAgentProfiles } from '../services/aiAgents';
 import { MobileBottomNav } from '../components/MobileBottomNav';
 
-type ApiSource = 'api-football' | 'football-data' | 'openligadb' | 'mock';
+type ApiSource = 'api-football' | 'football-data' | 'openligadb' | 'betfair' | 'mock';
 
 type MatchesCache = {
   version: number;
@@ -252,4 +252,3 @@ export default function MobileAnalysisPage() {
     </div>
   );
 }
-

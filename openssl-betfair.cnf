@@ -1,0 +1,17 @@
+[req]
+prompt = no
+distinguished_name = dn
+req_extensions = req_ext
+
+[dn]
+C = BR
+ST = SP
+L = SaoPaulo
+O = Iafutebol
+OU = Bot
+CN = betfair-bot
+
+[req_ext]
+basicConstraints = CA:FALSE
+keyUsage = digitalSignature, keyEncipherment
+extendedKeyUsage = clientAuth

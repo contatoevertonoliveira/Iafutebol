@@ -47,3 +47,9 @@ coverage/
 
 # TypeScript
 *.tsbuildinfo
+
+# Secrets / certificates (do not commit)
+utils/secrets/
+betfair-client.crt
+betfair-client.key
+betfair-client.csr

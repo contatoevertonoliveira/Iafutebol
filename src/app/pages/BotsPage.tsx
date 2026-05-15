@@ -1357,7 +1357,7 @@ const callExternalBotsAssistant = async (args: {
 }) => {
   const { projectId, publicAnonKey } = await import('/utils/supabase/info');
   const baseUrl = `https://${projectId}.supabase.co/functions/v1/make-server-1119702f`;
-  const timeoutMs = 45_000;
+  const timeoutMs = args.provider === 'google' ? 90_000 : 45_000;
   const fetchWithTimeout = async (input: string, init: RequestInit) => {
     const controller = new AbortController();
     const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
@@ -1366,7 +1366,7 @@ const callExternalBotsAssistant = async (args: {
     } catch (e) {
       const name = String((e as any)?.name ?? '');
       if (name === 'AbortError') {
-        throw new Error('Timeout ao aguardar resposta da IA externa (45s).');
+        throw new Error(`Timeout ao aguardar resposta da IA externa (${Math.round(timeoutMs / 1000)}s).`);
       }
       throw e;
     } finally {
@@ -1400,6 +1400,7 @@ const callExternalBotsAssistant = async (args: {
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${publicAnonKey}`,
+        apikey: publicAnonKey,
       },
       body: JSON.stringify({ url, apiKey: args.apiKey, body }),
     });
@@ -1433,7 +1434,7 @@ const callExternalBotsAssistant = async (args: {
     const body = {
       systemInstruction: { parts: [{ text: args.system }] },
       contents,
-      generationConfig: { temperature: 0.25 },
+      generationConfig: { temperature: 0.25, maxOutputTokens: 700 },
     };
 
     const res = await fetchWithTimeout(`${baseUrl}/proxy/google`, {
@@ -1441,6 +1442,7 @@ const callExternalBotsAssistant = async (args: {
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${publicAnonKey}`,
+        apikey: publicAnonKey,
       },
       body: JSON.stringify({ url, apiKey: args.apiKey, body }),
     });
@@ -1455,8 +1457,21 @@ const callExternalBotsAssistant = async (args: {
     }
     const data = (await res.json().catch(() => null)) as any;
     const parts = Array.isArray(data?.candidates?.[0]?.content?.parts) ? data.candidates[0].content.parts : [];
-    const text = parts.map((p: any) => String(p?.text ?? '')).join('\n').trim();
-    if (!text) throw new Error('Resposta vazia do Gemini');
+    const text = parts
+      .map((p: any) => (typeof p?.text === 'string' ? p.text : ''))
+      .filter((t: string) => t.trim().length > 0)
+      .join('\n')
+      .trim();
+    if (!text) {
+      const blockReason = String(data?.promptFeedback?.blockReason ?? '').trim();
+      const finishReason = String(data?.candidates?.[0]?.finishReason ?? '').trim();
+      const msg = blockReason
+        ? `Gemini bloqueou o prompt (${blockReason}).`
+        : finishReason
+          ? `Gemini retornou sem texto (finishReason: ${finishReason}).`
+          : 'Resposta vazia do Gemini.';
+      throw new Error(msg);
+    }
     return text;
   }
 
@@ -1488,6 +1503,7 @@ const callExternalBotsAssistant = async (args: {
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${publicAnonKey}`,
+      apikey: publicAnonKey,
     },
     body: JSON.stringify({ url, apiKey: args.apiKey, body }),
   });
@@ -1989,6 +2005,19 @@ export default function BotsPage() {
     const goalValue = Number.isFinite(goal) ? Math.max(0, Math.min(100, goal)) : null;
     if ((!text && images.length === 0) || thinking) return;
 
+    const isTrivialGreeting = (t: string) => {
+      const s = t.trim().toLowerCase();
+      if (!s) return false;
+      if (s.length > 60) return false;
+      const cleaned = s.replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ').trim();
+      if (!cleaned) return false;
+      if (cleaned === 'ok' || cleaned === 'teste' || cleaned === 'test' || cleaned === 'ping') return true;
+      if (/(^|\s)(oi|olá|ola|e ai|e aí|bom dia|boa tarde|boa noite|hello|hi)(\s|$)/.test(cleaned)) return true;
+      if (/(vc|você)\s*(ta|tá|esta|está)\s*a[ií]/.test(cleaned)) return true;
+      if (/^(ta|tá)\s*a[ií]/.test(cleaned)) return true;
+      return false;
+    };
+
     const userMsg: ChatMessage = {
       id: `m_${Math.random().toString(16).slice(2)}_${Date.now()}`,
       role: 'user',
@@ -1999,6 +2028,22 @@ export default function BotsPage() {
     setMessages((prev) => [...prev, userMsg].slice(-200));
     setChatInput('');
     setPendingImages([]);
+
+    if (images.length === 0 && isTrivialGreeting(text)) {
+      const assistantMsg: ChatMessage = {
+        id: `m_${Math.random().toString(16).slice(2)}_${Date.now() + 1}`,
+        role: 'assistant',
+        text: clipText(
+          'Sim, estou aqui. Me diga o que você quer criar/refinar no bot (mercado, minuto de entrada, odd alvo e se prefere mais volume ou mais assertividade).',
+          24000,
+        ),
+        createdAt: nowIso(),
+      };
+      setMessages((prev) => [...prev, assistantMsg].slice(-200));
+      setLastSuggestion(null);
+      return;
+    }
+
     setThinking(true);
 
     try {

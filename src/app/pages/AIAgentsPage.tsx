@@ -265,6 +265,24 @@ export default function AIAgentsPage() {
                     </div>
                   </div>
 
+                  {Array.isArray(agent.topMarkets) && agent.topMarkets.length > 0 ? (
+                    <div className="mb-4">
+                      <div className="text-sm font-semibold text-gray-700 mb-2">Assertividade por mercado</div>
+                      <div className="grid sm:grid-cols-2 gap-2">
+                        {agent.topMarkets.slice(0, 4).map((m) => (
+                          <div key={String(m.key)} className="bg-gray-50 rounded-lg p-3">
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="text-xs text-gray-700 font-semibold truncate">{String(m.label ?? m.key)}</div>
+                              <div className="text-xs text-gray-700 tabular-nums shrink-0">
+                                {Number(m.correct ?? 0)}/{Number(m.total ?? 0)} ({Number(m.accuracy ?? 0).toFixed(0)}%)
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+
                   {/* Strengths */}
                   <div>
                     <div className="text-sm font-semibold text-gray-700 mb-2 flex items-center gap-2">

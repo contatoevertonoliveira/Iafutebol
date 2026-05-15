@@ -23,7 +23,7 @@ import { Badge } from '../components/ui/badge';
 type MatchStatus = 'scheduled' | 'live' | 'finished';
 type StatusFilter = 'all' | 'live' | 'upcoming' | 'finished';
 type GroupMode = 'leagues' | 'championships';
-type ApiSource = 'api-football' | 'football-data' | 'openligadb' | 'mock';
+type ApiSource = 'api-football' | 'football-data' | 'openligadb' | 'betfair' | 'mock';
 
 type DisplayMatch = Match & {
   homeCrest?: string;
@@ -287,7 +287,7 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
     }
 
     loadMatchesWithFallback(config);
-  }, []);
+  }, [selectedDate]);
 
   useEffect(() => {
     setSelectedDate(initialSelectedDate);
@@ -859,6 +859,61 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
           }
         } catch (error) {
           console.warn('⚠️ OpenLigaDB falhou, usando fallback...', error);
+        }
+      }
+
+      if (!successfulSource) {
+        try {
+          const { projectId, publicAnonKey } = await import('/utils/supabase/info');
+          const res = await fetch(
+            `https://${projectId}.supabase.co/functions/v1/make-server-1119702f/betfair/matches/list`,
+            {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${publicAnonKey}`,
+                apikey: publicAnonKey,
+              },
+              body: JSON.stringify({
+                dateFrom,
+                dateTo,
+                maxResults: selectedDate === 'today' ? 120 : selectedDate === 'week' ? 220 : 300,
+              }),
+            },
+          );
+
+          const raw = await res.text().catch(() => '');
+          let data: any = null;
+          try {
+            data = raw ? JSON.parse(raw) : null;
+          } catch {
+            data = null;
+          }
+
+          if (!res.ok || !data?.ok) throw new Error(String(data?.error ?? `HTTP ${res.status} ${res.statusText}`));
+
+          const matches = Array.isArray(data?.matches) ? (data.matches as FootballMatch[]) : [];
+          successfulSource = successfulSource ?? 'betfair';
+          if (matches.length > 0) {
+            const processedMatches = processCrests(matches);
+            setApiSource('betfair');
+            setRealMatches(processedMatches);
+            const predictionsById = await generatePredictionsForMatches('betfair', processedMatches);
+            setRealPredictions(predictionsById);
+            setLastUpdatedAt(new Date());
+            writeCache({
+              dateFrom,
+              dateTo,
+              apiSource: 'betfair',
+              matches: processedMatches,
+              predictions: predictionsById,
+              configHash: '',
+            });
+            toast.success(`${matches.length} partidas carregadas (Betfair)`);
+            return;
+          }
+        } catch (error) {
+          console.warn('⚠️ Betfair falhou, usando fallback...', error);
         }
       }
 

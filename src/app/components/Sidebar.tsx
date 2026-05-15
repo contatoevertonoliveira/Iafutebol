@@ -11,7 +11,8 @@ import {
   Star,
   Settings,
   Brain,
-  Cpu
+  Cpu,
+  Zap
 } from 'lucide-react';
 
 export function Sidebar() {
@@ -25,6 +26,7 @@ export function Sidebar() {
     { to: '/leagues', icon: Trophy, label: 'Ligas' },
     { to: '/agents', icon: Brain, label: 'Agentes IA' },
     { to: '/bots', icon: Bot, label: 'Bots' },
+    { to: '/automation', icon: Zap, label: 'Automação' },
     { to: '/training', icon: Cpu, label: 'Treinamento' },
     { to: '/favorites', icon: Star, label: 'Favoritos' },
   ];

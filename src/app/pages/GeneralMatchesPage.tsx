@@ -24,7 +24,7 @@ type FixtureStatsResponseItem = {
 
 const TIME_ZONE = 'America/Sao_Paulo';
 
-type ApiSource = 'api-football' | 'football-data' | 'openligadb' | 'mock';
+type ApiSource = 'api-football' | 'football-data' | 'openligadb' | 'betfair' | 'mock';
 
 type MatchesCache = {
   version: number;

@@ -1,7 +1,7 @@
 import { useState } from 'react';
 
 interface TeamLogoProps {
-  teamName: string;
+  teamName: string | null | undefined;
   logoUrl?: string;
   size?: 'xs' | 'sm' | 'md' | 'lg' | 'xl';
   showName?: boolean;
@@ -34,21 +34,27 @@ export function TeamLogo({
   const [imageError, setImageError] = useState(false);
 
   // Se não houver logo ou houver erro, mostrar iniciais
-  const getInitials = (name: string) => {
-    return name
-      .split(' ')
-      .map(word => word[0])
+  const getInitials = (name: string | null | undefined) => {
+    const safe = String(name ?? '').trim();
+    if (!safe) return '—';
+    return safe
+      .split(/\s+/g)
+      .map((word) => word.trim())
+      .filter(Boolean)
+      .map((word) => word[0])
       .join('')
       .toUpperCase()
       .slice(0, 2);
   };
+
+  const safeTeamName = String(teamName ?? '').trim() || '—';
 
   return (
     <div className={`flex items-center gap-2 ${className}`}>
       {logoUrl && !imageError ? (
         <img
           src={logoUrl}
-          alt={`${teamName} logo`}
+          alt={`${safeTeamName} logo`}
           className={`${sizeClasses[size]} object-contain`}
           onError={() => setImageError(true)}
         />
@@ -63,7 +69,7 @@ export function TeamLogo({
       )}
       {showName && (
         <span className={`font-medium ${textSizeClasses[size]}`}>
-          {teamName}
+          {safeTeamName}
         </span>
       )}
     </div>

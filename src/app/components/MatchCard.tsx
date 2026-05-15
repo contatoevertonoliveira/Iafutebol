@@ -7,14 +7,16 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { AgentEnsemble, getDynamicAgentProfiles } from '../services/aiAgents';
 import type { FootballMatch } from '../services/footballDataService';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './ui/dialog';
+import { ScrollArea } from './ui/scroll-area';
 import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip';
 import { loadApiConfig } from '../services/apiConfig';
 import { ApiFootballMatch, ApiFootballService } from '../services/apiFootballService';
+import { toast } from 'sonner';
 
 const TIME_ZONE = 'America/Sao_Paulo';
 const teamFixturesCache = new Map<string, { fetchedAt: number; items: ApiFootballMatch[] }>();
 
-type ApiSource = 'api-football' | 'football-data' | 'openligadb' | 'mock';
+type ApiSource = 'api-football' | 'football-data' | 'openligadb' | 'betfair' | 'mock';
 
 type FormMatchRow = {
   id: number;
@@ -324,12 +326,14 @@ const pickTeamStanding = (rows: any[], teamId: number): StandingInfo | null => {
 
 type AgentMarketSummary = {
   agentName: string;
-  hits: number;
-  total: number;
-  percent: number;
-  winnerHit: boolean;
-  overUnderHit: boolean;
-  bttsHit: boolean;
+  picks: Array<{
+    key: string;
+    label: string;
+    ok: boolean;
+    total: number;
+    correct: number;
+    percent: number | null;
+  }>;
 };
 
 interface MatchCardProps {
@@ -374,6 +378,8 @@ export function MatchCard({
   const [isLoadingAgentMarkets, setIsLoadingAgentMarkets] = useState(false);
   const [tick, setTick] = useState(0);
   const [formOpen, setFormOpen] = useState(false);
+  const [betfairConfirmOpen, setBetfairConfirmOpen] = useState(false);
+  const [isEnqueueingBetfair, setIsEnqueueingBetfair] = useState(false);
   const [homeHomeRows, setHomeHomeRows] = useState<FormMatchRow[] | null>(null);
   const [awayAwayRows, setAwayAwayRows] = useState<FormMatchRow[] | null>(null);
   const [isLoadingForm, setIsLoadingForm] = useState(false);
@@ -570,6 +576,7 @@ export function MatchCard({
 
   const predictedWinner = prediction?.winner?.prediction ?? null;
   const winnerHit = actualWinner && predictedWinner ? actualWinner === predictedWinner : null;
+  const winnerPush = actualWinner === 'draw';
 
   const actualScoreText = resultAvailable ? `${match.result!.home}-${match.result!.away}` : null;
   const predictedScoreText = prediction?.correctScore?.score ?? null;
@@ -590,17 +597,60 @@ export function MatchCard({
   const bttsHit = actualBtts && prediction?.btts?.prediction ? actualBtts === prediction.btts.prediction : null;
 
   const marketHits = {
-    winner: winnerHit === true,
+    winner: winnerPush ? null : winnerHit === true,
     overUnder: overUnderHit === true,
     btts: bttsHit === true,
-  };
+  } as const;
 
-  const marketTotal = resultAvailable && hasPrediction ? 3 : 0;
+  const marketTotal = resultAvailable && hasPrediction ? (winnerPush ? 2 : 3) : 0;
   const marketCorrect =
     resultAvailable && hasPrediction
-      ? Number(marketHits.winner) + Number(marketHits.overUnder) + Number(marketHits.btts)
+      ? Number(marketHits.overUnder) + Number(marketHits.btts) + (marketHits.winner === true ? 1 : 0)
       : 0;
   const marketPercent = marketTotal === 0 ? 0 : Math.round((marketCorrect / marketTotal) * 100);
+
+  const enqueueBetfairAutomation = async () => {
+    if (isEnqueueingBetfair) return;
+    setIsEnqueueingBetfair(true);
+    try {
+      const { projectId, publicAnonKey } = await import('/utils/supabase/info');
+      const res = await fetch(`https://${projectId}.supabase.co/functions/v1/make-server-1119702f/automation/betfair/queue/add`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${publicAnonKey}`,
+          apikey: publicAnonKey,
+        },
+        body: JSON.stringify({
+          matchId: match.id,
+          source: apiSource,
+          utcDate: match.date ? new Date(match.date).toISOString() : null,
+          homeTeam: match.homeTeam,
+          awayTeam: match.awayTeam,
+          prediction: prediction ?? null,
+        }),
+      });
+      const raw = await res.text().catch(() => '');
+      let data: any = null;
+      try {
+        data = raw ? JSON.parse(raw) : null;
+      } catch {
+        data = null;
+      }
+      if (!res.ok || !data?.ok) throw new Error(String(data?.error ?? `HTTP ${res.status} ${res.statusText}`));
+      const mapped = Boolean(data?.item?.betfair?.marketId);
+      const msg = mapped
+        ? 'Jogo adicionado e mapeado na Betfair'
+        : 'Jogo adicionado. Mapeamento Betfair pendente';
+      const desc = !mapped && data?.item?.mappingError ? String(data.item.mappingError).slice(0, 220) : undefined;
+      toast.success(msg, desc ? { description: desc } : undefined);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      toast.error('Falha ao adicionar à automação', { description: msg.slice(0, 220) });
+    } finally {
+      setIsEnqueueingBetfair(false);
+    }
+  };
 
   const buildFallbackFootballMatch = (): FootballMatch => {
     const toNumericId = (id: string) => {
@@ -658,7 +708,7 @@ export function MatchCard({
   };
 
   const loadAgentMarketBreakdown = async () => {
-    if (!resultAvailable || !actualWinner || !actualOverUnder || !actualBtts) return;
+    if (!resultAvailable || !actualWinner || !actualBtts) return;
     if (isLoadingAgentMarkets) return;
 
     setIsLoadingAgentMarkets(true);
@@ -668,22 +718,58 @@ export function MatchCard({
       const ensemble = new AgentEnsemble(profiles);
       const preds = await ensemble.predictWithAllAgents(baseMatch);
 
-      const summaries = preds.map((p) => {
-        const winnerOk = p.winner === actualWinner;
-        const ouOk = p.overUnder.prediction === actualOverUnder;
-        const bttsOk = p.btts.prediction === actualBtts;
-        const hits = Number(winnerOk) + Number(ouOk) + Number(bttsOk);
-        const total = 3;
-        return {
-          agentName: p.agentName,
-          hits,
-          total,
-          percent: Math.round((hits / total) * 100),
-          winnerHit: winnerOk,
-          overUnderHit: ouOk,
-          bttsHit: bttsOk,
-        };
-      }).sort((a, b) => b.percent - a.percent);
+      const totalGoalsLocal = typeof match.result?.home === 'number' && typeof match.result?.away === 'number'
+        ? match.result.home + match.result.away
+        : null;
+
+      const byName = new Map(profiles.map((p) => [p.name, p] as const));
+      const lineKey = (line: number) => {
+        if (!Number.isFinite(line)) return '2.5';
+        const s = Math.abs(line % 1) < 1e-9 ? line.toFixed(0) : line.toFixed(2);
+        return s.replace(/0+$/g, '').replace(/\.$/g, '');
+      };
+      const winnerLabel = (w: 'home' | 'away' | 'draw') => (w === 'home' ? 'Casa' : w === 'away' ? 'Visitante' : 'Empate');
+      const bttsLabel = (v: 'yes' | 'no') => (v === 'yes' ? 'Sim' : 'Não');
+
+      const summaries = preds
+        .map((p) => {
+          const totalGoals = totalGoalsLocal;
+          const ouLine = typeof p.overUnder?.line === 'number' ? p.overUnder.line : 2.5;
+          const actualOu = totalGoals === null ? null : totalGoals > ouLine ? ('over' as const) : ('under' as const);
+
+          const winnerOk = actualWinner === 'draw' ? null : p.winner === actualWinner;
+          const bttsOk = p.btts.prediction === actualBtts;
+          const ouOk = actualOu ? p.overUnder.prediction === actualOu : false;
+
+          const profile = byName.get(p.agentName);
+          const stats = profile?.marketKeyStats ?? {};
+
+          const mkWinner = `winner:${p.winner}`;
+          const mkBtts = `btts:${p.btts.prediction}`;
+          const mkOu = `ou:${p.overUnder.prediction}:${lineKey(ouLine)}`;
+
+          const pick = (key: string, label: string, ok: boolean | null) => {
+            const s = (stats as any)?.[key] as { total?: number; correct?: number; accuracy?: number } | undefined;
+            const total = Math.max(0, Number(s?.total ?? 0));
+            const correct = Math.max(0, Number(s?.correct ?? 0));
+            const percent = total > 0 ? Math.round((correct / total) * 100) : null;
+            return { key, label, ok, total, correct, percent };
+          };
+
+          return {
+            agentName: p.agentName,
+            picks: [
+              pick(mkWinner, `Vencedor: ${winnerLabel(p.winner)}`, winnerOk),
+              pick(mkOu, `Over/Under ${lineKey(ouLine)}: ${p.overUnder.prediction === 'over' ? 'Over' : 'Under'}`, ouOk),
+              pick(mkBtts, `Ambos marcam: ${bttsLabel(p.btts.prediction)}`, bttsOk),
+            ],
+          };
+        })
+        .sort((a, b) => {
+          const aScore = a.picks.reduce((sum, x) => sum + (x.ok === true ? 1 : 0), 0);
+          const bScore = b.picks.reduce((sum, x) => sum + (x.ok === true ? 1 : 0), 0);
+          return bScore - aScore;
+        });
 
       setAgentMarketSummaries(summaries);
     } finally {
@@ -1001,6 +1087,19 @@ export function MatchCard({
           <Badge variant="secondary" className="bg-white/20 text-white border-0">
             {match.country}
           </Badge>
+          {hasPrediction ? (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                setBetfairConfirmOpen(true);
+              }}
+              className="p-1 rounded-md hover:bg-white/20 transition-colors"
+              aria-label="Automatizar trade na Betfair"
+              title="Automatizar trade na Betfair"
+            >
+              <img src="/utils/betfair.png" alt="Betfair" className="w-4 h-4" />
+            </button>
+          ) : null}
           {onRefreshMatch && (
             <button
               onClick={(e) => {
@@ -1120,9 +1219,13 @@ export function MatchCard({
                   <div className="text-xs text-gray-600 mb-1">Vencedor</div>
                   <div className="font-semibold text-sm truncate">{predictedWinner ? getPredictionLabel(predictedWinner) : '—'}</div>
                 </div>
-                <div className={`text-xs font-semibold px-2 py-1 rounded ${marketHits.winner ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
-                  {marketHits.winner ? 'Acertou' : 'Errou'}
-                </div>
+                {marketHits.winner === null ? (
+                  <div className="text-xs font-semibold px-2 py-1 rounded bg-gray-100 text-gray-700">Push</div>
+                ) : (
+                  <div className={`text-xs font-semibold px-2 py-1 rounded ${marketHits.winner ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+                    {marketHits.winner ? 'Acertou' : 'Errou'}
+                  </div>
+                )}
               </div>
 
               <div className="bg-gray-50 p-2 rounded flex items-center justify-between gap-2">
@@ -1175,16 +1278,25 @@ export function MatchCard({
                 <div className="space-y-2">
                   {agentMarketSummaries.map((a) => (
                     <div key={a.agentName} className="bg-gray-50 rounded p-2">
-                      <div className="flex items-center justify-between">
-                        <div className="text-sm font-semibold text-gray-900">{a.agentName}</div>
-                        <div className="text-sm font-semibold text-gray-900">
-                          {a.hits}/{a.total} ({a.percent}%)
-                        </div>
-                      </div>
-                      <div className="mt-2 flex flex-wrap gap-2 text-xs">
-                        <span className={`px-2 py-1 rounded ${a.winnerHit ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>Vencedor</span>
-                        <span className={`px-2 py-1 rounded ${a.overUnderHit ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>Over/Under</span>
-                        <span className={`px-2 py-1 rounded ${a.bttsHit ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>Ambos</span>
+                      <div className="text-sm font-semibold text-gray-900">{a.agentName}</div>
+                      <div className="mt-2 space-y-1">
+                        {a.picks.map((p) => (
+                          <div key={p.key} className="flex items-center justify-between gap-2 text-xs">
+                            <div className="min-w-0 text-gray-700 truncate">{p.label}</div>
+                            <div className="flex items-center gap-2 shrink-0">
+                              <div className="text-gray-700 tabular-nums">
+                                {p.total > 0 ? `${p.correct}/${p.total} (${p.percent}%)` : '—'}
+                              </div>
+                              {p.ok === null ? (
+                                <span className="px-2 py-1 rounded bg-gray-100 text-gray-700">Push</span>
+                              ) : (
+                                <span className={`px-2 py-1 rounded ${p.ok ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+                                  {p.ok ? 'Acertou' : 'Errou'}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        ))}
                       </div>
                     </div>
                   ))}
@@ -1272,6 +1384,48 @@ export function MatchCard({
       </div>
       </Card>
 
+      <Dialog open={betfairConfirmOpen} onOpenChange={setBetfairConfirmOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Automatizar trade (Betfair)</DialogTitle>
+            <DialogDescription>
+              Confirmar inclusão deste jogo na lista de automação?
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="mt-2 text-sm text-gray-700">
+            <div className="font-semibold text-gray-900">{match.homeTeam} x {match.awayTeam}</div>
+            <div className="mt-1 text-xs text-gray-600 tabular-nums">{new Date(match.date).toLocaleString('pt-BR', { hour12: false })}</div>
+            <div className="mt-2 text-xs text-gray-600">
+              A automação vai tentar mapear este jogo na Betfair (eventId/marketId/1X2) e preencher as odds na página Automação.
+            </div>
+          </div>
+
+          <div className="mt-4 flex items-center justify-end gap-2">
+            <button
+              onClick={() => setBetfairConfirmOpen(false)}
+              className="px-3 py-2 rounded-md border border-gray-300 bg-white text-gray-800 hover:bg-gray-50 text-sm"
+            >
+              Cancelar
+            </button>
+            <button
+              onClick={async () => {
+                await enqueueBetfairAutomation();
+                setBetfairConfirmOpen(false);
+              }}
+              disabled={!hasPrediction || isEnqueueingBetfair}
+              className={`px-3 py-2 rounded-md text-sm font-semibold ${
+                !hasPrediction || isEnqueueingBetfair
+                  ? 'bg-gray-200 text-gray-600 cursor-not-allowed'
+                  : 'bg-emerald-600 hover:bg-emerald-700 text-white'
+              }`}
+            >
+              {isEnqueueingBetfair ? 'Adicionando…' : 'Automatizar'}
+            </button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={formOpen} onOpenChange={setFormOpen}>
         <DialogContent className="sm:max-w-6xl">
         <DialogHeader>
@@ -1323,7 +1477,7 @@ export function MatchCard({
                   );
                 })()}
 
-                <div className="mt-4 max-h-72 overflow-auto border border-gray-200 rounded-lg overflow-hidden">
+                <ScrollArea className="mt-4 h-72 border border-gray-200 rounded-lg">
                   {homeHomeRows.length === 0 ? (
                     <div className="p-3 text-sm text-gray-600">Sem dados suficientes.</div>
                   ) : (
@@ -1382,7 +1536,7 @@ export function MatchCard({
                       })()}
                     </div>
                   )}
-                </div>
+                </ScrollArea>
               </>
             ) : (
               <div className="mt-3 text-sm text-gray-600 flex items-center gap-2">
@@ -1526,7 +1680,7 @@ export function MatchCard({
                   );
                 })()}
 
-                <div className="mt-4 max-h-72 overflow-auto border border-gray-200 rounded-lg overflow-hidden">
+                <ScrollArea className="mt-4 h-72 border border-gray-200 rounded-lg">
                   {awayAwayRows.length === 0 ? (
                     <div className="p-3 text-sm text-gray-600">Sem dados suficientes.</div>
                   ) : (
@@ -1585,7 +1739,7 @@ export function MatchCard({
                       })()}
                     </div>
                   )}
-                </div>
+                </ScrollArea>
               </>
             ) : (
               <div className="mt-3 text-sm text-gray-600 flex items-center gap-2">

@@ -16,6 +16,7 @@ export interface ApiConfig {
   anthropicModel?: string;
   googleApiKey?: string;
   googleModel?: string;
+  automationAdminToken?: string;
 }
 
 export const API_ENDPOINTS = {
@@ -154,6 +155,7 @@ export function loadApiConfig(): ApiConfig | null {
       anthropicModel: 'claude-3-5-sonnet-latest',
       googleApiKey: '',
       googleModel: 'gemma-4-26b-a4b-it',
+      automationAdminToken: '',
     } satisfies ApiConfig;
 
     const storedFootballDataKey = String(storedConfig?.footballDataApiKey ?? '').trim();
@@ -177,6 +179,7 @@ export function loadApiConfig(): ApiConfig | null {
       anthropicModel: String(storedConfig?.anthropicModel ?? envConfig.anthropicModel ?? defaults.anthropicModel),
       googleApiKey: String(storedConfig?.googleApiKey ?? envConfig.googleApiKey ?? defaults.googleApiKey),
       googleModel: String(storedConfig?.googleModel ?? envConfig.googleModel ?? defaults.googleModel),
+      automationAdminToken: String(storedConfig?.automationAdminToken ?? defaults.automationAdminToken),
     } satisfies ApiConfig;
 
     return {
@@ -197,6 +200,7 @@ export function loadApiConfig(): ApiConfig | null {
     anthropicModel: 'claude-3-5-sonnet-latest',
     googleApiKey: '',
     googleModel: 'gemma-4-26b-a4b-it',
+    automationAdminToken: '',
     ...storedConfig,
   } satisfies ApiConfig;
 
@@ -221,6 +225,7 @@ export async function validateFootballDataApiKey(apiKey: string): Promise<boolea
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${publicAnonKey}`,
+          apikey: publicAnonKey,
         },
         body: JSON.stringify({ apiKey }),
       }
@@ -269,6 +274,7 @@ export async function validateApiFootballKey(apiKey: string): Promise<boolean> {
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${publicAnonKey}`,
+          apikey: publicAnonKey,
         },
         body: JSON.stringify({ apiKey }),
       }

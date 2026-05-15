@@ -4,14 +4,16 @@ import { useEffect, useMemo, useState } from 'react';
 import { Loader2 } from 'lucide-react';
 import type { FootballMatch } from '../services/footballDataService';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './ui/dialog';
+import { ScrollArea } from './ui/scroll-area';
 import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip';
 import { loadApiConfig } from '../services/apiConfig';
 import { ApiFootballMatch, ApiFootballService } from '../services/apiFootballService';
+import { toast } from 'sonner';
 
 const TIME_ZONE = 'America/Sao_Paulo';
 const teamFixturesCache = new Map<string, { fetchedAt: number; items: ApiFootballMatch[] }>();
 
-type ApiSource = 'api-football' | 'football-data' | 'openligadb' | 'mock';
+type ApiSource = 'api-football' | 'football-data' | 'openligadb' | 'betfair' | 'mock';
 
 type FormMatchRow = {
   id: number;
@@ -337,6 +339,8 @@ export function MobileMatchCard({ match, prediction, apiSource = 'mock', homeCre
   const isLive = match.status === 'live';
   const isFinished = match.status === 'finished';
   const [formOpen, setFormOpen] = useState(false);
+  const [betfairConfirmOpen, setBetfairConfirmOpen] = useState(false);
+  const [isEnqueueingBetfair, setIsEnqueueingBetfair] = useState(false);
   const [homeHomeRows, setHomeHomeRows] = useState<FormMatchRow[] | null>(null);
   const [awayAwayRows, setAwayAwayRows] = useState<FormMatchRow[] | null>(null);
   const [isLoadingForm, setIsLoadingForm] = useState(false);
@@ -347,6 +351,49 @@ export function MobileMatchCard({ match, prediction, apiSource = 'mock', homeCre
     prediction?.btts?.prediction === 'yes' &&
     typeof prediction?.btts?.confidence === 'number' &&
     prediction.btts.confidence >= 75;
+
+  const enqueueBetfairAutomation = async () => {
+    if (isEnqueueingBetfair) return;
+    setIsEnqueueingBetfair(true);
+    try {
+      const { projectId, publicAnonKey } = await import('/utils/supabase/info');
+      const res = await fetch(`https://${projectId}.supabase.co/functions/v1/make-server-1119702f/automation/betfair/queue/add`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${publicAnonKey}`,
+          apikey: publicAnonKey,
+        },
+        body: JSON.stringify({
+          matchId: match.id,
+          source: apiSource,
+          utcDate: match.date ? new Date(match.date).toISOString() : null,
+          homeTeam: match.homeTeam,
+          awayTeam: match.awayTeam,
+          prediction: prediction ?? null,
+        }),
+      });
+      const raw = await res.text().catch(() => '');
+      let data: any = null;
+      try {
+        data = raw ? JSON.parse(raw) : null;
+      } catch {
+        data = null;
+      }
+      if (!res.ok || !data?.ok) throw new Error(String(data?.error ?? `HTTP ${res.status} ${res.statusText}`));
+      const mapped = Boolean(data?.item?.betfair?.marketId);
+      const msg = mapped
+        ? 'Jogo adicionado e mapeado na Betfair'
+        : 'Jogo adicionado. Mapeamento Betfair pendente';
+      const desc = !mapped && data?.item?.mappingError ? String(data.item.mappingError).slice(0, 220) : undefined;
+      toast.success(msg, desc ? { description: desc } : undefined);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      toast.error('Falha ao adicionar à automação', { description: msg.slice(0, 220) });
+    } finally {
+      setIsEnqueueingBetfair(false);
+    }
+  };
 
   const scoreHome = typeof match.result?.home === 'number' ? match.result.home : null;
   const scoreAway = typeof match.result?.away === 'number' ? match.result.away : null;
@@ -619,6 +666,20 @@ export function MobileMatchCard({ match, prediction, apiSource = 'mock', homeCre
           )}
         </div>
         <div className="flex items-center gap-2">
+          {prediction ? (
+            <button
+              className="p-1 rounded-md border border-gray-200 bg-white hover:bg-gray-50"
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setBetfairConfirmOpen(true);
+              }}
+              aria-label="Automatizar trade na Betfair"
+              title="Automatizar trade na Betfair"
+            >
+              <img src="/utils/betfair.png" alt="Betfair" className="w-4 h-4" />
+            </button>
+          ) : null}
           {bttsOpportunity ? (
             <div className="text-[11px] font-semibold px-3 py-1 rounded-full bg-emerald-100 text-emerald-800 border border-emerald-200">
               BTTS SIM {Math.round(prediction!.btts.confidence)}%
@@ -717,6 +778,46 @@ export function MobileMatchCard({ match, prediction, apiSource = 'mock', homeCre
       </div>
       </div>
 
+      <Dialog open={betfairConfirmOpen} onOpenChange={setBetfairConfirmOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Automatizar trade (Betfair)</DialogTitle>
+            <DialogDescription>Confirmar inclusão deste jogo na lista de automação?</DialogDescription>
+          </DialogHeader>
+
+          <div className="mt-2 text-sm text-gray-700">
+            <div className="font-semibold text-gray-900">{match.homeTeam} x {match.awayTeam}</div>
+            <div className="mt-1 text-xs text-gray-600 tabular-nums">{new Date(match.date).toLocaleString('pt-BR', { hour12: false })}</div>
+            <div className="mt-2 text-xs text-gray-600">
+              A automação vai tentar mapear este jogo na Betfair (eventId/marketId/1X2) e preencher as odds na página Automação.
+            </div>
+          </div>
+
+          <div className="mt-4 flex items-center justify-end gap-2">
+            <button
+              onClick={() => setBetfairConfirmOpen(false)}
+              className="px-3 py-2 rounded-md border border-gray-300 bg-white text-gray-800 hover:bg-gray-50 text-sm"
+            >
+              Cancelar
+            </button>
+            <button
+              onClick={async () => {
+                await enqueueBetfairAutomation();
+                setBetfairConfirmOpen(false);
+              }}
+              disabled={!prediction || isEnqueueingBetfair}
+              className={`px-3 py-2 rounded-md text-sm font-semibold ${
+                !prediction || isEnqueueingBetfair
+                  ? 'bg-gray-200 text-gray-600 cursor-not-allowed'
+                  : 'bg-emerald-600 hover:bg-emerald-700 text-white'
+              }`}
+            >
+              {isEnqueueingBetfair ? 'Adicionando…' : 'Automatizar'}
+            </button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={formOpen} onOpenChange={setFormOpen}>
         <DialogContent className="sm:max-w-6xl">
           <DialogHeader>
@@ -765,7 +866,7 @@ export function MobileMatchCard({ match, prediction, apiSource = 'mock', homeCre
                             <div className="text-right tabular-nums font-semibold text-gray-700">{ouHome.under}</div>
                           </div>
                         </div>
-                        <div className="mt-3 max-h-40 overflow-auto border border-gray-200 rounded-lg overflow-hidden">
+                        <ScrollArea className="mt-3 h-40 border border-gray-200 rounded-lg">
                           {homeHomeRows.length === 0 ? (
                             <div className="p-3 text-sm text-gray-600">Sem dados suficientes.</div>
                           ) : (
@@ -824,7 +925,7 @@ export function MobileMatchCard({ match, prediction, apiSource = 'mock', homeCre
                               })()}
                             </div>
                           )}
-                        </div>
+                        </ScrollArea>
                       </div>
 
                       <div className="border border-gray-200 rounded-xl p-3">
@@ -850,7 +951,7 @@ export function MobileMatchCard({ match, prediction, apiSource = 'mock', homeCre
                             <div className="text-right tabular-nums font-semibold text-gray-700">{ouAway.under}</div>
                           </div>
                         </div>
-                        <div className="mt-3 max-h-40 overflow-auto border border-gray-200 rounded-lg overflow-hidden">
+                        <ScrollArea className="mt-3 h-40 border border-gray-200 rounded-lg">
                           {awayAwayRows.length === 0 ? (
                             <div className="p-3 text-sm text-gray-600">Sem dados suficientes.</div>
                           ) : (
@@ -909,7 +1010,7 @@ export function MobileMatchCard({ match, prediction, apiSource = 'mock', homeCre
                               })()}
                             </div>
                           )}
-                        </div>
+                        </ScrollArea>
                       </div>
                     </div>
 

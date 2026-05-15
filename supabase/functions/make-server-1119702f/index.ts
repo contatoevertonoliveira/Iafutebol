@@ -12,7 +12,7 @@ app.use(
   "/*",
   cors({
     origin: "*",
-    allowHeaders: ["Content-Type", "Authorization"],
+    allowHeaders: ["Content-Type", "Authorization", "apikey"],
     allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     exposeHeaders: ["Content-Length"],
     maxAge: 600,
@@ -223,6 +223,61 @@ app.post("/validate-api/api-football", async (c) => {
     );
   }
 });
+
+const validateGoogleGeminiKey = async (c: any) => {
+  try {
+    const { apiKey, model } = await c.req.json();
+
+    if (!apiKey) {
+      return c.json({ valid: false, error: "API key não fornecida" }, 400);
+    }
+
+    const m = String(model ?? "").trim() || "gemma-4-26b-a4b-it";
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(m)}:generateContent?key=${encodeURIComponent(String(apiKey))}`;
+
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: "Retorne exatamente: OK" }] }],
+        generationConfig: { temperature: 0.0, maxOutputTokens: 8 },
+      }),
+    });
+
+    if (response.ok) {
+      return c.json({ valid: true, message: "API key válida", model: m });
+    }
+
+    const contentType = response.headers.get("content-type") || "";
+    const details = contentType.includes("application/json")
+      ? await response.json().catch(() => null)
+      : await response.text().catch(() => "");
+
+    return c.json(
+      {
+        valid: false,
+        error: `API retornou status ${response.status}`,
+        details,
+        model: m,
+      },
+      response.status,
+    );
+  } catch (error) {
+    console.error("❌ Erro ao validar API key (Google Gemini):", error);
+    return c.json(
+      {
+        valid: false,
+        error: error.message || "Erro ao validar API key",
+      },
+      500,
+    );
+  }
+};
+
+app.post("/make-server-1119702f/validate-api/google-gemini", validateGoogleGeminiKey);
+app.post("/validate-api/google-gemini", validateGoogleGeminiKey);
 
 const kaggleBasicAuth = (username: unknown, apiKey: unknown) => {
   const u = String(username ?? "").trim();
@@ -852,10 +907,19 @@ const googleProxy = async (c: any) => {
       return c.json({ error: "URL não permitida" }, 400);
     }
 
-    const response = await fetch(url, {
+    const requestUrl = (() => {
+      try {
+        const u = new URL(url);
+        if (!u.searchParams.has("key")) u.searchParams.set("key", apiKey);
+        return u.toString();
+      } catch {
+        return url;
+      }
+    })();
+
+    const response = await fetch(requestUrl, {
       method: "POST",
       headers: {
-        "x-goog-api-key": apiKey,
         "Content-Type": "application/json",
       },
       body: JSON.stringify(body ?? {}),
@@ -933,6 +997,988 @@ const requireBearer = (c: any) => {
   }
   return null;
 };
+
+const requireAutomationAdmin = (c: any) => {
+  const enabled = String(Deno.env.get("BETFAIR_TRADING_ENABLED") ?? "").trim().toLowerCase() === "true";
+  if (!enabled) return c.json({ ok: false, error: "Trading desabilitado" }, 403);
+  const expected = String(Deno.env.get("AUTOMATION_ADMIN_TOKEN") ?? "").trim();
+  if (!expected) return c.json({ ok: false, error: "Trading desabilitado" }, 403);
+  const provided = String(c.req.header("x-automation-token") ?? "").trim();
+  if (!provided || provided !== expected) return c.json({ ok: false, error: "Forbidden" }, 403);
+  return null;
+};
+
+const BETFAIR_SESSION_KV_KEY = "betfair/session_v1";
+
+const decodeEnvPem = (value: string) => String(value ?? "").replace(/\\n/g, "\n").trim();
+
+const extractPemBlock = (pem: string, label: string) => {
+  const begin = `-----BEGIN ${label}-----`;
+  const end = `-----END ${label}-----`;
+  const start = pem.indexOf(begin);
+  if (start < 0) return null;
+  const stop = pem.indexOf(end, start);
+  if (stop < 0) return null;
+  const inner = pem.slice(start + begin.length, stop).replace(/[\r\n\s]/g, "");
+  return inner || null;
+};
+
+const pemSha256Hex = async (pem: string, label: string) => {
+  const b64 = extractPemBlock(pem, label);
+  if (!b64) return null;
+  const raw = atob(b64);
+  const bytes = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i += 1) bytes[i] = raw.charCodeAt(i);
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, "0")).join("");
+};
+
+const assertHeaderSafe = (name: string, value: string) => {
+  if (!value) return;
+  if (/[\r\n]/.test(value)) throw new Error(`Betfair: ${name} contém quebra de linha (valor inválido para header)`);
+};
+
+const getBetfairConfig = () => {
+  const appKey = String(Deno.env.get("BETFAIR_APP_KEY") ?? "").trim();
+  const username = String(Deno.env.get("BETFAIR_USERNAME") ?? "").trim();
+  const password = String(Deno.env.get("BETFAIR_PASSWORD") ?? "").trim();
+  const certRawV2 = String(Deno.env.get("BETFAIR_CERT_PEM_V2") ?? "");
+  const certRawV1 = String(Deno.env.get("BETFAIR_CERT_PEM") ?? "");
+  const certPem = decodeEnvPem(certRawV2 || certRawV1);
+  const certSource = certRawV2 ? "BETFAIR_CERT_PEM_V2" : certRawV1 ? "BETFAIR_CERT_PEM" : null;
+
+  const keyRawV2 = String(Deno.env.get("BETFAIR_KEY_PEM_V2") ?? "");
+  const keyRawV1 = String(Deno.env.get("BETFAIR_KEY_PEM") ?? "");
+  const keyRawAlias = String(Deno.env.get("BETFAIR_CERT_KEY") ?? "");
+  const keyPem = decodeEnvPem(keyRawV2 || keyRawV1 || keyRawAlias);
+  const keySource = keyRawV2 ? "BETFAIR_KEY_PEM_V2" : keyRawV1 ? "BETFAIR_KEY_PEM" : keyRawAlias ? "BETFAIR_CERT_KEY" : null;
+  const jurisdiction = String(Deno.env.get("BETFAIR_JURISDICTION") ?? "com").trim().toLowerCase();
+  const overrideSsoHost = String(Deno.env.get("BETFAIR_SSO_HOST") ?? "").trim();
+  const overrideApiHost = String(Deno.env.get("BETFAIR_API_HOST") ?? "").trim();
+
+  const normalizedJurisdiction =
+    jurisdiction === "br" || jurisdiction === "bet.br" || jurisdiction === "betfair.bet.br" ? "bet.br" : jurisdiction;
+
+  const ssoHost = overrideSsoHost ||
+    (normalizedJurisdiction === "bet.br" ? "identitysso-cert.betfair.bet.br"
+      : normalizedJurisdiction === "au" || normalizedJurisdiction === "com.au" ? "identitysso-cert.betfair.com.au"
+      : normalizedJurisdiction === "it" ? "identitysso-cert.betfair.it"
+      : normalizedJurisdiction === "es" ? "identitysso-cert.betfair.es"
+      : normalizedJurisdiction === "ro" ? "identitysso-cert.betfair.ro"
+      : "identitysso-cert.betfair.com");
+
+  const apiHost = overrideApiHost || (normalizedJurisdiction === "bet.br" ? "api.betfair.bet.br" : "api.betfair.com");
+  const rpcUrl = `https://${apiHost}/exchange/betting/json-rpc/v1`;
+
+  assertHeaderSafe("BETFAIR_APP_KEY", appKey);
+  assertHeaderSafe("BETFAIR_USERNAME", username);
+  assertHeaderSafe("BETFAIR_PASSWORD", password);
+
+  return { appKey, username, password, certPem, keyPem, certSource, keySource, ssoHost, apiHost, rpcUrl } as const;
+};
+
+const loadBetfairSession = async () => {
+  const raw = await kv.get(BETFAIR_SESSION_KV_KEY);
+  const token = String(raw?.sessionToken ?? "").trim();
+  return token ? (raw as { sessionToken: string; fetchedAt: string }) : null;
+};
+
+const saveBetfairSession = async (sessionToken: string) => {
+  await kv.set(BETFAIR_SESSION_KV_KEY, { sessionToken, fetchedAt: new Date().toISOString() });
+};
+
+const betfairCertLogin = async () => {
+  const cfg = getBetfairConfig();
+  if (!cfg.appKey || !cfg.username || !cfg.password) throw new Error("Betfair: credenciais ausentes (APP_KEY/USERNAME/PASSWORD)");
+  if (!cfg.certPem || !cfg.keyPem) throw new Error("Betfair: certificado ausente (CERT_PEM/KEY_PEM)");
+
+  const client = Deno.createHttpClient({
+    cert: cfg.certPem,
+    key: cfg.keyPem,
+  } as any);
+
+  const url = `https://${cfg.ssoHost}/api/certlogin`;
+  const body = new URLSearchParams({
+    username: cfg.username,
+    password: cfg.password,
+  }).toString();
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "X-Application": cfg.appKey,
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body,
+    client,
+  });
+
+  const text = await res.text().catch(() => "");
+  let data: any = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    data = null;
+  }
+  if (!res.ok) {
+    throw new Error(`Betfair login falhou (HTTP ${res.status}): ${text.slice(0, 260)}`);
+  }
+  const status = String(data?.loginStatus ?? "").trim();
+  const sessionToken = String(data?.sessionToken ?? "").trim();
+  if (status !== "SUCCESS" || !sessionToken) {
+    throw new Error(`Betfair login falhou: ${status || "UNKNOWN"}`);
+  }
+  await saveBetfairSession(sessionToken);
+  return sessionToken;
+};
+
+const getBetfairSessionToken = async (opts?: { force?: boolean }) => {
+  if (!opts?.force) {
+    const cached = await loadBetfairSession();
+    if (cached?.sessionToken) return cached.sessionToken;
+  }
+  return await betfairCertLogin();
+};
+
+const betfairJsonRpcRaw = async (params: { method: string; params: any; sessionToken: string }) => {
+  const cfg = getBetfairConfig();
+  if (!cfg.appKey) throw new Error("Betfair: APP_KEY ausente");
+  const method = String(params.method ?? "").trim();
+
+  const res = await fetch(cfg.rpcUrl, {
+    method: "POST",
+    headers: {
+      "X-Application": cfg.appKey,
+      "X-Authentication": params.sessionToken,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify([{ jsonrpc: "2.0", id: 1, method, params: params.params ?? {} }]),
+  });
+
+  const data = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(`Betfair API falhou (HTTP ${res.status})`);
+  const first = Array.isArray(data) ? data[0] : data;
+  if (first?.error) {
+    const msg = first?.error?.message ? String(first.error.message) : JSON.stringify(first.error);
+    const codeRaw =
+      String(first?.error?.data?.APINGException?.errorCode ?? first?.error?.data?.exceptionname ?? "").trim() ||
+      String(first?.error?.data?.errorCode ?? "").trim();
+    const code = codeRaw || msg;
+    const isSessionInvalid = /INVALID_SESSION|NO_SESSION|SESSION.*INVALID/i.test(code);
+    const err = new Error(`Betfair API error: ${msg}`.slice(0, 600)) as any;
+    err.__betfairSessionInvalid = isSessionInvalid;
+    throw err;
+  }
+  return first?.result ?? null;
+};
+
+const betfairJsonRpc = async (params: { method: string; params: any; sessionToken: string }) => {
+  const method = String(params.method ?? "").trim();
+  const allowed = new Set([
+    "SportsAPING/v1.0/listEventTypes",
+    "SportsAPING/v1.0/listCompetitions",
+    "SportsAPING/v1.0/listEvents",
+    "SportsAPING/v1.0/listMarketCatalogue",
+    "SportsAPING/v1.0/listMarketBook",
+    "SportsAPING/v1.0/listTimeRanges",
+    "SportsAPING/v1.0/listCountries",
+    "SportsAPING/v1.0/listVenues",
+  ]);
+  if (!allowed.has(method)) throw new Error("Betfair: método não permitido");
+  return await betfairJsonRpcRaw({ ...params, method });
+};
+
+const betfairJsonRpcTrading = async (params: { method: string; params: any; sessionToken: string }) => {
+  const method = String(params.method ?? "").trim();
+  const allowed = new Set(["SportsAPING/v1.0/placeOrders"]);
+  if (!allowed.has(method)) throw new Error("Betfair: método não permitido");
+  return await betfairJsonRpcRaw({ ...params, method });
+};
+
+app.post("/make-server-1119702f/betfair/session", async (c) => {
+  const authError = requireBearer(c);
+  if (authError) return authError;
+  try {
+    const token = await getBetfairSessionToken();
+    const cached = await loadBetfairSession();
+    const tokenPreview = token ? `${token.slice(0, 6)}…${token.slice(-4)}` : null;
+    const debug = new URL(c.req.url).searchParams.get("debug") === "1";
+    if (!debug) return c.json({ ok: true, hasSession: Boolean(token), tokenPreview, fetchedAt: cached?.fetchedAt ?? null });
+    const cfg = getBetfairConfig();
+    const certSha256 = await pemSha256Hex(cfg.certPem, "CERTIFICATE");
+    const keyType = cfg.keyPem.includes("BEGIN RSA PRIVATE KEY") ? "RSA PRIVATE KEY"
+      : cfg.keyPem.includes("BEGIN PRIVATE KEY") ? "PRIVATE KEY"
+      : cfg.keyPem.includes("BEGIN ENCRYPTED PRIVATE KEY") ? "ENCRYPTED PRIVATE KEY"
+      : "UNKNOWN";
+    return c.json({
+      ok: true,
+      hasSession: Boolean(token),
+      tokenPreview,
+      fetchedAt: cached?.fetchedAt ?? null,
+      debug: { ssoHost: cfg.ssoHost, apiHost: cfg.apiHost, certSha256, keyType, certSource: cfg.certSource, keySource: cfg.keySource },
+    });
+  } catch (error) {
+    const debug = new URL(c.req.url).searchParams.get("debug") === "1";
+    if (!debug) return c.json({ ok: false, error: error.message || "Erro ao criar sessão Betfair" }, 500);
+    try {
+      const cfg = getBetfairConfig();
+      const certSha256 = await pemSha256Hex(cfg.certPem, "CERTIFICATE");
+      const keyType = cfg.keyPem.includes("BEGIN RSA PRIVATE KEY") ? "RSA PRIVATE KEY"
+        : cfg.keyPem.includes("BEGIN PRIVATE KEY") ? "PRIVATE KEY"
+        : cfg.keyPem.includes("BEGIN ENCRYPTED PRIVATE KEY") ? "ENCRYPTED PRIVATE KEY"
+        : "UNKNOWN";
+      return c.json(
+        { ok: false, error: error.message || "Erro ao criar sessão Betfair", debug: { ssoHost: cfg.ssoHost, apiHost: cfg.apiHost, certSha256, keyType, certSource: cfg.certSource, keySource: cfg.keySource } },
+        500,
+      );
+    } catch {
+      return c.json({ ok: false, error: error.message || "Erro ao criar sessão Betfair", debug: { failedToLoadEnv: true } }, 500);
+    }
+  }
+});
+app.post("/betfair/session", async (c) => {
+  const authError = requireBearer(c);
+  if (authError) return authError;
+  try {
+    const token = await getBetfairSessionToken();
+    const cached = await loadBetfairSession();
+    const tokenPreview = token ? `${token.slice(0, 6)}…${token.slice(-4)}` : null;
+    const debug = new URL(c.req.url).searchParams.get("debug") === "1";
+    if (!debug) return c.json({ ok: true, hasSession: Boolean(token), tokenPreview, fetchedAt: cached?.fetchedAt ?? null });
+    const cfg = getBetfairConfig();
+    const certSha256 = await pemSha256Hex(cfg.certPem, "CERTIFICATE");
+    const keyType = cfg.keyPem.includes("BEGIN RSA PRIVATE KEY") ? "RSA PRIVATE KEY"
+      : cfg.keyPem.includes("BEGIN PRIVATE KEY") ? "PRIVATE KEY"
+      : cfg.keyPem.includes("BEGIN ENCRYPTED PRIVATE KEY") ? "ENCRYPTED PRIVATE KEY"
+      : "UNKNOWN";
+    return c.json({
+      ok: true,
+      hasSession: Boolean(token),
+      tokenPreview,
+      fetchedAt: cached?.fetchedAt ?? null,
+      debug: { ssoHost: cfg.ssoHost, apiHost: cfg.apiHost, certSha256, keyType, certSource: cfg.certSource, keySource: cfg.keySource },
+    });
+  } catch (error) {
+    const debug = new URL(c.req.url).searchParams.get("debug") === "1";
+    if (!debug) return c.json({ ok: false, error: error.message || "Erro ao criar sessão Betfair" }, 500);
+    try {
+      const cfg = getBetfairConfig();
+      const certSha256 = await pemSha256Hex(cfg.certPem, "CERTIFICATE");
+      const keyType = cfg.keyPem.includes("BEGIN RSA PRIVATE KEY") ? "RSA PRIVATE KEY"
+        : cfg.keyPem.includes("BEGIN PRIVATE KEY") ? "PRIVATE KEY"
+        : cfg.keyPem.includes("BEGIN ENCRYPTED PRIVATE KEY") ? "ENCRYPTED PRIVATE KEY"
+        : "UNKNOWN";
+      return c.json(
+        { ok: false, error: error.message || "Erro ao criar sessão Betfair", debug: { ssoHost: cfg.ssoHost, apiHost: cfg.apiHost, certSha256, keyType, certSource: cfg.certSource, keySource: cfg.keySource } },
+        500,
+      );
+    } catch {
+      return c.json({ ok: false, error: error.message || "Erro ao criar sessão Betfair", debug: { failedToLoadEnv: true } }, 500);
+    }
+  }
+});
+
+app.post("/make-server-1119702f/betfair/rpc", async (c) => {
+  const authError = requireBearer(c);
+  if (authError) return authError;
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const method = String(body?.method ?? "").trim();
+    const params = body?.params ?? {};
+    const sessionToken = await getBetfairSessionToken();
+    let result: any = null;
+    try {
+      result = await betfairJsonRpc({ method, params, sessionToken });
+    } catch (e) {
+      const invalid = Boolean((e as any)?.__betfairSessionInvalid);
+      if (!invalid) throw e;
+      const refreshed = await getBetfairSessionToken({ force: true });
+      result = await betfairJsonRpc({ method, params, sessionToken: refreshed });
+    }
+    return c.json({ ok: true, result });
+  } catch (error) {
+    return c.json({ ok: false, error: error.message || "Erro ao chamar Betfair" }, 500);
+  }
+});
+app.post("/betfair/rpc", async (c) => {
+  const authError = requireBearer(c);
+  if (authError) return authError;
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const method = String(body?.method ?? "").trim();
+    const params = body?.params ?? {};
+    const sessionToken = await getBetfairSessionToken();
+    let result: any = null;
+    try {
+      result = await betfairJsonRpc({ method, params, sessionToken });
+    } catch (e) {
+      const invalid = Boolean((e as any)?.__betfairSessionInvalid);
+      if (!invalid) throw e;
+      const refreshed = await getBetfairSessionToken({ force: true });
+      result = await betfairJsonRpc({ method, params, sessionToken: refreshed });
+    }
+    return c.json({ ok: true, result });
+  } catch (error) {
+    return c.json({ ok: false, error: error.message || "Erro ao chamar Betfair" }, 500);
+  }
+});
+
+const validatePlaceOrdersPayload = (payload: any) => {
+  const marketId = String(payload?.marketId ?? "").trim();
+  if (!marketId) return { ok: false, error: "marketId obrigatório" } as const;
+  if (!Array.isArray(payload?.instructions) || payload.instructions.length === 0) {
+    return { ok: false, error: "instructions deve ser um array não vazio" } as const;
+  }
+  if (payload.instructions.length > 50) return { ok: false, error: "instructions grande demais" } as const;
+  const customerRef = payload?.customerRef == null ? null : String(payload.customerRef);
+  if (customerRef && customerRef.length > 32) return { ok: false, error: "customerRef grande demais" } as const;
+  return { ok: true } as const;
+};
+
+app.post("/make-server-1119702f/betfair/placeOrders", async (c) => {
+  const authError = requireBearer(c);
+  if (authError) return authError;
+  const adminError = requireAutomationAdmin(c);
+  if (adminError) return adminError;
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const validation = validatePlaceOrdersPayload(body);
+    if (!validation.ok) return c.json({ ok: false, error: validation.error }, 400);
+    const sessionToken = await getBetfairSessionToken();
+    const result = await betfairJsonRpcTrading({
+      method: "SportsAPING/v1.0/placeOrders",
+      params: {
+        marketId: String(body.marketId),
+        instructions: body.instructions,
+        customerRef: body.customerRef ?? undefined,
+        marketVersion: body.marketVersion ?? undefined,
+        customerStrategyRef: body.customerStrategyRef ?? undefined,
+        async: Boolean(body.async ?? false),
+      },
+      sessionToken,
+    });
+    return c.json({ ok: true, result });
+  } catch (error) {
+    return c.json({ ok: false, error: error.message || "Erro ao enviar placeOrders" }, 500);
+  }
+});
+
+app.post("/betfair/placeOrders", async (c) => {
+  const authError = requireBearer(c);
+  if (authError) return authError;
+  const adminError = requireAutomationAdmin(c);
+  if (adminError) return adminError;
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const validation = validatePlaceOrdersPayload(body);
+    if (!validation.ok) return c.json({ ok: false, error: validation.error }, 400);
+    const sessionToken = await getBetfairSessionToken();
+    const result = await betfairJsonRpcTrading({
+      method: "SportsAPING/v1.0/placeOrders",
+      params: {
+        marketId: String(body.marketId),
+        instructions: body.instructions,
+        customerRef: body.customerRef ?? undefined,
+        marketVersion: body.marketVersion ?? undefined,
+        customerStrategyRef: body.customerStrategyRef ?? undefined,
+        async: Boolean(body.async ?? false),
+      },
+      sessionToken,
+    });
+    return c.json({ ok: true, result });
+  } catch (error) {
+    return c.json({ ok: false, error: error.message || "Erro ao enviar placeOrders" }, 500);
+  }
+});
+
+const BETFAIR_QUEUE_PREFIX = "betfair/automation_queue_v1/item/";
+
+const normalizeName = (input: unknown) => {
+  const s = String(input ?? "").trim().toLowerCase();
+  if (!s) return "";
+  return s
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+};
+
+const scoreEventName = (eventName: string, home: string, away: string) => {
+  const e = normalizeName(eventName);
+  const h = normalizeName(home);
+  const a = normalizeName(away);
+  if (!e || !h || !a) return 0;
+  let score = 0;
+  if (e.includes(h)) score += 6;
+  if (e.includes(a)) score += 6;
+  if (e.includes(" v ") || e.includes(" vs ") || e.includes(" x ")) score += 2;
+  const hTokens = new Set(h.split(" ").filter(Boolean));
+  const aTokens = new Set(a.split(" ").filter(Boolean));
+  for (const t of hTokens) if (t.length >= 3 && e.includes(t)) score += 1;
+  for (const t of aTokens) if (t.length >= 3 && e.includes(t)) score += 1;
+  return score;
+};
+
+const pickBestEvent = (events: any[], homeTeam: string, awayTeam: string, kickoffIso: string | null) => {
+  const kickoffMs = kickoffIso ? new Date(kickoffIso).getTime() : NaN;
+  let best: { event: any; score: number } | null = null;
+  for (const row of Array.isArray(events) ? events : []) {
+    const ev = row?.event ?? row;
+    const name = String(ev?.name ?? "").trim();
+    const base = scoreEventName(name, homeTeam, awayTeam);
+    if (base <= 0) continue;
+    const openDate = String(ev?.openDate ?? "").trim();
+    const openMs = openDate ? new Date(openDate).getTime() : NaN;
+    let timeBonus = 0;
+    if (Number.isFinite(kickoffMs) && Number.isFinite(openMs)) {
+      const diffMin = Math.abs(kickoffMs - openMs) / 60000;
+      timeBonus = Math.max(0, 6 - diffMin / 30);
+    }
+    const s = base + timeBonus;
+    if (!best || s > best.score) best = { event: ev, score: s };
+  }
+  return best?.event ?? null;
+};
+
+const guessRunnerRole = (runnerName: string, homeTeam: string, awayTeam: string) => {
+  const r = normalizeName(runnerName);
+  if (!r) return null;
+  if (r.includes("draw") || r.includes("empate")) return "draw";
+  const h = normalizeName(homeTeam);
+  const a = normalizeName(awayTeam);
+  const hScore = h ? scoreEventName(`${runnerName} v ${awayTeam}`, homeTeam, awayTeam) : 0;
+  const aScore = a ? scoreEventName(`${homeTeam} v ${runnerName}`, homeTeam, awayTeam) : 0;
+  const rHasHome = h && (r.includes(h) || h.split(" ").some((t) => t.length >= 3 && r.includes(t)));
+  const rHasAway = a && (r.includes(a) || a.split(" ").some((t) => t.length >= 3 && r.includes(t)));
+  if (rHasHome && !rHasAway) return "home";
+  if (rHasAway && !rHasHome) return "away";
+  if (hScore > aScore) return "home";
+  if (aScore > hScore) return "away";
+  return null;
+};
+
+const splitEventTeams = (eventName: string) => {
+  const raw = String(eventName ?? "").trim();
+  if (!raw) return null;
+  const normalized = raw.replace(/\s+/g, " ");
+  const m = normalized.match(/^(.*?)\s+(?:v|vs|x)\s+(.*?)$/i);
+  if (!m) return null;
+  const home = String(m[1] ?? "").trim();
+  const away = String(m[2] ?? "").trim();
+  if (!home || !away) return null;
+  return { home, away };
+};
+
+const withTimeout = async <T>(fn: (signal: AbortSignal) => Promise<T>, ms: number) => {
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), ms);
+  try {
+    return await fn(controller.signal);
+  } finally {
+    clearTimeout(t);
+  }
+};
+
+const listBetfairSoccerMatchOddsRange = async (params: { fromIso: string; toIso: string; maxResults: number }) => {
+  const fromIso = String(params.fromIso ?? "").trim();
+  const toIso = String(params.toIso ?? "").trim();
+  const maxResults = Math.max(1, Math.min(400, Number(params.maxResults ?? 200) || 200));
+  if (!fromIso || !toIso) throw new Error("Betfair: período inválido");
+
+  let sessionToken = await getBetfairSessionToken();
+  const call = async (method: string, rpcParams: any) => {
+    try {
+      return await betfairJsonRpc({ method, params: rpcParams, sessionToken });
+    } catch (e) {
+      const invalid = Boolean((e as any)?.__betfairSessionInvalid);
+      if (!invalid) throw e;
+      sessionToken = await getBetfairSessionToken({ force: true });
+      return await betfairJsonRpc({ method, params: rpcParams, sessionToken });
+    }
+  };
+
+  const events = await withTimeout(
+    () =>
+      call("SportsAPING/v1.0/listEvents", {
+        filter: { eventTypeIds: ["1"], marketStartTime: { from: fromIso, to: toIso } },
+        sort: "FIRST_TO_START",
+        maxResults,
+      }),
+    9000,
+  );
+
+  const eventIds = Array.from(
+    new Set(
+      (Array.isArray(events) ? events : [])
+        .map((row: any) => String((row?.event ?? row)?.id ?? "").trim())
+        .filter(Boolean),
+    ),
+  ).slice(0, maxResults);
+
+  if (eventIds.length === 0) return [];
+
+  const catalogues = await withTimeout(
+    () =>
+      call("SportsAPING/v1.0/listMarketCatalogue", {
+        filter: { eventIds, marketTypeCodes: ["MATCH_ODDS"] },
+        maxResults: String(Math.min(eventIds.length, maxResults)),
+        sort: "FIRST_TO_START",
+        marketProjection: ["EVENT", "COMPETITION", "RUNNER_DESCRIPTION", "MARKET_START_TIME"],
+      }),
+    12_000,
+  );
+
+  const markets = Array.isArray(catalogues) ? catalogues : [];
+  const marketIds = markets
+    .map((m: any) => String(m?.marketId ?? "").trim())
+    .filter(Boolean)
+    .slice(0, maxResults);
+
+  if (marketIds.length === 0) return [];
+
+  const booksByMarketId = new Map<string, any>();
+  const chunkSize = 40;
+  for (let i = 0; i < marketIds.length; i += chunkSize) {
+    const chunk = marketIds.slice(i, i + chunkSize);
+    const books = await withTimeout(
+      () =>
+        call("SportsAPING/v1.0/listMarketBook", {
+          marketIds: chunk,
+          priceProjection: { priceData: ["EX_BEST_OFFERS"], virtualise: true },
+        }),
+      12_000,
+    );
+    for (const b of Array.isArray(books) ? books : []) {
+      const id = String(b?.marketId ?? "").trim();
+      if (id) booksByMarketId.set(id, b);
+    }
+  }
+
+  const nowMs = Date.now();
+  const out: any[] = [];
+
+  for (const mk of markets) {
+    const marketId = String(mk?.marketId ?? "").trim();
+    if (!marketId) continue;
+    const event = mk?.event ?? null;
+    const competition = mk?.competition ?? null;
+    const eventId = String(event?.id ?? "").trim();
+    const eventName = String(event?.name ?? "").trim();
+    const teams = splitEventTeams(eventName);
+    if (!teams) continue;
+
+    const marketStartTime = String(mk?.marketStartTime ?? event?.openDate ?? "").trim();
+    const kickoffMs = marketStartTime ? new Date(marketStartTime).getTime() : NaN;
+
+    const runners = Array.isArray(mk?.runners) ? mk.runners : [];
+    const selectionByRole: Record<string, number> = {};
+    for (const r of runners) {
+      const selectionId = Number(r?.selectionId);
+      if (!Number.isFinite(selectionId)) continue;
+      const role = guessRunnerRole(String(r?.runnerName ?? ""), teams.home, teams.away);
+      if (!role) continue;
+      if (selectionByRole[role] != null) continue;
+      selectionByRole[role] = selectionId;
+    }
+
+    const book = booksByMarketId.get(marketId) ?? null;
+    const totalMatched = Number(book?.totalMatched);
+    const isInPlay = Boolean(book?.inplay);
+    const marketStatus = String(book?.status ?? "").toUpperCase();
+
+    const status =
+      marketStatus === "CLOSED" ? "FINISHED" : isInPlay ? "IN_PLAY" : Number.isFinite(kickoffMs) && nowMs >= kickoffMs ? "IN_PLAY" : "SCHEDULED";
+
+    const runnersBook = Array.isArray(book?.runners) ? book.runners : [];
+    const pull = (selectionId: number) => {
+      const rb = runnersBook.find((x: any) => Number(x?.selectionId) === selectionId);
+      const ex = rb?.ex ?? {};
+      const back0 = Array.isArray(ex?.availableToBack) ? ex.availableToBack[0] : null;
+      const lay0 = Array.isArray(ex?.availableToLay) ? ex.availableToLay[0] : null;
+      return {
+        back: back0 ? Number(back0.price) : null,
+        backSize: back0 ? Number(back0.size) : null,
+        lay: lay0 ? Number(lay0.price) : null,
+        laySize: lay0 ? Number(lay0.size) : null,
+      };
+    };
+
+    const odds: any = {};
+    if (Number.isFinite(selectionByRole.home)) odds.home = pull(selectionByRole.home);
+    if (Number.isFinite(selectionByRole.draw)) odds.draw = pull(selectionByRole.draw);
+    if (Number.isFinite(selectionByRole.away)) odds.away = pull(selectionByRole.away);
+
+    const idNumber = Number(eventId);
+    const id = Number.isFinite(idNumber) ? idNumber : Math.floor(9_000_000_000 + out.length);
+
+    out.push({
+      id,
+      utcDate: marketStartTime || new Date().toISOString(),
+      status,
+      matchday: 0,
+      homeTeam: {
+        id: 0,
+        name: teams.home,
+        shortName: teams.home,
+        tla: teams.home.substring(0, 3).toUpperCase(),
+        crest: "",
+      },
+      awayTeam: {
+        id: 0,
+        name: teams.away,
+        shortName: teams.away,
+        tla: teams.away.substring(0, 3).toUpperCase(),
+        crest: "",
+      },
+      score: {
+        fullTime: { home: null, away: null },
+      },
+      competition: {
+        id: 0,
+        name: String(competition?.name ?? "").trim() || "Soccer",
+        code: "",
+        emblem: "",
+        area: {
+          name: String(event?.countryCode ?? "").trim() || "Unknown",
+          code: String(event?.countryCode ?? "").trim() || "",
+          flag: "",
+        },
+      },
+      betfair: {
+        eventId: eventId || null,
+        eventName: eventName || null,
+        marketId,
+        marketStartTime: marketStartTime || null,
+        runners: {
+          homeSelectionId: Number.isFinite(selectionByRole.home) ? selectionByRole.home : null,
+          drawSelectionId: Number.isFinite(selectionByRole.draw) ? selectionByRole.draw : null,
+          awaySelectionId: Number.isFinite(selectionByRole.away) ? selectionByRole.away : null,
+        },
+        matchedVolume: Number.isFinite(totalMatched) ? totalMatched : null,
+        odds,
+        oddsFetchedAt: new Date().toISOString(),
+      },
+    });
+  }
+
+  return out;
+};
+
+const resolveBetfairMatchOdds = async (params: { homeTeam: string; awayTeam: string; utcDate: string | null }) => {
+  const homeTeam = String(params.homeTeam ?? "").trim();
+  const awayTeam = String(params.awayTeam ?? "").trim();
+  const utcDate = params.utcDate ? String(params.utcDate) : null;
+  if (!homeTeam || !awayTeam) throw new Error("Betfair: home/away ausentes");
+
+  const kickoff = utcDate ? new Date(utcDate) : null;
+  const kickoffMs = kickoff && Number.isFinite(kickoff.getTime()) ? kickoff.getTime() : NaN;
+  const from = Number.isFinite(kickoffMs) ? new Date(kickoffMs - 3 * 60 * 60 * 1000).toISOString() : new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
+  const to = Number.isFinite(kickoffMs) ? new Date(kickoffMs + 6 * 60 * 60 * 1000).toISOString() : new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+
+  let sessionToken = await getBetfairSessionToken();
+  const call = async (method: string, rpcParams: any) => {
+    try {
+      return await betfairJsonRpc({ method, params: rpcParams, sessionToken });
+    } catch (e) {
+      const invalid = Boolean((e as any)?.__betfairSessionInvalid);
+      if (!invalid) throw e;
+      sessionToken = await getBetfairSessionToken({ force: true });
+      return await betfairJsonRpc({ method, params: rpcParams, sessionToken });
+    }
+  };
+  const eventQueries = [homeTeam, awayTeam, `${homeTeam} ${awayTeam}`].filter(Boolean);
+  let events: any[] = [];
+  for (const q of eventQueries) {
+    const r = await withTimeout(
+      () => call("SportsAPING/v1.0/listEvents", { filter: { eventTypeIds: ["1"], textQuery: q, marketStartTime: { from, to } } }),
+      8000,
+    );
+    if (Array.isArray(r) && r.length > 0) {
+      events = r;
+      const bestEv = pickBestEvent(events, homeTeam, awayTeam, utcDate);
+      if (bestEv) {
+        events = [ { event: bestEv } ];
+        break;
+      }
+    }
+  }
+
+  const best = pickBestEvent(events, homeTeam, awayTeam, utcDate);
+  const eventId = String(best?.id ?? "").trim();
+  if (!eventId) throw new Error("Betfair: eventId não encontrado");
+
+  const catalogue = await withTimeout(
+    () =>
+      call("SportsAPING/v1.0/listMarketCatalogue", {
+        filter: { eventIds: [eventId], marketTypeCodes: ["MATCH_ODDS"] },
+        maxResults: 1,
+        marketProjection: ["RUNNER_DESCRIPTION", "MARKET_START_TIME"],
+      }),
+    8000,
+  );
+
+  const mk = Array.isArray(catalogue) ? catalogue[0] : null;
+  const marketId = String(mk?.marketId ?? "").trim();
+  if (!marketId) throw new Error("Betfair: marketId (MATCH_ODDS) não encontrado");
+
+  const runners = Array.isArray(mk?.runners) ? mk.runners : [];
+  const selectionByRole: Record<string, number> = {};
+  for (const r of runners) {
+    const selectionId = Number(r?.selectionId);
+    if (!Number.isFinite(selectionId)) continue;
+    const role = guessRunnerRole(String(r?.runnerName ?? ""), homeTeam, awayTeam);
+    if (!role) continue;
+    if (selectionByRole[role] != null) continue;
+    selectionByRole[role] = selectionId;
+  }
+
+  const marketBook = await withTimeout(
+    () =>
+      call("SportsAPING/v1.0/listMarketBook", {
+        marketIds: [marketId],
+        priceProjection: { priceData: ["EX_BEST_OFFERS"], virtualise: true },
+      }),
+    8000,
+  );
+
+  const book = Array.isArray(marketBook) ? marketBook[0] : null;
+  const totalMatched = Number(book?.totalMatched);
+  const runnersBook = Array.isArray(book?.runners) ? book.runners : [];
+  const odds: any = {};
+  const pull = (selectionId: number) => {
+    const rb = runnersBook.find((x: any) => Number(x?.selectionId) === selectionId);
+    const ex = rb?.ex ?? {};
+    const back0 = Array.isArray(ex?.availableToBack) ? ex.availableToBack[0] : null;
+    const lay0 = Array.isArray(ex?.availableToLay) ? ex.availableToLay[0] : null;
+    return {
+      back: back0 ? Number(back0.price) : null,
+      backSize: back0 ? Number(back0.size) : null,
+      lay: lay0 ? Number(lay0.price) : null,
+      laySize: lay0 ? Number(lay0.size) : null,
+    };
+  };
+
+  if (Number.isFinite(selectionByRole.home)) odds.home = pull(selectionByRole.home);
+  if (Number.isFinite(selectionByRole.draw)) odds.draw = pull(selectionByRole.draw);
+  if (Number.isFinite(selectionByRole.away)) odds.away = pull(selectionByRole.away);
+
+  return {
+    eventId,
+    eventName: String(best?.name ?? "").trim() || null,
+    marketId,
+    marketStartTime: String(mk?.marketStartTime ?? "").trim() || null,
+    runners: {
+      homeSelectionId: Number.isFinite(selectionByRole.home) ? selectionByRole.home : null,
+      drawSelectionId: Number.isFinite(selectionByRole.draw) ? selectionByRole.draw : null,
+      awaySelectionId: Number.isFinite(selectionByRole.away) ? selectionByRole.away : null,
+    },
+    matchedVolume: Number.isFinite(totalMatched) ? totalMatched : null,
+    odds,
+    oddsFetchedAt: new Date().toISOString(),
+  };
+};
+
+app.post("/make-server-1119702f/betfair/matches/list", async (c) => {
+  const authError = requireBearer(c);
+  if (authError) return authError;
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const dateFrom = String(body?.dateFrom ?? "").trim();
+    const dateTo = String(body?.dateTo ?? "").trim();
+    const maxResults = Number(body?.maxResults ?? body?.maxEvents ?? 200);
+
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateFrom) || !/^\d{4}-\d{2}-\d{2}$/.test(dateTo)) {
+      return c.json({ ok: false, error: "dateFrom/dateTo devem estar no formato YYYY-MM-DD" }, 400);
+    }
+
+    const fromIso = new Date(`${dateFrom}T00:00:00-03:00`).toISOString();
+    const toIso = new Date(`${dateTo}T23:59:59-03:00`).toISOString();
+
+    const matches = await listBetfairSoccerMatchOddsRange({ fromIso, toIso, maxResults: Number.isFinite(maxResults) ? maxResults : 200 });
+    return c.json({ ok: true, matches });
+  } catch (error) {
+    return c.json({ ok: false, error: error.message || "Erro ao listar jogos (Betfair)" }, 500);
+  }
+});
+
+app.post("/betfair/matches/list", async (c) => {
+  const authError = requireBearer(c);
+  if (authError) return authError;
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const dateFrom = String(body?.dateFrom ?? "").trim();
+    const dateTo = String(body?.dateTo ?? "").trim();
+    const maxResults = Number(body?.maxResults ?? body?.maxEvents ?? 200);
+
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateFrom) || !/^\d{4}-\d{2}-\d{2}$/.test(dateTo)) {
+      return c.json({ ok: false, error: "dateFrom/dateTo devem estar no formato YYYY-MM-DD" }, 400);
+    }
+
+    const fromIso = new Date(`${dateFrom}T00:00:00-03:00`).toISOString();
+    const toIso = new Date(`${dateTo}T23:59:59-03:00`).toISOString();
+
+    const matches = await listBetfairSoccerMatchOddsRange({ fromIso, toIso, maxResults: Number.isFinite(maxResults) ? maxResults : 200 });
+    return c.json({ ok: true, matches });
+  } catch (error) {
+    return c.json({ ok: false, error: error.message || "Erro ao listar jogos (Betfair)" }, 500);
+  }
+});
+
+app.post("/make-server-1119702f/automation/betfair/queue/add", async (c) => {
+  const authError = requireBearer(c);
+  if (authError) return authError;
+  try {
+    const body = await c.req.json();
+    const matchId = String(body?.matchId ?? "").trim();
+    if (!matchId) return c.json({ ok: false, error: "matchId obrigatório" }, 400);
+    const key = `${BETFAIR_QUEUE_PREFIX}${matchId}`;
+    const existing = (await kv.get(key)) ?? null;
+    const now = new Date().toISOString();
+    const payload: any = {
+      matchId,
+      source: String(body?.source ?? "").trim() || existing?.source || null,
+      utcDate: String(body?.utcDate ?? "").trim() || existing?.utcDate || null,
+      homeTeam: String(body?.homeTeam ?? "").trim() || existing?.homeTeam || null,
+      awayTeam: String(body?.awayTeam ?? "").trim() || existing?.awayTeam || null,
+      prediction: body?.prediction ?? existing?.prediction ?? null,
+      createdAt: String(existing?.createdAt ?? now),
+      updatedAt: now,
+      status: String(existing?.status ?? "queued"),
+      betfair: existing?.betfair ?? null,
+      mappingStatus: existing?.mappingStatus ?? "pending",
+      mappingError: existing?.mappingError ?? null,
+    };
+
+    const hasMarket = Boolean(payload?.betfair?.marketId);
+    if (!hasMarket && payload.homeTeam && payload.awayTeam) {
+      try {
+        const mapped = await resolveBetfairMatchOdds({
+          homeTeam: payload.homeTeam,
+          awayTeam: payload.awayTeam,
+          utcDate: payload.utcDate,
+        });
+        payload.betfair = mapped;
+        payload.mappingStatus = "mapped";
+        payload.mappingError = null;
+        payload.mappedAt = new Date().toISOString();
+      } catch (e) {
+        payload.mappingStatus = "unmapped";
+        payload.mappingError = e instanceof Error ? e.message : String(e);
+      }
+    }
+    await kv.set(key, payload);
+    return c.json({ ok: true, item: payload });
+  } catch (error) {
+    return c.json({ ok: false, error: error.message || "Erro ao enfileirar jogo" }, 500);
+  }
+});
+app.post("/automation/betfair/queue/add", async (c) => {
+  const authError = requireBearer(c);
+  if (authError) return authError;
+  try {
+    const body = await c.req.json();
+    const matchId = String(body?.matchId ?? "").trim();
+    if (!matchId) return c.json({ ok: false, error: "matchId obrigatório" }, 400);
+    const key = `${BETFAIR_QUEUE_PREFIX}${matchId}`;
+    const existing = (await kv.get(key)) ?? null;
+    const now = new Date().toISOString();
+    const payload: any = {
+      matchId,
+      source: String(body?.source ?? "").trim() || existing?.source || null,
+      utcDate: String(body?.utcDate ?? "").trim() || existing?.utcDate || null,
+      homeTeam: String(body?.homeTeam ?? "").trim() || existing?.homeTeam || null,
+      awayTeam: String(body?.awayTeam ?? "").trim() || existing?.awayTeam || null,
+      prediction: body?.prediction ?? existing?.prediction ?? null,
+      createdAt: String(existing?.createdAt ?? now),
+      updatedAt: now,
+      status: String(existing?.status ?? "queued"),
+      betfair: existing?.betfair ?? null,
+      mappingStatus: existing?.mappingStatus ?? "pending",
+      mappingError: existing?.mappingError ?? null,
+    };
+
+    const hasMarket = Boolean(payload?.betfair?.marketId);
+    if (!hasMarket && payload.homeTeam && payload.awayTeam) {
+      try {
+        const mapped = await resolveBetfairMatchOdds({
+          homeTeam: payload.homeTeam,
+          awayTeam: payload.awayTeam,
+          utcDate: payload.utcDate,
+        });
+        payload.betfair = mapped;
+        payload.mappingStatus = "mapped";
+        payload.mappingError = null;
+        payload.mappedAt = new Date().toISOString();
+      } catch (e) {
+        payload.mappingStatus = "unmapped";
+        payload.mappingError = e instanceof Error ? e.message : String(e);
+      }
+    }
+    await kv.set(key, payload);
+    return c.json({ ok: true, item: payload });
+  } catch (error) {
+    return c.json({ ok: false, error: error.message || "Erro ao enfileirar jogo" }, 500);
+  }
+});
+
+app.post("/make-server-1119702f/automation/betfair/queue/list", async (c) => {
+  const authError = requireBearer(c);
+  if (authError) return authError;
+  try {
+    const items = await kv.getByPrefix(BETFAIR_QUEUE_PREFIX);
+    return c.json({ ok: true, items: Array.isArray(items) ? items : [] });
+  } catch (error) {
+    return c.json({ ok: false, error: error.message || "Erro ao listar fila" }, 500);
+  }
+});
+app.post("/automation/betfair/queue/list", async (c) => {
+  const authError = requireBearer(c);
+  if (authError) return authError;
+  try {
+    const items = await kv.getByPrefix(BETFAIR_QUEUE_PREFIX);
+    return c.json({ ok: true, items: Array.isArray(items) ? items : [] });
+  } catch (error) {
+    return c.json({ ok: false, error: error.message || "Erro ao listar fila" }, 500);
+  }
+});
+
+const betfairQueueRemoveHandler = async (c: any) => {
+  const authError = requireBearer(c);
+  if (authError) return authError;
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const matchId = String(body?.matchId ?? "").trim();
+    if (!matchId) return c.json({ ok: false, error: "matchId obrigatório" }, 400);
+    await kv.del(`${BETFAIR_QUEUE_PREFIX}${matchId}`);
+    return c.json({ ok: true });
+  } catch (error) {
+    return c.json({ ok: false, error: error.message || "Erro ao remover item" }, 500);
+  }
+};
+
+const betfairQueueUpdateHandler = async (c: any) => {
+  const authError = requireBearer(c);
+  if (authError) return authError;
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const matchId = String(body?.matchId ?? "").trim();
+    if (!matchId) return c.json({ ok: false, error: "matchId obrigatório" }, 400);
+    const patch = (body?.patch && typeof body.patch === "object") ? body.patch : {};
+    const key = `${BETFAIR_QUEUE_PREFIX}${matchId}`;
+    const current = (await kv.get(key)) ?? {};
+    const next = { ...current, ...patch, updatedAt: new Date().toISOString() };
+    await kv.set(key, next);
+    return c.json({ ok: true, item: next });
+  } catch (error) {
+    return c.json({ ok: false, error: error.message || "Erro ao atualizar item" }, 500);
+  }
+};
+
+app.post("/make-server-1119702f/automation/betfair/queue/remove", betfairQueueRemoveHandler);
+app.post("/automation/betfair/queue/remove", betfairQueueRemoveHandler);
+app.post("/make-server-1119702f/automation/betfair/queue/update", betfairQueueUpdateHandler);
+app.post("/automation/betfair/queue/update", betfairQueueUpdateHandler);
 
 const KV_TABLE = "kv_store_1119702f";
 const supabaseClient = () =>
