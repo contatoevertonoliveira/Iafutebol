@@ -2338,10 +2338,178 @@ const betfairQueueUpdateHandler = async (c: any) => {
   }
 };
 
+const betfairQueueRefreshOddsHandler = async (c: any) => {
+  const authError = requireBearer(c);
+  if (authError) return authError;
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const maxRaw = Number(body?.max ?? 10);
+    const max = Number.isFinite(maxRaw) ? Math.max(1, Math.min(30, Math.floor(maxRaw))) : 10;
+    const minFreshSecondsRaw = Number(body?.minFreshSeconds ?? 10);
+    const minFreshSeconds = Number.isFinite(minFreshSecondsRaw) ? Math.max(1, Math.min(120, Math.floor(minFreshSecondsRaw))) : 10;
+    const includeCorrectScore = Boolean(body?.includeCorrectScore ?? false);
+
+    const items = await kv.getByPrefix(BETFAIR_QUEUE_PREFIX);
+    const list = Array.isArray(items) ? items : [];
+    if (list.length === 0) return c.json({ ok: true, updated: 0, skipped: 0, remapped: 0 });
+
+    const now = Date.now();
+    const isStale = (iso: string | null | undefined) => {
+      const v = String(iso ?? "").trim();
+      if (!v) return true;
+      const ms = new Date(v).getTime();
+      if (!Number.isFinite(ms)) return true;
+      const age = (now - ms) / 1000;
+      return !Number.isFinite(age) || age < 0 || age >= minFreshSeconds;
+    };
+
+    const candidates = list
+      .filter((x: any) => {
+        const status = String(x?.status ?? "").trim();
+        if (status === "stopped") return false;
+        return true;
+      })
+      .slice(0, 200);
+
+    const toRemap = candidates
+      .filter((x: any) => !String(x?.betfair?.marketId ?? "").trim())
+      .filter((x: any) => String(x?.homeTeam ?? "").trim() && String(x?.awayTeam ?? "").trim())
+      .slice(0, Math.min(6, max));
+
+    let remapped = 0;
+    for (const x of toRemap) {
+      try {
+        const mapped = await resolveBetfairMatchOdds({
+          homeTeam: String(x.homeTeam),
+          awayTeam: String(x.awayTeam),
+          utcDate: x?.utcDate,
+        });
+        const cs = includeCorrectScore ? await resolveBetfairCorrectScoreMarket({ eventId: String(mapped?.eventId ?? "") }) : null;
+        const nextBetfair = includeCorrectScore ? { ...mapped, correctScore: cs } : mapped;
+        const key = `${BETFAIR_QUEUE_PREFIX}${String(x.matchId)}`;
+        const next = {
+          ...x,
+          betfair: nextBetfair,
+          mappingStatus: "mapped",
+          mappingError: null,
+          mappedAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        };
+        await kv.set(key, next);
+        remapped += 1;
+      } catch {}
+    }
+
+    const refreshable = candidates
+      .filter((x: any) => String(x?.betfair?.marketId ?? "").trim())
+      .filter((x: any) => isStale(x?.betfair?.oddsFetchedAt ?? x?.betfair?.odds?.fetchedAt ?? null))
+      .slice(0, max);
+
+    if (refreshable.length === 0) return c.json({ ok: true, updated: 0, skipped: candidates.length, remapped });
+
+    let sessionToken = await getBetfairSessionToken();
+    const call = async (method: string, rpcParams: any) => {
+      try {
+        return await betfairJsonRpc({ method, params: rpcParams, sessionToken });
+      } catch (e) {
+        const invalid = Boolean((e as any)?.__betfairSessionInvalid);
+        if (!invalid) throw e;
+        sessionToken = await getBetfairSessionToken({ force: true });
+        return await betfairJsonRpc({ method, params: rpcParams, sessionToken });
+      }
+    };
+
+    const byMarketId = new Map<string, any>();
+    const marketIds = refreshable.map((x: any) => String(x.betfair.marketId));
+    for (let i = 0; i < marketIds.length; i += 25) {
+      const chunk = marketIds.slice(i, i + 25);
+      const books = await withTimeout(
+        () =>
+          call("SportsAPING/v1.0/listMarketBook", {
+            marketIds: chunk,
+            priceProjection: { priceData: ["EX_BEST_OFFERS"], virtualise: true },
+          }),
+        9000,
+      );
+      if (Array.isArray(books)) for (const b of books) byMarketId.set(String(b?.marketId ?? ""), b);
+    }
+
+    let updated = 0;
+    let skipped = 0;
+    for (const x of refreshable) {
+      const marketId = String(x?.betfair?.marketId ?? "").trim();
+      const book = byMarketId.get(marketId) ?? null;
+      if (!book) {
+        skipped += 1;
+        continue;
+      }
+
+      const runners = Array.isArray(book?.runners) ? book.runners : [];
+      const pick = (selectionId: number | null | undefined) => {
+        const sid = Number(selectionId);
+        if (!Number.isFinite(sid)) return { back: null, backSize: null, lay: null, laySize: null };
+        const rb = runners.find((r: any) => Number(r?.selectionId) === sid) ?? null;
+        const ex = rb?.ex ?? {};
+        const back0 = Array.isArray(ex?.availableToBack) ? ex.availableToBack[0] : null;
+        const lay0 = Array.isArray(ex?.availableToLay) ? ex.availableToLay[0] : null;
+        const back = back0 ? Number(back0.price) : null;
+        const lay = lay0 ? Number(lay0.price) : null;
+        const backSize = back0 ? Number(back0.size) : null;
+        const laySize = lay0 ? Number(lay0.size) : null;
+        return {
+          back: Number.isFinite(back as number) ? (back as number) : null,
+          backSize: Number.isFinite(backSize as number) ? (backSize as number) : null,
+          lay: Number.isFinite(lay as number) ? (lay as number) : null,
+          laySize: Number.isFinite(laySize as number) ? (laySize as number) : null,
+        };
+      };
+
+      const homeSid = Number(x?.betfair?.runners?.homeSelectionId);
+      const drawSid = Number(x?.betfair?.runners?.drawSelectionId);
+      const awaySid = Number(x?.betfair?.runners?.awaySelectionId);
+      const odds = {
+        home: pick(Number.isFinite(homeSid) ? homeSid : null),
+        draw: pick(Number.isFinite(drawSid) ? drawSid : null),
+        away: pick(Number.isFinite(awaySid) ? awaySid : null),
+      };
+
+      const totalMatched = Number(book?.totalMatched);
+      const nextBetfair = {
+        ...(x?.betfair ?? {}),
+        matchedVolume: Number.isFinite(totalMatched) ? totalMatched : x?.betfair?.matchedVolume ?? null,
+        odds,
+        oddsFetchedAt: new Date().toISOString(),
+      };
+
+      let cs: any = null;
+      if (includeCorrectScore) {
+        try {
+          const eventId = String(x?.betfair?.eventId ?? "").trim();
+          if (eventId) cs = await resolveBetfairCorrectScoreMarket({ eventId });
+        } catch {
+          cs = null;
+        }
+      }
+      if (includeCorrectScore) nextBetfair.correctScore = cs;
+
+      const key = `${BETFAIR_QUEUE_PREFIX}${String(x.matchId)}`;
+      const next = { ...x, betfair: nextBetfair, updatedAt: new Date().toISOString() };
+      await kv.set(key, next);
+      updated += 1;
+    }
+
+    return c.json({ ok: true, updated, skipped, remapped });
+  } catch (error) {
+    return c.json({ ok: false, error: error.message || "Erro ao atualizar odds" }, 500);
+  }
+};
+
 app.post("/make-server-1119702f/automation/betfair/queue/remove", betfairQueueRemoveHandler);
 app.post("/automation/betfair/queue/remove", betfairQueueRemoveHandler);
 app.post("/make-server-1119702f/automation/betfair/queue/update", betfairQueueUpdateHandler);
 app.post("/automation/betfair/queue/update", betfairQueueUpdateHandler);
+app.post("/make-server-1119702f/automation/betfair/queue/refreshOdds", betfairQueueRefreshOddsHandler);
+app.post("/automation/betfair/queue/refreshOdds", betfairQueueRefreshOddsHandler);
 
 const KV_TABLE = "kv_store_1119702f";
 const supabaseClient = () =>

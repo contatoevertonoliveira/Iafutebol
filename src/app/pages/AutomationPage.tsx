@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { Activity, Pause, Play, RefreshCw, Trash2 } from 'lucide-react';
 import { Badge } from '../components/ui/badge';
@@ -99,6 +99,7 @@ export default function AutomationPage() {
   const [marketsOpen, setMarketsOpen] = useState(false);
   const [marketsItemId, setMarketsItemId] = useState<string | null>(null);
   const [marketsDraft, setMarketsDraft] = useState<AutomationMarketToggle[]>([]);
+  const isRefreshingOddsRef = useRef(false);
   const [marketId, setMarketId] = useState('');
   const [selectionId, setSelectionId] = useState('');
   const [side, setSide] = useState<'BACK' | 'LAY'>('BACK');
@@ -275,8 +276,8 @@ export default function AutomationPage() {
     });
   }, [scopeFiltered, now]);
 
-  const loadQueue = async () => {
-    setStatus('loading');
+  const loadQueue = async (opts?: { silent?: boolean }) => {
+    if (!opts?.silent) setStatus('loading');
     try {
       const { projectId, publicAnonKey } = await import('/utils/supabase/info');
       const res = await fetch(`https://${projectId}.supabase.co/functions/v1/make-server-1119702f/automation/betfair/queue/list`, {
@@ -294,11 +295,40 @@ export default function AutomationPage() {
         throw new Error(String(data?.error ?? `HTTP ${res.status} ${res.statusText}`));
       }
       setItems(Array.isArray(data?.items) ? (data.items as QueueItem[]) : []);
-      setStatus('idle');
+      if (!opts?.silent) setStatus('idle');
     } catch (e) {
-      setStatus('error');
+      if (!opts?.silent) setStatus('error');
       const msg = e instanceof Error ? e.message : String(e);
-      toast.error('Falha ao carregar automações', { description: msg.slice(0, 220) });
+      if (!opts?.silent) toast.error('Falha ao carregar automações', { description: msg.slice(0, 220) });
+    }
+  };
+
+  const refreshOdds = async () => {
+    if (isRefreshingOddsRef.current) return;
+    isRefreshingOddsRef.current = true;
+    try {
+      const { projectId, publicAnonKey } = await import('/utils/supabase/info');
+      const res = await fetch(`https://${projectId}.supabase.co/functions/v1/make-server-1119702f/automation/betfair/queue/refreshOdds`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${publicAnonKey}`,
+          apikey: publicAnonKey,
+        },
+        body: JSON.stringify({
+          max: 12,
+          minFreshSeconds: 10,
+          includeCorrectScore: false,
+        }),
+      });
+      const raw = await res.text().catch(() => '');
+      const data = raw ? JSON.parse(raw) : null;
+      if (!res.ok || !data?.ok) return;
+      await loadQueue({ silent: true });
+    } catch {
+      return;
+    } finally {
+      isRefreshingOddsRef.current = false;
     }
   };
 
@@ -470,6 +500,14 @@ export default function AutomationPage() {
 
   useEffect(() => {
     loadQueue();
+  }, []);
+
+  useEffect(() => {
+    void refreshOdds();
+    const id = window.setInterval(() => {
+      void refreshOdds();
+    }, 10_000);
+    return () => window.clearInterval(id);
   }, []);
 
   return (
