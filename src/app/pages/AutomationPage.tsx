@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
-import { Activity, Pause, Play, RefreshCw, Trash2 } from 'lucide-react';
+import { Activity, Pause, Play, RefreshCw, Square, Trash2 } from 'lucide-react';
 import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
 import { Card } from '../components/ui/card';
@@ -9,6 +9,7 @@ import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../components/ui/dialog';
 import { Switch } from '../components/ui/switch';
+import { Tooltip, TooltipContent, TooltipTrigger } from '../components/ui/tooltip';
 import { loadApiConfig } from '../services/apiConfig';
 
 type QueueStatus = 'queued' | 'running' | 'paused' | 'stopped' | string;
@@ -714,36 +715,68 @@ export default function AutomationPage() {
                             <OddCell kind="back" sideKey="away" />
                             <OddCell kind="lay" sideKey="away" />
 
-                            <div className="px-3 py-2 flex items-center justify-end gap-2">
-                              <Button
-                                variant="outline"
-                                size="sm"
-                                disabled={!canStart}
-                                onClick={() => updateItem(x.matchId, { status: 'running' })}
-                              >
-                                <Play className="w-4 h-4 mr-2" />
-                                Iniciar
-                              </Button>
-                              <Button
-                                variant="outline"
-                                size="sm"
-                                disabled={!canPause}
-                                onClick={() => updateItem(x.matchId, { status: 'paused' })}
-                              >
-                                <Pause className="w-4 h-4 mr-2" />
-                                Pausar
-                              </Button>
-                              <Button
-                                variant="outline"
-                                size="sm"
-                                disabled={!canStop}
-                                onClick={() => updateItem(x.matchId, { status: 'stopped' })}
-                              >
-                                Parar
-                              </Button>
-                              <Button variant="destructive" size="sm" onClick={() => removeItem(x.matchId)}>
-                                <Trash2 className="w-4 h-4" />
-                              </Button>
+                            <div className="px-3 py-2 flex items-center justify-end gap-1.5">
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <Button
+                                    aria-label="Iniciar"
+                                    variant="outline"
+                                    size="icon"
+                                    disabled={!canStart}
+                                    onClick={() => updateItem(x.matchId, { status: 'running' })}
+                                  >
+                                    <Play className="w-4 h-4" />
+                                  </Button>
+                                </TooltipTrigger>
+                                <TooltipContent side="top" sideOffset={6}>
+                                  Iniciar
+                                </TooltipContent>
+                              </Tooltip>
+
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <Button
+                                    aria-label="Pausar"
+                                    variant="outline"
+                                    size="icon"
+                                    disabled={!canPause}
+                                    onClick={() => updateItem(x.matchId, { status: 'paused' })}
+                                  >
+                                    <Pause className="w-4 h-4" />
+                                  </Button>
+                                </TooltipTrigger>
+                                <TooltipContent side="top" sideOffset={6}>
+                                  Pausar
+                                </TooltipContent>
+                              </Tooltip>
+
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <Button
+                                    aria-label="Parar"
+                                    variant="outline"
+                                    size="icon"
+                                    disabled={!canStop}
+                                    onClick={() => updateItem(x.matchId, { status: 'stopped' })}
+                                  >
+                                    <Square className="w-4 h-4" />
+                                  </Button>
+                                </TooltipTrigger>
+                                <TooltipContent side="top" sideOffset={6}>
+                                  Parar
+                                </TooltipContent>
+                              </Tooltip>
+
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <Button aria-label="Excluir" variant="destructive" size="icon" onClick={() => removeItem(x.matchId)}>
+                                    <Trash2 className="w-4 h-4" />
+                                  </Button>
+                                </TooltipTrigger>
+                                <TooltipContent side="top" sideOffset={6}>
+                                  Excluir
+                                </TooltipContent>
+                              </Tooltip>
                             </div>
                           </div>
                         );
