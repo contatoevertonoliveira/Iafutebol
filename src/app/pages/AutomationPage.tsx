@@ -7,9 +7,18 @@ import { Card } from '../components/ui/card';
 import { cn } from '../components/ui/utils';
 import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../components/ui/dialog';
+import { Switch } from '../components/ui/switch';
 import { loadApiConfig } from '../services/apiConfig';
 
 type QueueStatus = 'queued' | 'running' | 'paused' | 'stopped' | string;
+
+type AutomationMarketToggle = {
+  key: string;
+  label: string;
+  enabled: boolean;
+  details?: string | null;
+};
 
 type QueueItem = {
   matchId: string;
@@ -18,6 +27,7 @@ type QueueItem = {
   homeTeam: string | null;
   awayTeam: string | null;
   prediction: unknown;
+  markets?: AutomationMarketToggle[];
   createdAt: string;
   updatedAt?: string;
   status: QueueStatus;
@@ -86,6 +96,9 @@ export default function AutomationPage() {
   const [items, setItems] = useState<QueueItem[]>([]);
   const [status, setStatus] = useState<'idle' | 'loading' | 'error'>('idle');
   const [view, setView] = useState<'all' | 'live' | 'today' | 'tomorrow' | 'next'>('all');
+  const [marketsOpen, setMarketsOpen] = useState(false);
+  const [marketsItemId, setMarketsItemId] = useState<string | null>(null);
+  const [marketsDraft, setMarketsDraft] = useState<AutomationMarketToggle[]>([]);
   const [marketId, setMarketId] = useState('');
   const [selectionId, setSelectionId] = useState('');
   const [side, setSide] = useState<'BACK' | 'LAY'>('BACK');
@@ -103,6 +116,76 @@ export default function AutomationPage() {
   }, [items]);
 
   const now = useMemo(() => new Date(), [items.length]);
+
+  const deriveMarketsFromPrediction = (x: QueueItem): AutomationMarketToggle[] => {
+    const p = x.prediction && typeof x.prediction === 'object' ? (x.prediction as any) : null;
+    if (!p) return [];
+    const h = x.homeTeam || 'Casa';
+    const a = x.awayTeam || 'Visitante';
+    const out: AutomationMarketToggle[] = [];
+
+    const winner = String(p?.winner?.prediction ?? '').trim();
+    const winnerConf = Number(p?.winner?.confidence);
+    if (winner) {
+      const label = winner === 'home' ? `Vencedor: ${h}` : winner === 'away' ? `Vencedor: ${a}` : 'Vencedor: Empate';
+      out.push({ key: 'winner', label, enabled: true, details: Number.isFinite(winnerConf) ? `${Math.round(winnerConf)}%` : null });
+    }
+
+    const ouPred = String(p?.overUnder?.prediction ?? '').trim();
+    const ouLine = Number(p?.overUnder?.line);
+    const ouConf = Number(p?.overUnder?.confidence);
+    if (ouPred && Number.isFinite(ouLine)) {
+      const side = ouPred === 'over' ? 'Over' : ouPred === 'under' ? 'Under' : 'OU';
+      out.push({ key: 'overUnder', label: `${side} ${ouLine}`, enabled: true, details: Number.isFinite(ouConf) ? `${Math.round(ouConf)}%` : null });
+    }
+
+    const bttsPred = String(p?.btts?.prediction ?? '').trim();
+    const bttsConf = Number(p?.btts?.confidence);
+    if (bttsPred) {
+      out.push({
+        key: 'btts',
+        label: `Ambas marcam: ${bttsPred === 'yes' ? 'Sim' : 'Não'}`,
+        enabled: true,
+        details: Number.isFinite(bttsConf) ? `${Math.round(bttsConf)}%` : null,
+      });
+    }
+
+    const cs = String(p?.correctScore?.score ?? '').trim();
+    const csConf = Number(p?.correctScore?.confidence);
+    if (cs) {
+      out.push({ key: 'correctScore', label: `Placar correto: ${cs}`, enabled: true, details: Number.isFinite(csConf) ? `${Math.round(csConf)}%` : null });
+    }
+
+    const ahTeam = String(p?.asianHandicap?.team ?? '').trim();
+    const ahLine = Number(p?.asianHandicap?.line);
+    const ahConf = Number(p?.asianHandicap?.confidence);
+    if (ahTeam && Number.isFinite(ahLine)) {
+      const teamLabel = ahTeam === 'home' ? h : a;
+      const lineLabel = ahLine > 0 ? `+${ahLine}` : `${ahLine}`;
+      out.push({
+        key: 'asianHandicap',
+        label: `Handicap: ${teamLabel} (${lineLabel})`,
+        enabled: true,
+        details: Number.isFinite(ahConf) ? `${Math.round(ahConf)}%` : null,
+      });
+    }
+
+    const fh = String(p?.firstHalf?.prediction ?? '').trim();
+    const fhConf = Number(p?.firstHalf?.confidence);
+    if (fh) {
+      const label = fh === 'home' ? h : fh === 'away' ? a : 'Empate';
+      out.push({ key: 'firstHalf', label: `1º tempo: ${label}`, enabled: true, details: Number.isFinite(fhConf) ? `${Math.round(fhConf)}%` : null });
+    }
+
+    const sh = String(p?.secondHalf?.prediction ?? '').trim();
+    const shConf = Number(p?.secondHalf?.confidence);
+    if (sh) {
+      const label = sh === 'home' ? h : sh === 'away' ? a : 'Empate';
+      out.push({ key: 'secondHalf', label: `2º tempo: ${label}`, enabled: true, details: Number.isFinite(shConf) ? `${Math.round(shConf)}%` : null });
+    }
+
+    return out;
+  };
 
   const kickoffDate = (x: QueueItem) => {
     const iso = x.utcDate || x.createdAt;
@@ -338,6 +421,30 @@ export default function AutomationPage() {
     }
   };
 
+  const openMarketsForItem = async (x: QueueItem) => {
+    const base = Array.isArray(x.markets) ? x.markets : deriveMarketsFromPrediction(x);
+    setMarketsItemId(x.matchId);
+    setMarketsDraft(base);
+    setMarketsOpen(true);
+    if (!Array.isArray(x.markets) && base.length > 0) {
+      await updateItem(x.matchId, { markets: base });
+    }
+  };
+
+  const updateMarketToggle = async (matchId: string, key: string, enabled: boolean) => {
+    const current = marketsDraft;
+    const idx = current.findIndex((m) => m.key === key);
+    if (idx === -1) return;
+    const next = current.map((m) => (m.key === key ? { ...m, enabled } : m));
+    setMarketsDraft(next);
+    setItems((prev) => prev.map((x) => (x.matchId === matchId ? { ...x, markets: next } : x)));
+    const ok = await updateItem(matchId, { markets: next });
+    if (!ok) {
+      setMarketsDraft(current);
+      setItems((prev) => prev.map((x) => (x.matchId === matchId ? { ...x, markets: current } : x)));
+    }
+  };
+
   const removeItem = async (matchId: string) => {
     try {
       const { projectId, publicAnonKey } = await import('/utils/supabase/info');
@@ -367,6 +474,39 @@ export default function AutomationPage() {
 
   return (
     <div className="min-h-screen bg-gray-50 p-4 md:p-6">
+      <Dialog open={marketsOpen} onOpenChange={setMarketsOpen}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Mercados da automação</DialogTitle>
+            <DialogDescription>
+              Ligue/desligue mercados sugeridos pelos agentes para este jogo.
+            </DialogDescription>
+          </DialogHeader>
+
+          {marketsDraft.length === 0 ? (
+            <div className="text-sm text-gray-600">Nenhum mercado disponível para este item.</div>
+          ) : (
+            <div className="mt-2 space-y-2">
+              {marketsDraft.map((m) => (
+                <div key={m.key} className="flex items-center justify-between gap-3 rounded-lg border border-gray-200 bg-white px-3 py-2">
+                  <div className="min-w-0">
+                    <div className="font-semibold text-gray-900 truncate">{m.label}</div>
+                    {m.details ? <div className="text-xs text-gray-600">{m.details}</div> : null}
+                  </div>
+                  <Switch
+                    checked={Boolean(m.enabled)}
+                    onCheckedChange={(v) => {
+                      if (!marketsItemId) return;
+                      void updateMarketToggle(marketsItemId, m.key, Boolean(v));
+                    }}
+                  />
+                </div>
+              ))}
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
+
       <div className="max-w-7xl mx-auto">
         <div className="flex items-start justify-between gap-4 mb-6">
           <div>
@@ -475,7 +615,17 @@ export default function AutomationPage() {
                         };
 
                         return (
-                          <div key={x.matchId} className="grid grid-cols-[64px_1fr_120px_repeat(6,72px)_220px] border-b border-gray-100">
+                          <div
+                            key={x.matchId}
+                            className="grid grid-cols-[64px_1fr_120px_repeat(6,72px)_220px] border-b border-gray-100"
+                            onDoubleClick={(e) => {
+                              const el = e.target as HTMLElement | null;
+                              if (el?.closest('button')) return;
+                              void openMarketsForItem(x);
+                            }}
+                            role="button"
+                            tabIndex={0}
+                          >
                             <div className={cn('px-2 py-2 text-center tabular-nums font-semibold', isLive(x) ? 'bg-emerald-600 text-white' : 'bg-gray-50 text-gray-800')}>
                               {timeOrMinute(x)}
                             </div>

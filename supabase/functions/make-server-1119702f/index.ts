@@ -2070,6 +2070,102 @@ app.post("/betfair/match/resolve", async (c) => {
   }
 });
 
+const buildAutomationMarkets = (prediction: any, homeTeam: string | null, awayTeam: string | null) => {
+  const p = prediction && typeof prediction === "object" ? prediction : null;
+  if (!p) return [];
+
+  const markets: any[] = [];
+  const h = homeTeam || "Casa";
+  const a = awayTeam || "Visitante";
+
+  const winner = String(p?.winner?.prediction ?? "").trim();
+  const winnerConf = Number(p?.winner?.confidence);
+  if (winner) {
+    const label = winner === "home" ? `Vencedor: ${h}` : winner === "away" ? `Vencedor: ${a}` : "Vencedor: Empate";
+    markets.push({
+      key: "winner",
+      label,
+      enabled: true,
+      details: Number.isFinite(winnerConf) ? `${Math.round(winnerConf)}%` : null,
+    });
+  }
+
+  const ouPred = String(p?.overUnder?.prediction ?? "").trim();
+  const ouLine = Number(p?.overUnder?.line);
+  const ouConf = Number(p?.overUnder?.confidence);
+  if (ouPred && Number.isFinite(ouLine)) {
+    const side = ouPred === "over" ? "Over" : ouPred === "under" ? "Under" : "OU";
+    markets.push({
+      key: "overUnder",
+      label: `${side} ${ouLine}`,
+      enabled: true,
+      details: Number.isFinite(ouConf) ? `${Math.round(ouConf)}%` : null,
+    });
+  }
+
+  const bttsPred = String(p?.btts?.prediction ?? "").trim();
+  const bttsConf = Number(p?.btts?.confidence);
+  if (bttsPred) {
+    markets.push({
+      key: "btts",
+      label: `Ambas marcam: ${bttsPred === "yes" ? "Sim" : "Não"}`,
+      enabled: true,
+      details: Number.isFinite(bttsConf) ? `${Math.round(bttsConf)}%` : null,
+    });
+  }
+
+  const cs = String(p?.correctScore?.score ?? "").trim();
+  const csConf = Number(p?.correctScore?.confidence);
+  if (cs) {
+    markets.push({
+      key: "correctScore",
+      label: `Placar correto: ${cs}`,
+      enabled: true,
+      details: Number.isFinite(csConf) ? `${Math.round(csConf)}%` : null,
+    });
+  }
+
+  const ahTeam = String(p?.asianHandicap?.team ?? "").trim();
+  const ahLine = Number(p?.asianHandicap?.line);
+  const ahConf = Number(p?.asianHandicap?.confidence);
+  if (ahTeam && Number.isFinite(ahLine)) {
+    const teamLabel = ahTeam === "home" ? h : a;
+    const lineLabel = ahLine > 0 ? `+${ahLine}` : `${ahLine}`;
+    markets.push({
+      key: "asianHandicap",
+      label: `Handicap: ${teamLabel} (${lineLabel})`,
+      enabled: true,
+      details: Number.isFinite(ahConf) ? `${Math.round(ahConf)}%` : null,
+    });
+  }
+
+  const fh = String(p?.firstHalf?.prediction ?? "").trim();
+  const fhConf = Number(p?.firstHalf?.confidence);
+  if (fh) {
+    const label = fh === "home" ? h : fh === "away" ? a : "Empate";
+    markets.push({
+      key: "firstHalf",
+      label: `1º tempo: ${label}`,
+      enabled: true,
+      details: Number.isFinite(fhConf) ? `${Math.round(fhConf)}%` : null,
+    });
+  }
+
+  const sh = String(p?.secondHalf?.prediction ?? "").trim();
+  const shConf = Number(p?.secondHalf?.confidence);
+  if (sh) {
+    const label = sh === "home" ? h : sh === "away" ? a : "Empate";
+    markets.push({
+      key: "secondHalf",
+      label: `2º tempo: ${label}`,
+      enabled: true,
+      details: Number.isFinite(shConf) ? `${Math.round(shConf)}%` : null,
+    });
+  }
+
+  return markets;
+};
+
 app.post("/make-server-1119702f/automation/betfair/queue/add", async (c) => {
   const authError = requireBearer(c);
   if (authError) return authError;
@@ -2087,6 +2183,13 @@ app.post("/make-server-1119702f/automation/betfair/queue/add", async (c) => {
       homeTeam: String(body?.homeTeam ?? "").trim() || existing?.homeTeam || null,
       awayTeam: String(body?.awayTeam ?? "").trim() || existing?.awayTeam || null,
       prediction: body?.prediction ?? existing?.prediction ?? null,
+      markets: Array.isArray(existing?.markets)
+        ? existing.markets
+        : buildAutomationMarkets(
+          body?.prediction ?? existing?.prediction ?? null,
+          String(body?.homeTeam ?? existing?.homeTeam ?? "").trim() || null,
+          String(body?.awayTeam ?? existing?.awayTeam ?? "").trim() || null,
+        ),
       createdAt: String(existing?.createdAt ?? now),
       updatedAt: now,
       status: String(existing?.status ?? "queued"),
@@ -2139,6 +2242,13 @@ app.post("/automation/betfair/queue/add", async (c) => {
       homeTeam: String(body?.homeTeam ?? "").trim() || existing?.homeTeam || null,
       awayTeam: String(body?.awayTeam ?? "").trim() || existing?.awayTeam || null,
       prediction: body?.prediction ?? existing?.prediction ?? null,
+      markets: Array.isArray(existing?.markets)
+        ? existing.markets
+        : buildAutomationMarkets(
+          body?.prediction ?? existing?.prediction ?? null,
+          String(body?.homeTeam ?? existing?.homeTeam ?? "").trim() || null,
+          String(body?.awayTeam ?? existing?.awayTeam ?? "").trim() || null,
+        ),
       createdAt: String(existing?.createdAt ?? now),
       updatedAt: now,
       status: String(existing?.status ?? "queued"),
