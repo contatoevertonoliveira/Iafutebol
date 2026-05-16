@@ -220,11 +220,72 @@ export default function AutomationPage() {
       .slice(0, 2)
       .map((t) => t[0]?.toUpperCase())
       .join('');
+
+    const buildTeamBaseCandidates = (teamName: string) => {
+      const raw = String(teamName ?? '').trim().toLowerCase();
+      if (!raw) return [];
+
+      const cleanSpaces = raw.replace(/\s+/g, ' ').trim();
+      const keep = (s: string) =>
+        s
+          .normalize('NFC')
+          .replace(/['’]/g, '')
+          .replace(/[()]/g, '')
+          .replace(/\s+/g, ' ')
+          .trim();
+
+      const removePrefix = (s: string) => s.replace(/^(fc|cf|sc|ac|cd|ud|afc|cfc)\s+/i, '').trim();
+      const baseA = keep(cleanSpaces);
+      const baseB = keep(removePrefix(cleanSpaces));
+      const baseC = keep(cleanSpaces.replace(/^(\d+)\.\s*(fc|cf|sc|ac|cd|ud)\s+/i, '$1.$2 '));
+
+      const toFileBase = (s: string) =>
+        s
+          .replace(/\s+/g, '_')
+          .replace(/[^0-9a-zA-Z\u00C0-\u024F\u1E00-\u1EFF._-]/g, '_')
+          .replace(/_+/g, '_')
+          .replace(/^_+|_+$/g, '');
+
+      const variants = [
+        toFileBase(baseA),
+        toFileBase(baseB),
+        toFileBase(baseC),
+        toFileBase(baseA).replace(/\./g, ''),
+        toFileBase(baseB).replace(/\./g, ''),
+      ]
+        .map((x) => x.trim())
+        .filter(Boolean);
+
+      return Array.from(new Set(variants));
+    };
+
+    const localCandidates = buildTeamBaseCandidates(label).flatMap((b) => [
+      encodeURI(`/assets/times/${b}.png`),
+      encodeURI(`/assets/times/${b}.svg`),
+      encodeURI(`/assets/times/${b}.webp`),
+    ]);
+
+    const sources = Array.from(
+      new Set([...(localCandidates || []), ...(url ? [encodeURI(url)] : [])].filter(Boolean)),
+    );
+
+    const [sourceIndex, setSourceIndex] = useState(0);
+    const currentSrc = sources[sourceIndex] ?? '';
     return (
       <Tooltip>
         <TooltipTrigger asChild>
-          {url ? (
-            <img src={url} alt={label} className="w-6 h-6 rounded-sm object-contain bg-white border border-gray-200" />
+          {currentSrc ? (
+            <img
+              src={currentSrc}
+              alt={label}
+              className="w-6 h-6 rounded-sm object-contain bg-white border border-gray-200"
+              onError={() => {
+                setSourceIndex((prev) => {
+                  const next = prev + 1;
+                  return next < sources.length ? next : prev;
+                });
+              }}
+            />
           ) : (
             <div className="w-6 h-6 rounded-sm bg-gray-100 border border-gray-200 text-[10px] font-bold text-gray-700 flex items-center justify-center">
               {fallback || '—'}
