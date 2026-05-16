@@ -27,6 +27,10 @@ type QueueItem = {
   utcDate: string | null;
   homeTeam: string | null;
   awayTeam: string | null;
+  homeCrest?: string | null;
+  awayCrest?: string | null;
+  scoreHome?: number | null;
+  scoreAway?: number | null;
   prediction: unknown;
   markets?: AutomationMarketToggle[];
   createdAt: string;
@@ -69,13 +73,6 @@ const statusVariant = (s: QueueStatus) => {
   return 'outline';
 };
 
-const formatDateTime = (iso: string | null) => {
-  if (!iso) return '—';
-  const d = new Date(iso);
-  if (!Number.isFinite(d.getTime())) return iso;
-  return d.toLocaleString('pt-BR', { hour12: false });
-};
-
 const formatMoneyBR = (value: number | null | undefined) => {
   if (typeof value !== 'number' || !Number.isFinite(value)) return '—';
   return value.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
@@ -101,6 +98,8 @@ export default function AutomationPage() {
   const [marketsItemId, setMarketsItemId] = useState<string | null>(null);
   const [marketsDraft, setMarketsDraft] = useState<AutomationMarketToggle[]>([]);
   const isRefreshingOddsRef = useRef(false);
+  const [expandedById, setExpandedById] = useState<Record<string, boolean>>({});
+  const clickTimersRef = useRef<Record<string, number>>({});
   const [marketId, setMarketId] = useState('');
   const [selectionId, setSelectionId] = useState('');
   const [side, setSide] = useState<'BACK' | 'LAY'>('BACK');
@@ -187,6 +186,56 @@ export default function AutomationPage() {
     }
 
     return out;
+  };
+
+  const clearClickTimer = (matchId: string) => {
+    const t = clickTimersRef.current[matchId];
+    if (typeof t === 'number') window.clearTimeout(t);
+    delete clickTimersRef.current[matchId];
+  };
+
+  const scheduleToggleExpanded = (matchId: string) => {
+    clearClickTimer(matchId);
+    clickTimersRef.current[matchId] = window.setTimeout(() => {
+      setExpandedById((prev) => ({ ...prev, [matchId]: !Boolean(prev[matchId]) }));
+      delete clickTimersRef.current[matchId];
+    }, 220);
+  };
+
+  const parsePredictedScore = (x: QueueItem) => {
+    const p = x.prediction && typeof x.prediction === 'object' ? (x.prediction as any) : null;
+    const raw = String(p?.correctScore?.score ?? '').trim();
+    if (!raw) return null;
+    const m = raw.match(/^(\d+)\s*[-x×]\s*(\d+)$/i) || raw.match(/^(\d+)\s*-\s*(\d+)$/i);
+    if (!m) return null;
+    return { home: Number(m[1]), away: Number(m[2]) };
+  };
+
+  const TeamCrest = ({ src, name }: { src: string | null | undefined; name: string | null | undefined }) => {
+    const label = String(name ?? '').trim() || '—';
+    const url = String(src ?? '').trim() || '';
+    const fallback = label
+      .split(' ')
+      .filter(Boolean)
+      .slice(0, 2)
+      .map((t) => t[0]?.toUpperCase())
+      .join('');
+    return (
+      <Tooltip>
+        <TooltipTrigger asChild>
+          {url ? (
+            <img src={url} alt={label} className="w-6 h-6 rounded-sm object-contain bg-white border border-gray-200" />
+          ) : (
+            <div className="w-6 h-6 rounded-sm bg-gray-100 border border-gray-200 text-[10px] font-bold text-gray-700 flex items-center justify-center">
+              {fallback || '—'}
+            </div>
+          )}
+        </TooltipTrigger>
+        <TooltipContent side="top" sideOffset={6}>
+          {label}
+        </TooltipContent>
+      </Tooltip>
+    );
   };
 
   const kickoffDate = (x: QueueItem) => {
@@ -623,7 +672,6 @@ export default function AutomationPage() {
                       </div>
 
                       {rows.map((x) => {
-                        const title = `${x.homeTeam ?? '—'} x ${x.awayTeam ?? '—'}`;
                         const k = kickoffDate(x);
                         const canPause = x.status === 'running';
                         const canStart = x.status === 'queued' || x.status === 'paused';
@@ -661,47 +709,92 @@ export default function AutomationPage() {
                             onDoubleClick={(e) => {
                               const el = e.target as HTMLElement | null;
                               if (el?.closest('button')) return;
+                              clearClickTimer(x.matchId);
                               void openMarketsForItem(x);
                             }}
-                            role="button"
-                            tabIndex={0}
                           >
                             <div className={cn('px-2 py-2 text-center tabular-nums font-semibold', isLive(x) ? 'bg-emerald-600 text-white' : 'bg-gray-50 text-gray-800')}>
                               {timeOrMinute(x)}
                             </div>
 
-                            <div className="px-3 py-2 min-w-0">
-                              <div className="flex items-center gap-2 min-w-0">
-                                <div className="font-semibold text-gray-900 truncate">{title}</div>
-                                <Badge variant={statusVariant(x.status) as any}>{statusLabel(x.status)}</Badge>
-                                <Badge variant={mapped ? 'default' : (x.mappingStatus === 'unmapped' ? 'destructive' : 'secondary') as any}>
-                                  {mapped ? 'Mapeado' : x.mappingStatus === 'unmapped' ? 'Não mapeado' : 'Mapeando'}
-                                </Badge>
-                              </div>
-                              <div className="text-[11px] text-gray-600 mt-0.5 flex flex-wrap gap-x-3 gap-y-1">
-                                <span className="tabular-nums">{k ? k.toLocaleString('pt-BR', { hour12: false }) : '—'}</span>
-                                {x.source ? <span>Fonte: {x.source}</span> : null}
-                                <span className="tabular-nums">ID: {x.matchId}</span>
-                                {mapped && x.betfair?.marketId ? <span className="tabular-nums">Market: {x.betfair.marketId}</span> : null}
-                              </div>
-                              {!mapped && x.mappingError ? (
-                                <div className="mt-1 text-[11px] text-red-700">
-                                  {x.mappingError}
-                                </div>
-                              ) : null}
-                              {markets.length > 0 ? (
-                                <div className="mt-2 flex flex-wrap gap-1.5">
-                                  {markets.map((m) => (
-                                    <Badge
-                                      key={m.key}
-                                      variant={m.enabled ? 'secondary' : 'outline'}
-                                      className={cn('text-[11px] font-semibold', m.enabled ? '' : 'opacity-50 line-through')}
-                                    >
-                                      {m.label}
-                                    </Badge>
-                                  ))}
-                                </div>
-                              ) : null}
+                            <div
+                              className="px-3 py-2 min-w-0 cursor-pointer select-none"
+                              onClick={(e) => {
+                                const el = e.target as HTMLElement | null;
+                                if (el?.closest('button')) return;
+                                scheduleToggleExpanded(x.matchId);
+                              }}
+                              onDoubleClick={(e) => {
+                                const el = e.target as HTMLElement | null;
+                                if (el?.closest('button')) return;
+                                clearClickTimer(x.matchId);
+                              }}
+                            >
+                              {(() => {
+                                const predicted = parsePredictedScore(x);
+                                const homeScore = typeof x.scoreHome === 'number' ? x.scoreHome : predicted?.home ?? null;
+                                const awayScore = typeof x.scoreAway === 'number' ? x.scoreAway : predicted?.away ?? null;
+                                const expanded = Boolean(expandedById[x.matchId]);
+                                const homeName = x.homeTeam ?? '—';
+                                const awayName = x.awayTeam ?? '—';
+
+                                return (
+                                  <>
+                                    <div className="flex items-center gap-2 min-w-0">
+                                      <TeamCrest src={x.homeCrest} name={homeName} />
+                                      <div className="tabular-nums font-semibold text-gray-900">
+                                        <span>{homeScore ?? '—'}</span>
+                                        <span className="mx-1 text-gray-400">x</span>
+                                        <span>{awayScore ?? '—'}</span>
+                                      </div>
+                                      <TeamCrest src={x.awayCrest} name={awayName} />
+                                      <div className="ml-auto text-xs text-gray-600">
+                                        {expanded ? 'Ocultar' : 'Detalhes'}
+                                      </div>
+                                    </div>
+
+                                    {expanded ? (
+                                      <div className="mt-2">
+                                        <div className="flex items-center flex-wrap gap-2">
+                                          <Badge variant={statusVariant(x.status) as any}>{statusLabel(x.status)}</Badge>
+                                          <Badge variant={mapped ? 'default' : (x.mappingStatus === 'unmapped' ? 'destructive' : 'secondary') as any}>
+                                            {mapped ? 'Mapeado' : x.mappingStatus === 'unmapped' ? 'Não mapeado' : 'Mapeando'}
+                                          </Badge>
+                                          {x.source ? (
+                                            <Badge variant="outline">Fonte: {x.source}</Badge>
+                                          ) : null}
+                                        </div>
+
+                                        <div className="mt-2 text-[11px] text-gray-600 flex flex-wrap gap-x-3 gap-y-1">
+                                          <span className="tabular-nums">{k ? k.toLocaleString('pt-BR', { hour12: false }) : '—'}</span>
+                                          <span className="tabular-nums">ID: {x.matchId}</span>
+                                          {mapped && x.betfair?.marketId ? <span className="tabular-nums">Market: {x.betfair.marketId}</span> : null}
+                                        </div>
+
+                                        {!mapped && x.mappingError ? (
+                                          <div className="mt-1 text-[11px] text-red-700">
+                                            {x.mappingError}
+                                          </div>
+                                        ) : null}
+
+                                        {markets.length > 0 ? (
+                                          <div className="mt-2 flex flex-wrap gap-1.5">
+                                            {markets.map((m) => (
+                                              <Badge
+                                                key={m.key}
+                                                variant={m.enabled ? 'secondary' : 'outline'}
+                                                className={cn('text-[11px] font-semibold', m.enabled ? '' : 'opacity-50 line-through')}
+                                              >
+                                                {m.label}
+                                              </Badge>
+                                            ))}
+                                          </div>
+                                        ) : null}
+                                      </div>
+                                    ) : null}
+                                  </>
+                                );
+                              })()}
                             </div>
 
                             <div className="px-3 py-2 text-right tabular-nums text-sm text-gray-800 bg-gray-50">

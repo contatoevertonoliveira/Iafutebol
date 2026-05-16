@@ -2207,6 +2207,10 @@ app.post("/make-server-1119702f/automation/betfair/queue/add", async (c) => {
       utcDate: String(body?.utcDate ?? "").trim() || existing?.utcDate || null,
       homeTeam: String(body?.homeTeam ?? "").trim() || existing?.homeTeam || null,
       awayTeam: String(body?.awayTeam ?? "").trim() || existing?.awayTeam || null,
+      homeCrest: String(body?.homeCrest ?? "").trim() || existing?.homeCrest || null,
+      awayCrest: String(body?.awayCrest ?? "").trim() || existing?.awayCrest || null,
+      scoreHome: Number.isFinite(Number(body?.scoreHome)) ? Number(body.scoreHome) : (Number.isFinite(Number(existing?.scoreHome)) ? Number(existing.scoreHome) : null),
+      scoreAway: Number.isFinite(Number(body?.scoreAway)) ? Number(body.scoreAway) : (Number.isFinite(Number(existing?.scoreAway)) ? Number(existing.scoreAway) : null),
       prediction: body?.prediction ?? existing?.prediction ?? null,
       markets: Array.isArray(existing?.markets)
         ? existing.markets
@@ -2266,6 +2270,10 @@ app.post("/automation/betfair/queue/add", async (c) => {
       utcDate: String(body?.utcDate ?? "").trim() || existing?.utcDate || null,
       homeTeam: String(body?.homeTeam ?? "").trim() || existing?.homeTeam || null,
       awayTeam: String(body?.awayTeam ?? "").trim() || existing?.awayTeam || null,
+      homeCrest: String(body?.homeCrest ?? "").trim() || existing?.homeCrest || null,
+      awayCrest: String(body?.awayCrest ?? "").trim() || existing?.awayCrest || null,
+      scoreHome: Number.isFinite(Number(body?.scoreHome)) ? Number(body.scoreHome) : (Number.isFinite(Number(existing?.scoreHome)) ? Number(existing.scoreHome) : null),
+      scoreAway: Number.isFinite(Number(body?.scoreAway)) ? Number(body.scoreAway) : (Number.isFinite(Number(existing?.scoreAway)) ? Number(existing.scoreAway) : null),
       prediction: body?.prediction ?? existing?.prediction ?? null,
       markets: Array.isArray(existing?.markets)
         ? existing.markets

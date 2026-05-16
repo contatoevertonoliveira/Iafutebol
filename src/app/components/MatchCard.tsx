@@ -627,6 +627,10 @@ export function MatchCard({
           utcDate: match.date ? new Date(match.date).toISOString() : null,
           homeTeam: match.homeTeam,
           awayTeam: match.awayTeam,
+          homeCrest: homeCrest || null,
+          awayCrest: awayCrest || null,
+          scoreHome: typeof match.result?.home === 'number' ? match.result.home : null,
+          scoreAway: typeof match.result?.away === 'number' ? match.result.away : null,
           prediction: prediction ?? null,
         }),
       });
