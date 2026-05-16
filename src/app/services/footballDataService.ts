@@ -56,6 +56,35 @@ export interface FootballMatch {
       away?: { back?: number | null; backSize?: number | null; lay?: number | null; laySize?: number | null };
     };
     oddsFetchedAt?: string | null;
+    correctScore?: {
+      marketId: string;
+      matchedVolume?: number | null;
+      prices?: Record<
+        string,
+        {
+          selectionId?: number;
+          runnerName?: string | null;
+          back?: number | null;
+          backSize?: number | null;
+          lay?: number | null;
+          laySize?: number | null;
+          impliedProb?: number | null;
+          prob?: number | null;
+        }
+      >;
+      topScores?: Array<{ score: string; back: number | null; lay: number | null; prob: number | null }>;
+      summary?: {
+        winner?: 'home' | 'draw' | 'away';
+        winnerProb?: number | null;
+        homeProb?: number | null;
+        drawProb?: number | null;
+        awayProb?: number | null;
+        bttsYesProb?: number | null;
+        over25Prob?: number | null;
+        overround?: number | null;
+      };
+      oddsFetchedAt?: string;
+    } | null;
   };
 }
 

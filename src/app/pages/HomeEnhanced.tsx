@@ -652,6 +652,32 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
     return n > 1.001 ? n : null;
   };
 
+  const normalizeScoreKey = (value: string) => {
+    const raw = String(value ?? '').trim();
+    if (!raw) return null;
+    const m = raw.match(/^(\d+)\s*[-x×]\s*(\d+)$/i) || raw.match(/^(\d+)\s*-\s*(\d+)$/i);
+    if (!m) return null;
+    return `${Number(m[1])}-${Number(m[2])}`;
+  };
+
+  const getBetfairCorrectScoreBackOdd = (m: FootballMatch | undefined, scoreKey: string | null) => {
+    if (!scoreKey) return null;
+    const raw = m?.betfair?.correctScore?.prices?.[scoreKey]?.back ?? null;
+    const v = typeof raw === 'number' ? raw : raw == null ? null : Number(raw);
+    if (!Number.isFinite(v as number)) return null;
+    const n = Number(v);
+    return n > 1.001 ? n : null;
+  };
+
+  const getBetfairCorrectScoreProb = (m: FootballMatch | undefined, scoreKey: string | null) => {
+    if (!scoreKey) return null;
+    const raw = m?.betfair?.correctScore?.prices?.[scoreKey]?.prob ?? null;
+    const v = typeof raw === 'number' ? raw : raw == null ? null : Number(raw);
+    if (!Number.isFinite(v as number)) return null;
+    const n = Number(v);
+    return n >= 0 ? n : null;
+  };
+
   const expectedValueFromProbAndOdd = (prob: number, odd: number) => {
     const p = Math.max(0.001, Math.min(0.999, Number(prob) || 0));
     const o = Math.max(1.001, Number(odd) || 0);
@@ -1273,7 +1299,18 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
         const ev =
           marketOdd != null && fairOdds != null ? expectedValueFromProbAndOdd(fairProbFromConfidence(prediction.winner.confidence), marketOdd) : null;
 
+        const scoreKey = normalizeScoreKey(prediction.correctScore.score);
+        const csBack = getBetfairCorrectScoreBackOdd(footballMatch, scoreKey);
+        const csProb = getBetfairCorrectScoreProb(footballMatch, scoreKey);
+        const csWinner = footballMatch?.betfair?.correctScore?.summary?.winner ?? null;
+        const csAlign = csWinner ? csWinner === prediction.winner.prediction : null;
+
         const showOdd = marketOdd ?? prediction.winner.odds;
+        const rankScore =
+          (typeof csProb === 'number' ? csProb * 100 : 0) +
+          (typeof ev === 'number' ? ev * 35 : 0) +
+          prediction.aiConfidence * 0.12 +
+          (csAlign === true ? 2 : csAlign === false ? -2 : 0);
         return {
           id: match.id,
           homeTeam: match.homeTeam,
@@ -1295,10 +1332,17 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
           marketOdd,
           fairOdds,
           ev,
+          csScore: scoreKey,
+          csBack,
+          csProb,
+          csAlign,
+          rankScore,
           tags: [
             'Alta Confiança',
             `${prediction.aiConfidence}% IA`,
             marketOdd != null ? `Odd Betfair ${marketOdd.toFixed(2)}` : 'Odd estimada',
+            scoreKey && csBack != null ? `CS ${scoreKey} @ ${csBack.toFixed(2)}` : scoreKey ? `CS ${scoreKey}` : 'Placar',
+            typeof csProb === 'number' ? `CS ${(csProb * 100).toFixed(1)}%` : csAlign === true ? 'CS alinhado' : csAlign === false ? 'CS diverge' : 'Recomendado',
             typeof ev === 'number' ? `Valor ${(ev * 100).toFixed(1)}%` : 'Recomendado',
           ],
         };
@@ -1312,6 +1356,9 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
     return mapped
       .filter((m) => (!preferMarket ? true : m.marketOdd != null))
       .sort((a, b) => {
+        const ar = typeof (a as any).rankScore === 'number' ? (a as any).rankScore : -999;
+        const br = typeof (b as any).rankScore === 'number' ? (b as any).rankScore : -999;
+        if (br !== ar) return br - ar;
         const ae = typeof a.ev === 'number' ? a.ev : -999;
         const be = typeof b.ev === 'number' ? b.ev : -999;
         if (be !== ae) return be - ae;
@@ -1659,6 +1706,7 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
                 awayTeam: it.match.awayTeam?.name ?? '',
                 utcDate: it.match.utcDate ?? null,
                 minFreshSeconds: it.minFreshSeconds,
+                includeCorrectScore: true,
                 force: it.force,
               }),
             });

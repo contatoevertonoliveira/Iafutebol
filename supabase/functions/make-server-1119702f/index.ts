@@ -1835,6 +1835,167 @@ const toIsoHourBucket = (utcDate: string | null) => {
   return d.toISOString().slice(0, 13);
 };
 
+const parseCorrectScoreKey = (runnerName: unknown) => {
+  const raw = String(runnerName ?? "").trim();
+  if (!raw) return null;
+  const n = raw.toLowerCase().replace(/\s+/g, " ").trim();
+
+  const m = raw.match(/^(\d+)\s*[-x×]\s*(\d+)$/i) || raw.match(/^(\d+)\s*-\s*(\d+)$/i);
+  if (m) return `${Number(m[1])}-${Number(m[2])}`;
+
+  if (n.includes("any other") && n.includes("home") && n.includes("win")) return "AOHW";
+  if (n.includes("any other") && n.includes("away") && n.includes("win")) return "AOAW";
+  if (n.includes("any other") && n.includes("draw")) return "AOD";
+
+  if (n.includes("qualquer") && n.includes("outro") && n.includes("casa")) return "AOHW";
+  if (n.includes("qualquer") && n.includes("outro") && (n.includes("visitante") || n.includes("fora"))) return "AOAW";
+  if (n.includes("qualquer") && n.includes("outro") && n.includes("empate")) return "AOD";
+
+  return null;
+};
+
+const resolveBetfairCorrectScoreMarket = async (params: { eventId: string }) => {
+  const eventId = String(params.eventId ?? "").trim();
+  if (!eventId) throw new Error("Betfair: eventId ausente (correct score)");
+
+  let sessionToken = await getBetfairSessionToken();
+  const call = async (method: string, rpcParams: any) => {
+    try {
+      return await betfairJsonRpc({ method, params: rpcParams, sessionToken });
+    } catch (e) {
+      const invalid = Boolean((e as any)?.__betfairSessionInvalid);
+      if (!invalid) throw e;
+      sessionToken = await getBetfairSessionToken({ force: true });
+      return await betfairJsonRpc({ method, params: rpcParams, sessionToken });
+    }
+  };
+
+  const catalogue = await withTimeout(
+    () =>
+      call("SportsAPING/v1.0/listMarketCatalogue", {
+        filter: { eventIds: [eventId], marketTypeCodes: ["CORRECT_SCORE"] },
+        maxResults: 1,
+        marketProjection: ["RUNNER_DESCRIPTION", "MARKET_START_TIME"],
+      }),
+    8000,
+  );
+
+  const mk = Array.isArray(catalogue) ? catalogue[0] : null;
+  const marketId = String(mk?.marketId ?? "").trim();
+  if (!marketId) throw new Error("Betfair: marketId (CORRECT_SCORE) não encontrado");
+
+  const marketBook = await withTimeout(
+    () =>
+      call("SportsAPING/v1.0/listMarketBook", {
+        marketIds: [marketId],
+        priceProjection: { priceData: ["EX_BEST_OFFERS"], virtualise: true },
+      }),
+    8000,
+  );
+
+  const book = Array.isArray(marketBook) ? marketBook[0] : null;
+  const totalMatched = Number(book?.totalMatched);
+  const runnersBook = Array.isArray(book?.runners) ? book.runners : [];
+
+  const prices: Record<string, any> = {};
+  let sumImplied = 0;
+
+  for (const rb of runnersBook) {
+    const selectionId = Number(rb?.selectionId);
+    if (!Number.isFinite(selectionId)) continue;
+
+    const runnerName =
+      (Array.isArray(mk?.runners) ? mk.runners : []).find((r: any) => Number(r?.selectionId) === selectionId)?.runnerName ??
+      rb?.runnerName;
+    const key = parseCorrectScoreKey(runnerName);
+    if (!key) continue;
+
+    const ex = rb?.ex ?? {};
+    const back0 = Array.isArray(ex?.availableToBack) ? ex.availableToBack[0] : null;
+    const lay0 = Array.isArray(ex?.availableToLay) ? ex.availableToLay[0] : null;
+    const back = back0 ? Number(back0.price) : null;
+    const lay = lay0 ? Number(lay0.price) : null;
+    const backSize = back0 ? Number(back0.size) : null;
+    const laySize = lay0 ? Number(lay0.size) : null;
+
+    const implied = back && Number.isFinite(back) && back > 1.001 ? 1 / back : 0;
+    if (implied > 0) sumImplied += implied;
+
+    prices[key] = {
+      selectionId,
+      runnerName: String(runnerName ?? "").trim() || null,
+      back: back && Number.isFinite(back) ? back : null,
+      backSize: backSize && Number.isFinite(backSize) ? backSize : null,
+      lay: lay && Number.isFinite(lay) ? lay : null,
+      laySize: laySize && Number.isFinite(laySize) ? laySize : null,
+      impliedProb: implied > 0 ? implied : null,
+      prob: null as number | null,
+    };
+  }
+
+  const safeSum = sumImplied > 0 ? sumImplied : 1;
+  for (const k of Object.keys(prices)) {
+    const implied = Number(prices[k]?.impliedProb);
+    prices[k].prob = Number.isFinite(implied) && implied > 0 ? implied / safeSum : null;
+  }
+
+  const scoreEntries = Object.entries(prices)
+    .filter(([k]) => /^\d+\-\d+$/.test(k))
+    .map(([score, v]) => ({ score, ...v }))
+    .sort((a, b) => (Number(b.prob) || 0) - (Number(a.prob) || 0))
+    .slice(0, 20);
+
+  const sumOutcome = (pred: (home: number, away: number) => boolean) => {
+    let s = 0;
+    for (const [k, v] of Object.entries(prices)) {
+      const p = Number(v?.prob);
+      if (!Number.isFinite(p) || p <= 0) continue;
+      if (k === "AOHW" || k === "AOAW" || k === "AOD") continue;
+      const m = /^(\d+)\-(\d+)$/.exec(k);
+      if (!m) continue;
+      const h = Number(m[1]);
+      const a = Number(m[2]);
+      if (!Number.isFinite(h) || !Number.isFinite(a)) continue;
+      if (pred(h, a)) s += p;
+    }
+    return s;
+  };
+
+  const homeProb = sumOutcome((h, a) => h > a) + (Number(prices["AOHW"]?.prob) || 0);
+  const awayProb = sumOutcome((h, a) => h < a) + (Number(prices["AOAW"]?.prob) || 0);
+  const drawProb = sumOutcome((h, a) => h === a) + (Number(prices["AOD"]?.prob) || 0);
+
+  const bttsYesProb = sumOutcome((h, a) => h > 0 && a > 0);
+  const over25Prob = sumOutcome((h, a) => h + a > 2.5);
+
+  const winner =
+    homeProb >= awayProb && homeProb >= drawProb ? "home" : awayProb >= drawProb ? "away" : "draw";
+  const winnerProb = winner === "home" ? homeProb : winner === "away" ? awayProb : drawProb;
+
+  return {
+    marketId,
+    matchedVolume: Number.isFinite(totalMatched) ? totalMatched : null,
+    prices,
+    topScores: scoreEntries.map((s) => ({
+      score: s.score,
+      back: s.back ?? null,
+      lay: s.lay ?? null,
+      prob: typeof s.prob === "number" ? s.prob : null,
+    })),
+    summary: {
+      winner,
+      winnerProb: Number.isFinite(winnerProb) ? winnerProb : null,
+      homeProb: Number.isFinite(homeProb) ? homeProb : null,
+      drawProb: Number.isFinite(drawProb) ? drawProb : null,
+      awayProb: Number.isFinite(awayProb) ? awayProb : null,
+      bttsYesProb: Number.isFinite(bttsYesProb) ? bttsYesProb : null,
+      over25Prob: Number.isFinite(over25Prob) ? over25Prob : null,
+      overround: Number.isFinite(sumImplied) ? sumImplied : null,
+    },
+    oddsFetchedAt: new Date().toISOString(),
+  };
+};
+
 app.post("/make-server-1119702f/betfair/match/resolve", async (c) => {
   const authError = requireBearer(c);
   if (authError) return authError;
@@ -1844,6 +2005,7 @@ app.post("/make-server-1119702f/betfair/match/resolve", async (c) => {
     const awayTeam = String(body?.awayTeam ?? "").trim();
     const utcDate = body?.utcDate == null ? null : String(body.utcDate);
     const force = Boolean(body?.force ?? false);
+    const includeCorrectScore = Boolean(body?.includeCorrectScore ?? false);
     const minFreshSecondsRaw = Number(body?.minFreshSeconds ?? 600);
     const minFreshSeconds = Math.max(0, Math.min(86_400, Number.isFinite(minFreshSecondsRaw) ? minFreshSecondsRaw : 600));
 
@@ -1860,7 +2022,9 @@ app.post("/make-server-1119702f/betfair/match/resolve", async (c) => {
       }
     }
 
-    const betfair = await resolveBetfairMatchOdds({ homeTeam, awayTeam, utcDate });
+    const base = await resolveBetfairMatchOdds({ homeTeam, awayTeam, utcDate });
+    const correctScore = includeCorrectScore ? await resolveBetfairCorrectScoreMarket({ eventId: base.eventId }) : null;
+    const betfair = includeCorrectScore ? { ...base, correctScore } : base;
     const fetchedAt = String(betfair?.oddsFetchedAt ?? new Date().toISOString());
     await kv.set(key, { betfair, fetchedAt, homeTeam, awayTeam, bucket, updatedAt: new Date().toISOString() });
     return c.json({ ok: true, betfair, cached: false, fetchedAt });
@@ -1878,6 +2042,7 @@ app.post("/betfair/match/resolve", async (c) => {
     const awayTeam = String(body?.awayTeam ?? "").trim();
     const utcDate = body?.utcDate == null ? null : String(body.utcDate);
     const force = Boolean(body?.force ?? false);
+    const includeCorrectScore = Boolean(body?.includeCorrectScore ?? false);
     const minFreshSecondsRaw = Number(body?.minFreshSeconds ?? 600);
     const minFreshSeconds = Math.max(0, Math.min(86_400, Number.isFinite(minFreshSecondsRaw) ? minFreshSecondsRaw : 600));
 
@@ -1894,7 +2059,9 @@ app.post("/betfair/match/resolve", async (c) => {
       }
     }
 
-    const betfair = await resolveBetfairMatchOdds({ homeTeam, awayTeam, utcDate });
+    const base = await resolveBetfairMatchOdds({ homeTeam, awayTeam, utcDate });
+    const correctScore = includeCorrectScore ? await resolveBetfairCorrectScoreMarket({ eventId: base.eventId }) : null;
+    const betfair = includeCorrectScore ? { ...base, correctScore } : base;
     const fetchedAt = String(betfair?.oddsFetchedAt ?? new Date().toISOString());
     await kv.set(key, { betfair, fetchedAt, homeTeam, awayTeam, bucket, updatedAt: new Date().toISOString() });
     return c.json({ ok: true, betfair, cached: false, fetchedAt });
@@ -1937,6 +2104,10 @@ app.post("/make-server-1119702f/automation/betfair/queue/add", async (c) => {
           utcDate: payload.utcDate,
         });
         payload.betfair = mapped;
+        try {
+          const cs = await resolveBetfairCorrectScoreMarket({ eventId: String(mapped?.eventId ?? "") });
+          if (payload.betfair && cs) payload.betfair.correctScore = cs;
+        } catch {}
         payload.mappingStatus = "mapped";
         payload.mappingError = null;
         payload.mappedAt = new Date().toISOString();
@@ -1985,6 +2156,10 @@ app.post("/automation/betfair/queue/add", async (c) => {
           utcDate: payload.utcDate,
         });
         payload.betfair = mapped;
+        try {
+          const cs = await resolveBetfairCorrectScoreMarket({ eventId: String(mapped?.eventId ?? "") });
+          if (payload.betfair && cs) payload.betfair.correctScore = cs;
+        } catch {}
         payload.mappingStatus = "mapped";
         payload.mappingError = null;
         payload.mappedAt = new Date().toISOString();
