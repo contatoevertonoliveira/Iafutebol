@@ -1687,7 +1687,32 @@ const resolveBetfairMatchOdds = async (params: { homeTeam: string; awayTeam: str
       return await betfairJsonRpc({ method, params: rpcParams, sessionToken });
     }
   };
-  const eventQueries = [homeTeam, awayTeam, `${homeTeam} ${awayTeam}`].filter(Boolean);
+  const stripTeamNoise = (value: string) => {
+    const n = normalizeName(value);
+    if (!n) return "";
+    const stop = new Set(["fc", "cf", "sc", "ac", "cd", "de", "da", "do", "the", "club", "clube"]);
+    return n
+      .split(" ")
+      .filter((t) => t && t.length >= 3 && !stop.has(t) && !/^\d+$/.test(t))
+      .join(" ")
+      .trim();
+  };
+
+  const qHome = stripTeamNoise(homeTeam);
+  const qAway = stripTeamNoise(awayTeam);
+  const eventQueries = Array.from(
+    new Set(
+      [
+        homeTeam,
+        awayTeam,
+        `${homeTeam} ${awayTeam}`,
+        qHome,
+        qAway,
+        `${qHome} ${qAway}`.trim(),
+        `${(qHome.split(" ")[0] ?? "").trim()} ${(qAway.split(" ")[0] ?? "").trim()}`.trim(),
+      ].map((x) => String(x ?? "").trim()).filter(Boolean),
+    ),
+  );
   let events: any[] = [];
   for (const q of eventQueries) {
     const r = await withTimeout(

@@ -571,7 +571,7 @@ export default function AutomationPage() {
             <div>
               <div className="font-semibold text-gray-900">Lista (estilo Exchange)</div>
               <div className="text-sm text-gray-600 mt-1">
-                Os jogos adicionados aparecem agrupados por data, com coluna de 1/X/2 (odds serão preenchidas quando o marketId estiver mapeado).
+                Os jogos adicionados aparecem agrupados por data, com coluna de 1/X/2 e badges com os mercados sugeridos pelos agentes.
               </div>
             </div>
             <Badge variant="outline" className="tabular-nums">
@@ -629,6 +629,7 @@ export default function AutomationPage() {
                         const canStop = x.status === 'running' || x.status === 'paused';
                         const mapped = Boolean(x.betfair?.marketId);
                         const matched = x.betfair?.matchedVolume ?? null;
+                        const markets = Array.isArray(x.markets) ? x.markets : deriveMarketsFromPrediction(x);
 
                         const pickOdds = (sideKey: 'home' | 'draw' | 'away', kind: 'back' | 'lay') => {
                           const o = x.betfair?.odds?.[sideKey] ?? null;
@@ -687,13 +688,18 @@ export default function AutomationPage() {
                                   {x.mappingError}
                                 </div>
                               ) : null}
-                              {x.prediction ? (
-                                <details className="mt-1">
-                                  <summary className="text-[11px] font-semibold text-gray-700 cursor-pointer">Insights</summary>
-                                  <pre className="mt-2 p-3 rounded-md bg-gray-900 text-gray-100 text-xs overflow-auto max-h-64">
-                                    {JSON.stringify(x.prediction, null, 2)}
-                                  </pre>
-                                </details>
+                              {markets.length > 0 ? (
+                                <div className="mt-2 flex flex-wrap gap-1.5">
+                                  {markets.map((m) => (
+                                    <Badge
+                                      key={m.key}
+                                      variant={m.enabled ? 'secondary' : 'outline'}
+                                      className={cn('text-[11px] font-semibold', m.enabled ? '' : 'opacity-50 line-through')}
+                                    >
+                                      {m.label}
+                                    </Badge>
+                                  ))}
+                                </div>
                               ) : null}
                             </div>
 
