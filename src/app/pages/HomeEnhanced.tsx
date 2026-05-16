@@ -668,21 +668,21 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
   };
 
   const generatePredictionsForMatches = async (source: ApiSource, matches: FootballMatch[], opts?: { force?: boolean }) => {
-    const storeKey = 'predictionStore_v1';
+    const storeKey = 'predictionStore_v2';
     const store = (() => {
       try {
         const raw = localStorage.getItem(storeKey);
-        if (!raw) return { version: 1 as const, items: {} as Record<string, { createdAt: string; prediction: Prediction }> };
+        if (!raw) return { version: 2 as const, items: {} as Record<string, { createdAt: string; prediction: Prediction }> };
         const parsed = JSON.parse(raw) as {
           version: number;
           items: Record<string, { createdAt: string; prediction: Prediction }>;
         };
-        if (parsed.version !== 1 || !parsed.items) {
-          return { version: 1 as const, items: {} as Record<string, { createdAt: string; prediction: Prediction }> };
+        if (parsed.version !== 2 || !parsed.items) {
+          return { version: 2 as const, items: {} as Record<string, { createdAt: string; prediction: Prediction }> };
         }
-        return { version: 1 as const, items: parsed.items };
+        return { version: 2 as const, items: parsed.items };
       } catch {
-        return { version: 1 as const, items: {} as Record<string, { createdAt: string; prediction: Prediction }> };
+        return { version: 2 as const, items: {} as Record<string, { createdAt: string; prediction: Prediction }> };
       }
     })();
 

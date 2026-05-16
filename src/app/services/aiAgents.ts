@@ -1674,8 +1674,17 @@ export class AgentEnsemble {
       .filter((x): x is NonNullable<typeof x> => Boolean(x))
       .sort((a, b) => b.qualityScore - a.qualityScore);
 
-    const best = candidates[0] ?? null;
-    if (best && best.winnerOk) return { score: best.score, confidence: best.confidence };
+    const bestAll = candidates.find((c) => c.winnerOk && c.bttsOk && c.ouOk) ?? null;
+    if (bestAll) return { score: bestAll.score, confidence: bestAll.confidence };
+
+    const bestWinnerBtts = candidates.find((c) => c.winnerOk && c.bttsOk) ?? null;
+    if (bestWinnerBtts) return { score: bestWinnerBtts.score, confidence: bestWinnerBtts.confidence };
+
+    const bestWinnerOu = candidates.find((c) => c.winnerOk && c.ouOk) ?? null;
+    if (bestWinnerOu) return { score: bestWinnerOu.score, confidence: bestWinnerOu.confidence };
+
+    const bestWinner = candidates.find((c) => c.winnerOk) ?? null;
+    if (bestWinner) return { score: bestWinner.score, confidence: bestWinner.confidence };
 
     const pickFrom = (options: string[]) => options[Math.floor(Math.random() * options.length)];
 
