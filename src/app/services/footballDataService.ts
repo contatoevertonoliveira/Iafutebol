@@ -39,6 +39,24 @@ export interface FootballMatch {
     statusShort?: string;
     extra?: number | null;
   };
+  betfair?: {
+    eventId: string | null;
+    eventName?: string | null;
+    marketId: string | null;
+    marketStartTime?: string | null;
+    runners?: {
+      homeSelectionId?: number | null;
+      drawSelectionId?: number | null;
+      awaySelectionId?: number | null;
+    };
+    matchedVolume?: number | null;
+    odds?: {
+      home?: { back?: number | null; backSize?: number | null; lay?: number | null; laySize?: number | null };
+      draw?: { back?: number | null; backSize?: number | null; lay?: number | null; laySize?: number | null };
+      away?: { back?: number | null; backSize?: number | null; lay?: number | null; laySize?: number | null };
+    };
+    oddsFetchedAt?: string | null;
+  };
 }
 
 export class FootballDataService {

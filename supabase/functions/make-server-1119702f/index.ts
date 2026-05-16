@@ -1825,6 +1825,84 @@ app.post("/betfair/matches/list", async (c) => {
   }
 });
 
+const BETFAIR_RESOLVE_CACHE_PREFIX = "betfair/resolve_cache_v1/item/";
+
+const toIsoHourBucket = (utcDate: string | null) => {
+  const v = String(utcDate ?? "").trim();
+  if (!v) return null;
+  const d = new Date(v);
+  if (!Number.isFinite(d.getTime())) return null;
+  return d.toISOString().slice(0, 13);
+};
+
+app.post("/make-server-1119702f/betfair/match/resolve", async (c) => {
+  const authError = requireBearer(c);
+  if (authError) return authError;
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const homeTeam = String(body?.homeTeam ?? "").trim();
+    const awayTeam = String(body?.awayTeam ?? "").trim();
+    const utcDate = body?.utcDate == null ? null : String(body.utcDate);
+    const force = Boolean(body?.force ?? false);
+    const minFreshSecondsRaw = Number(body?.minFreshSeconds ?? 600);
+    const minFreshSeconds = Math.max(0, Math.min(86_400, Number.isFinite(minFreshSecondsRaw) ? minFreshSecondsRaw : 600));
+
+    if (!homeTeam || !awayTeam) return c.json({ ok: false, error: "homeTeam/awayTeam obrigatórios" }, 400);
+
+    const bucket = toIsoHourBucket(utcDate);
+    const key = `${BETFAIR_RESOLVE_CACHE_PREFIX}${normalizeName(homeTeam)}__${normalizeName(awayTeam)}__${bucket ?? "na"}`;
+    const cached = force ? null : await kv.get(key);
+    const cachedAt = String(cached?.fetchedAt ?? cached?.betfair?.oddsFetchedAt ?? "").trim();
+    if (cached && cached?.betfair && cachedAt) {
+      const ageSec = (Date.now() - new Date(cachedAt).getTime()) / 1000;
+      if (Number.isFinite(ageSec) && ageSec >= 0 && ageSec < minFreshSeconds) {
+        return c.json({ ok: true, betfair: cached.betfair, cached: true, fetchedAt: cachedAt });
+      }
+    }
+
+    const betfair = await resolveBetfairMatchOdds({ homeTeam, awayTeam, utcDate });
+    const fetchedAt = String(betfair?.oddsFetchedAt ?? new Date().toISOString());
+    await kv.set(key, { betfair, fetchedAt, homeTeam, awayTeam, bucket, updatedAt: new Date().toISOString() });
+    return c.json({ ok: true, betfair, cached: false, fetchedAt });
+  } catch (error) {
+    return c.json({ ok: false, error: error.message || "Erro ao resolver jogo (Betfair)" }, 500);
+  }
+});
+
+app.post("/betfair/match/resolve", async (c) => {
+  const authError = requireBearer(c);
+  if (authError) return authError;
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const homeTeam = String(body?.homeTeam ?? "").trim();
+    const awayTeam = String(body?.awayTeam ?? "").trim();
+    const utcDate = body?.utcDate == null ? null : String(body.utcDate);
+    const force = Boolean(body?.force ?? false);
+    const minFreshSecondsRaw = Number(body?.minFreshSeconds ?? 600);
+    const minFreshSeconds = Math.max(0, Math.min(86_400, Number.isFinite(minFreshSecondsRaw) ? minFreshSecondsRaw : 600));
+
+    if (!homeTeam || !awayTeam) return c.json({ ok: false, error: "homeTeam/awayTeam obrigatórios" }, 400);
+
+    const bucket = toIsoHourBucket(utcDate);
+    const key = `${BETFAIR_RESOLVE_CACHE_PREFIX}${normalizeName(homeTeam)}__${normalizeName(awayTeam)}__${bucket ?? "na"}`;
+    const cached = force ? null : await kv.get(key);
+    const cachedAt = String(cached?.fetchedAt ?? cached?.betfair?.oddsFetchedAt ?? "").trim();
+    if (cached && cached?.betfair && cachedAt) {
+      const ageSec = (Date.now() - new Date(cachedAt).getTime()) / 1000;
+      if (Number.isFinite(ageSec) && ageSec >= 0 && ageSec < minFreshSeconds) {
+        return c.json({ ok: true, betfair: cached.betfair, cached: true, fetchedAt: cachedAt });
+      }
+    }
+
+    const betfair = await resolveBetfairMatchOdds({ homeTeam, awayTeam, utcDate });
+    const fetchedAt = String(betfair?.oddsFetchedAt ?? new Date().toISOString());
+    await kv.set(key, { betfair, fetchedAt, homeTeam, awayTeam, bucket, updatedAt: new Date().toISOString() });
+    return c.json({ ok: true, betfair, cached: false, fetchedAt });
+  } catch (error) {
+    return c.json({ ok: false, error: error.message || "Erro ao resolver jogo (Betfair)" }, 500);
+  }
+});
+
 app.post("/make-server-1119702f/automation/betfair/queue/add", async (c) => {
   const authError = requireBearer(c);
   if (authError) return authError;

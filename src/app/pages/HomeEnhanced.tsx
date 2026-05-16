@@ -70,6 +70,7 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
   const [favoriteMatchIds, setFavoriteMatchIds] = useState<string[]>([]);
   const requestedFixturesKey = 'requested_fixtures_v1';
   const isSyncingRequestedRef = useRef(false);
+  const isSyncingBetfairOddsRef = useRef(false);
   const [addMatchOpen, setAddMatchOpen] = useState(false);
   const [addMatchQuery, setAddMatchQuery] = useState('');
   const [addMatchLoading, setAddMatchLoading] = useState(false);
@@ -626,6 +627,35 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
     const normalized = (95 - c) / (95 - 40);
     const odds = 1.2 + normalized * 3.3;
     return Number(odds.toFixed(2));
+  };
+
+  const fairProbFromConfidence = (confidence: number) => {
+    const c = Math.max(1, Math.min(99, Number(confidence) || 0));
+    return c / 100;
+  };
+
+  const fairOddsFromConfidence = (confidence: number) => {
+    const p = fairProbFromConfidence(confidence);
+    return p > 0 ? 1 / p : null;
+  };
+
+  const getBetfairBackOdd = (m: FootballMatch | undefined, outcome: 'home' | 'draw' | 'away') => {
+    const raw =
+      outcome === 'home'
+        ? m?.betfair?.odds?.home?.back
+        : outcome === 'draw'
+          ? m?.betfair?.odds?.draw?.back
+          : m?.betfair?.odds?.away?.back;
+    const v = typeof raw === 'number' ? raw : raw == null ? null : Number(raw);
+    if (!Number.isFinite(v as number)) return null;
+    const n = Number(v);
+    return n > 1.001 ? n : null;
+  };
+
+  const expectedValueFromProbAndOdd = (prob: number, odd: number) => {
+    const p = Math.max(0.001, Math.min(0.999, Number(prob) || 0));
+    const o = Math.max(1.001, Number(odd) || 0);
+    return p * o - 1;
   };
 
   const consensusToPrediction = (matchId: string, consensus: AgentPrediction): Prediction => {
@@ -1229,12 +1259,21 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
       return apiSource !== 'mock' ? realPredictions[matchId] : mockPredictions.find((p) => p.matchId === matchId);
     };
 
+    const matchById = apiSource !== 'mock' ? new Map(realMatches.map((m) => [m.id.toString(), m] as const)) : null;
     const sourceMatches = filteredMatches;
 
-    return sourceMatches
+    const mapped = sourceMatches
       .map((match) => {
         const prediction = pickPrediction(match.id);
         if (!prediction) return null;
+
+        const footballMatch = matchById ? matchById.get(match.id) : undefined;
+        const marketOdd = getBetfairBackOdd(footballMatch, prediction.winner.prediction);
+        const fairOdds = fairOddsFromConfidence(prediction.winner.confidence);
+        const ev =
+          marketOdd != null && fairOdds != null ? expectedValueFromProbAndOdd(fairProbFromConfidence(prediction.winner.confidence), marketOdd) : null;
+
+        const showOdd = marketOdd ?? prediction.winner.odds;
         return {
           id: match.id,
           homeTeam: match.homeTeam,
@@ -1250,20 +1289,37 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
               : prediction.winner.prediction === 'away'
               ? `Vitória ${match.awayTeam}`
               : 'Empate',
-          odds: prediction.winner.odds,
-          potentialReturn: Math.round((prediction.winner.odds - 1) * 100),
+          odds: showOdd,
+          potentialReturn: Math.round((showOdd - 1) * 100),
           isPremium: true,
+          marketOdd,
+          fairOdds,
+          ev,
           tags: [
             'Alta Confiança',
             `${prediction.aiConfidence}% IA`,
-            'Recomendado',
+            marketOdd != null ? `Odd Betfair ${marketOdd.toFixed(2)}` : 'Odd estimada',
+            typeof ev === 'number' ? `Valor ${(ev * 100).toFixed(1)}%` : 'Recomendado',
           ],
         };
       })
       .filter((m): m is NonNullable<typeof m> => !!m)
-      .filter((m) => m.aiConfidence >= 80)
+      .filter((m) => m.aiConfidence >= 80);
+
+    const withMarket = mapped.filter((m) => m.marketOdd != null);
+    const preferMarket = withMarket.length >= 3;
+
+    return mapped
+      .filter((m) => (!preferMarket ? true : m.marketOdd != null))
+      .sort((a, b) => {
+        const ae = typeof a.ev === 'number' ? a.ev : -999;
+        const be = typeof b.ev === 'number' ? b.ev : -999;
+        if (be !== ae) return be - ae;
+        if (b.aiConfidence !== a.aiConfidence) return b.aiConfidence - a.aiConfidence;
+        return b.potentialReturn - a.potentialReturn;
+      })
       .slice(0, 5);
-  }, [apiSource, filteredMatches, realPredictions]);
+  }, [apiSource, filteredMatches, realMatches, realPredictions]);
 
   const predictionByMatchId = useMemo(() => {
     if (apiSource !== 'mock') return realPredictions;
@@ -1510,6 +1566,126 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
       );
     } catch {}
   };
+
+  const upsertBetfairIntoMatch = (matchId: string, betfair: FootballMatch['betfair']) => {
+    setRealMatches((prev) => {
+      let changed = false;
+      const next = prev.map((m) => {
+        if (m.id.toString() !== matchId) return m;
+        changed = true;
+        const updated = { ...m, betfair };
+        updateCacheMatch(matchId, updated);
+        return updated;
+      });
+      return changed ? next : prev;
+    });
+  };
+
+  const syncBetfairOddsForTopMatches = async (opts?: { maxMatches?: number }) => {
+    if (isSyncingBetfairOddsRef.current) return;
+    if (apiSource === 'mock' || apiSource === 'betfair') return;
+
+    const preds = realPredictions;
+    if (!preds || Object.keys(preds).length === 0) return;
+
+    const snapshot = realMatchesRef.current;
+    if (!Array.isArray(snapshot) || snapshot.length === 0) return;
+
+    const maxMatches = Math.max(1, Math.min(20, Number(opts?.maxMatches ?? 12) || 12));
+
+    const items = snapshot
+      .map((m) => {
+        const id = m.id.toString();
+        const p = preds[id];
+        if (!p) return null;
+        if (toMatchStatus(m.status) === 'finished') return null;
+
+        const isLive = toMatchStatus(m.status) === 'live';
+        const maxAgeSec = isLive ? 120 : 15 * 60;
+        const fetchedAt = String(m.betfair?.oddsFetchedAt ?? '').trim();
+        const fetchedMs = fetchedAt ? new Date(fetchedAt).getTime() : NaN;
+        const ageSec = Number.isFinite(fetchedMs) ? (Date.now() - fetchedMs) / 1000 : Infinity;
+        const stale = !Number.isFinite(ageSec) ? true : ageSec >= 0 && ageSec > maxAgeSec;
+
+        const marketOdd = getBetfairBackOdd(m, p.winner.prediction);
+        const needs = marketOdd == null || stale;
+
+        const fairProb = fairProbFromConfidence(p.winner.confidence);
+        const ev = marketOdd == null ? null : expectedValueFromProbAndOdd(fairProb, marketOdd);
+
+        return {
+          id,
+          aiConfidence: p.aiConfidence,
+          winnerConfidence: p.winner.confidence,
+          ev,
+          needs,
+          force: Boolean(stale),
+          minFreshSeconds: isLive ? 120 : 600,
+          match: m,
+        };
+      })
+      .filter((x): x is NonNullable<typeof x> => Boolean(x))
+      .filter((x) => x.needs)
+      .sort((a, b) => {
+        const ae = typeof a.ev === 'number' ? a.ev : -999;
+        const be = typeof b.ev === 'number' ? b.ev : -999;
+        if (be !== ae) return be - ae;
+        if (b.aiConfidence !== a.aiConfidence) return b.aiConfidence - a.aiConfidence;
+        return (b.winnerConfidence ?? 0) - (a.winnerConfidence ?? 0);
+      })
+      .slice(0, maxMatches);
+
+    if (items.length === 0) return;
+
+    isSyncingBetfairOddsRef.current = true;
+    try {
+      const { projectId, publicAnonKey } = await import('/utils/supabase/info');
+      const url = `https://${projectId}.supabase.co/functions/v1/make-server-1119702f/betfair/match/resolve`;
+      const concurrency = 4;
+
+      for (let i = 0; i < items.length; i += concurrency) {
+        const chunk = items.slice(i, i + concurrency);
+        await Promise.all(
+          chunk.map(async (it) => {
+            const res = await fetch(url, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${publicAnonKey}`,
+                apikey: publicAnonKey,
+              },
+              body: JSON.stringify({
+                homeTeam: it.match.homeTeam?.name ?? '',
+                awayTeam: it.match.awayTeam?.name ?? '',
+                utcDate: it.match.utcDate ?? null,
+                minFreshSeconds: it.minFreshSeconds,
+                force: it.force,
+              }),
+            });
+
+            const raw = await res.text().catch(() => '');
+            let data: any = null;
+            try {
+              data = raw ? JSON.parse(raw) : null;
+            } catch {
+              data = null;
+            }
+
+            if (!res.ok || !data?.ok || !data?.betfair) return;
+            upsertBetfairIntoMatch(it.id, data.betfair);
+          }),
+        );
+      }
+    } catch {
+      return;
+    } finally {
+      isSyncingBetfairOddsRef.current = false;
+    }
+  };
+
+  useEffect(() => {
+    void syncBetfairOddsForTopMatches();
+  }, [apiSource, realMatches, realPredictions]);
 
   const refreshLiveMatches = async () => {
     if (apiSource !== 'api-football') return;
