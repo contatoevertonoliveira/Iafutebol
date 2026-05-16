@@ -695,6 +695,7 @@ export default function AutomationPage() {
                               'h-full px-2 py-2 text-center text-xs tabular-nums border-l border-gray-200',
                               kind === 'back' ? 'bg-sky-50 text-sky-900' : 'bg-rose-50 text-rose-900'
                             )}
+                            style={{ fontFamily: 'var(--price-button-font-family), Tahoma, Verdana, Arial, sans-serif' }}
                           >
                             <div className="font-semibold">{formatOdd(v.price)}</div>
                             <div className="text-[10px] opacity-80">{formatSize(v.size)}</div>
