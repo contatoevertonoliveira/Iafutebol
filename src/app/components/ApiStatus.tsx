@@ -1,19 +1,15 @@
 import { useState, useEffect } from 'react';
-import { CheckCircle, XCircle, AlertCircle, Wifi, WifiOff } from 'lucide-react';
+import { CheckCircle, AlertCircle, Wifi, WifiOff } from 'lucide-react';
 import { Badge } from './ui/badge';
 import { loadApiConfig } from '../services/apiConfig';
 
 export function ApiStatus() {
-  const [hasFootballDataApi, setHasFootballDataApi] = useState(false);
   const [hasApiFootball, setHasApiFootball] = useState(false);
-  const [hasOpenLigaDb, setHasOpenLigaDb] = useState(false);
 
   useEffect(() => {
     const refresh = () => {
       const config = loadApiConfig();
-      setHasFootballDataApi(Boolean(config?.footballDataApiKey?.trim()));
       setHasApiFootball(Boolean(config?.apiFootballKey?.trim()));
-      setHasOpenLigaDb(config?.openLigaDbEnabled ?? true);
     };
 
     refresh();
@@ -33,7 +29,7 @@ export function ApiStatus() {
     };
   }, []);
 
-  if (!hasApiFootball && !hasFootballDataApi && !hasOpenLigaDb) {
+  if (!hasApiFootball) {
     return (
       <div className="bg-yellow-50 border-l-4 border-yellow-400 p-4 mb-6">
         <div className="flex items-start">
@@ -67,18 +63,6 @@ export function ApiStatus() {
               <Badge className="bg-orange-100 text-orange-800 border-orange-300">
                 <Wifi className="w-3 h-3 mr-1" />
                 API-Football.com
-              </Badge>
-            )}
-            {hasFootballDataApi && (
-              <Badge className="bg-green-100 text-green-800 border-green-300">
-                <Wifi className="w-3 h-3 mr-1" />
-                Football-data.org
-              </Badge>
-            )}
-            {hasOpenLigaDb && (
-              <Badge className="bg-blue-100 text-blue-800 border-blue-300">
-                <Wifi className="w-3 h-3 mr-1" />
-                OpenLigaDB
               </Badge>
             )}
           </div>

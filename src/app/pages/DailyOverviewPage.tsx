@@ -4,11 +4,10 @@ import { Activity, Calendar, RefreshCw, TrendingUp } from 'lucide-react';
 import { Card } from '../components/ui/card';
 import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
-import type { FootballMatch } from '../services/footballDataService';
 import type { Prediction } from '../data/mockData';
-import { AgentEnsemble, AI_AGENTS_BASE, getDynamicAgentProfiles } from '../services/aiAgents';
+import { AgentEnsemble, AI_AGENTS_BASE, getDynamicAgentProfiles, type FootballMatch } from '../services/aiAgents';
 
-type ApiSource = 'api-football' | 'football-data' | 'openligadb' | 'betfair' | 'mock';
+type ApiSource = 'api-football' | 'betfair' | 'mock';
 
 type MatchesCacheV1 = {
   version: 1;

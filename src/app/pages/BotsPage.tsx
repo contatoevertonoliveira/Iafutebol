@@ -1355,8 +1355,8 @@ const callExternalBotsAssistant = async (args: {
   userText: string;
   images?: Array<{ mime: string; base64: string }>;
 }) => {
-  const { projectId, publicAnonKey } = await import('/utils/supabase/info');
-  const baseUrl = `https://${projectId}.supabase.co/functions/v1/make-server-1119702f`;
+  const { projectId } = await import('/utils/supabase/info');
+  const baseUrl = `https://${projectId}.supabase.co/functions/v1/ai-proxy-server-1119702f`;
   const timeoutMs = args.provider === 'google' ? 90_000 : 45_000;
   const fetchWithTimeout = async (input: string, init: RequestInit) => {
     const controller = new AbortController();
@@ -1397,11 +1397,6 @@ const callExternalBotsAssistant = async (args: {
 
     const res = await fetchWithTimeout(`${baseUrl}/proxy/anthropic`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${publicAnonKey}`,
-        apikey: publicAnonKey,
-      },
       body: JSON.stringify({ url, apiKey: args.apiKey, body }),
     });
     if (!res.ok) {
@@ -1439,11 +1434,6 @@ const callExternalBotsAssistant = async (args: {
 
     const res = await fetchWithTimeout(`${baseUrl}/proxy/google`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${publicAnonKey}`,
-        apikey: publicAnonKey,
-      },
       body: JSON.stringify({ url, apiKey: args.apiKey, body }),
     });
     if (!res.ok) {
@@ -1500,11 +1490,6 @@ const callExternalBotsAssistant = async (args: {
   const endpoint = args.provider === 'openai' ? `${baseUrl}/proxy/openai` : `${baseUrl}/proxy/deepseek`;
   const res = await fetchWithTimeout(endpoint, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${publicAnonKey}`,
-      apikey: publicAnonKey,
-    },
     body: JSON.stringify({ url, apiKey: args.apiKey, body }),
   });
   if (!res.ok) {

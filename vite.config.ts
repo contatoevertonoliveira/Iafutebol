@@ -35,7 +35,6 @@ export default defineConfig({
   assetsInclude: ['**/*.svg', '**/*.csv'],
   
   server: {
-    port: 3007,
     host: '0.0.0.0',
     allowedHosts: [
       'futebol.felixsystems.com.br',
@@ -45,8 +44,7 @@ export default defineConfig({
     ],
     // Configuração para HMR funcionar com domínio customizado
     hmr: {
-      host: 'localhost',
-      port: 3007
+      host: 'localhost'
     },
     // Headers CORS para desenvolvimento
     headers: {
@@ -56,21 +54,6 @@ export default defineConfig({
     },
     // Proxy para APIs externas (resolve CORS)
     proxy: {
-      '/api/proxy/football-data': {
-        target: 'https://api.football-data.org/v4',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/api\/proxy\/football-data/, ''),
-        configure: (proxy, options) => {
-          proxy.on('proxyReq', (proxyReq, req, res) => {
-            // Adiciona headers da API
-            if (req.body && req.body.headers) {
-              Object.entries(req.body.headers).forEach(([key, value]) => {
-                if (value) proxyReq.setHeader(key, value as string);
-              });
-            }
-          });
-        }
-      },
       '/api/proxy/api-football': {
         target: 'https://v3.football.api-sports.io',
         changeOrigin: true,

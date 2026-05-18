@@ -9,7 +9,6 @@ import { Badge } from '../components/ui/badge';
 import {
   saveApiConfig,
   loadApiConfig,
-  validateFootballDataApiKey,
   validateApiFootballKey,
   ApiConfig
 } from '../services/apiConfig';
@@ -25,9 +24,7 @@ type SettingsProps = {
 export default function Settings({ initialTab = 'apis', mode = 'default' }: SettingsProps) {
   const [tab, setTab] = useState<'apis' | 'competitions' | 'betfair'>(initialTab);
   const [config, setConfig] = useState<ApiConfig>({
-    footballDataApiKey: '',
     apiFootballKey: '',
-    openLigaDbEnabled: true,
     kaggleUsername: '',
     kaggleApiKey: '',
     agentTrainingEnabled: false,
@@ -43,8 +40,6 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
     googleApiKey: '',
     googleModel: 'gemma-4-26b-a4b-it',
   });
-  const [isValidating, setIsValidating] = useState(false);
-  const [validationStatus, setValidationStatus] = useState<'idle' | 'valid' | 'invalid'>('idle');
   const [isValidatingApiFootball, setIsValidatingApiFootball] = useState(false);
   const [validationStatusApiFootball, setValidationStatusApiFootball] = useState<'idle' | 'valid' | 'invalid'>('idle');
   const [isSaving, setIsSaving] = useState(false);
@@ -57,6 +52,14 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
     fetchedAt: string | null;
     eventTypesCount: number | null;
   }>({ status: 'idle', message: '', tokenPreview: null, fetchedAt: null, eventTypesCount: null });
+  const [betfairFunds, setBetfairFunds] = useState<{
+    status: 'idle' | 'loading' | 'ok' | 'error';
+    availableToBetBalance: number | null;
+    exposure: number | null;
+    currencyCode: string | null;
+    fetchedAt: string | null;
+    message: string;
+  }>({ status: 'idle', availableToBetBalance: null, exposure: null, currencyCode: null, fetchedAt: null, message: '' });
   const [leagues, setLeagues] = useState<ApiFootballLeague[]>([]);
   const [isLoadingLeagues, setIsLoadingLeagues] = useState(false);
   const [leagueSearch, setLeagueSearch] = useState('');
@@ -64,7 +67,7 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
   const [countryQuery, setCountryQuery] = useState('');
   const [leaguesLastSource, setLeaguesLastSource] = useState<'api' | 'fixtures' | 'cache' | 'none'>('none');
   const [leaguesLastError, setLeaguesLastError] = useState<string>('');
-  const [mobileExpandedApi, setMobileExpandedApi] = useState<'api-football' | 'football-data' | 'openligadb' | null>(null);
+  const [mobileExpandedApi, setMobileExpandedApi] = useState<'api-football' | null>(null);
   const [leaguesProgress, setLeaguesProgress] = useState<{ page: number; total: number; count: number } | null>(null);
 
   const googleModelPresets = ['gemma-4-26b-a4b-it', 'gemma-4-31b-it'] as const;
@@ -78,14 +81,9 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
     }
     setIsValidatingGoogleKey(true);
     try {
-      const { projectId, publicAnonKey } = await import('/utils/supabase/info');
-      const res = await fetch(`https://${projectId}.supabase.co/functions/v1/make-server-1119702f/validate-api/google-gemini`, {
+      const { projectId } = await import('/utils/supabase/info');
+      const res = await fetch(`https://${projectId}.supabase.co/functions/v1/validate-server-1119702f/validate-api/google-gemini`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${publicAnonKey}`,
-          apikey: publicAnonKey,
-        },
         body: JSON.stringify({ apiKey, model }),
       });
 
@@ -115,14 +113,9 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
     if (betfairTest.status === 'testing') return;
     setBetfairTest({ status: 'testing', message: 'Testando…', tokenPreview: null, fetchedAt: null, eventTypesCount: null });
     try {
-      const { projectId, publicAnonKey } = await import('/utils/supabase/info');
-      const sessionRes = await fetch(`https://${projectId}.supabase.co/functions/v1/make-server-1119702f/betfair/session`, {
+      const { projectId } = await import('/utils/supabase/info');
+      const sessionRes = await fetch(`https://${projectId}.supabase.co/functions/v1/betfair-core-server-1119702f/betfair/session`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${publicAnonKey}`,
-          apikey: publicAnonKey,
-        },
         body: '{}',
       });
 
@@ -138,13 +131,8 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
         throw new Error(err);
       }
 
-      const rpcRes = await fetch(`https://${projectId}.supabase.co/functions/v1/make-server-1119702f/betfair/rpc`, {
+      const rpcRes = await fetch(`https://${projectId}.supabase.co/functions/v1/betfair-core-server-1119702f/betfair/rpc`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${publicAnonKey}`,
-          apikey: publicAnonKey,
-        },
         body: JSON.stringify({
           method: 'SportsAPING/v1.0/listEventTypes',
           params: { filter: {} },
@@ -190,6 +178,51 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
       toast.error('Falha ao conectar na Betfair', { description: hint ? hint : msg.slice(0, 220) });
     }
   };
+
+  const fetchBetfairFunds = async () => {
+    if (betfairFunds.status === 'loading') return;
+    const adminToken = String(config.automationAdminToken ?? '').trim();
+    if (!adminToken) {
+      toast.error('Informe o Automation Admin Token em Configurações → Betfair.');
+      return;
+    }
+    setBetfairFunds((prev) => ({ ...prev, status: 'loading', message: 'Buscando…' }));
+    try {
+      const { projectId } = await import('/utils/supabase/info');
+      const res = await fetch(`https://${projectId}.supabase.co/functions/v1/betfair-core-server-1119702f/automation/betfair/account/funds`, {
+        method: 'POST',
+        body: JSON.stringify({ adminToken }),
+      });
+      const raw = await res.text().catch(() => '');
+      const data = raw ? JSON.parse(raw) : null;
+      if (!res.ok || !data?.ok) throw new Error(String(data?.error ?? `HTTP ${res.status} ${res.statusText}`));
+
+      const available = typeof data?.summary?.availableToBetBalance === 'number' ? data.summary.availableToBetBalance : null;
+      const exposure = typeof data?.summary?.exposure === 'number' ? data.summary.exposure : null;
+      const currencyCode = typeof data?.summary?.currencyCode === 'string' ? data.summary.currencyCode : null;
+      const fetchedAt = typeof data?.fetchedAt === 'string' ? data.fetchedAt : null;
+
+      setBetfairFunds({
+        status: 'ok',
+        availableToBetBalance: available,
+        exposure,
+        currencyCode,
+        fetchedAt,
+        message: 'Banca carregada',
+      });
+
+      if (typeof available === 'number' && Number.isFinite(available)) {
+        setConfig((prev) => ({ ...prev, betfairBankroll: available }));
+        toast.success('Banca atualizada', { description: `Disponível para apostar: ${available.toFixed(2)} ${currencyCode ?? ''}`.trim() });
+      } else {
+        toast.error('Falha ao ler saldo disponível da Betfair');
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setBetfairFunds((prev) => ({ ...prev, status: 'error', message: msg.slice(0, 220) }));
+      toast.error('Falha ao buscar banca da Betfair', { description: msg.slice(0, 220) });
+    }
+  };
   const testGoogleLlm = async () => {
     if (isTestingLlm) return;
     const apiKey = String(config.googleApiKey ?? '').trim();
@@ -204,7 +237,7 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
     }
     setIsTestingLlm(true);
     try {
-      const { projectId, publicAnonKey } = await import('/utils/supabase/info');
+      const { projectId } = await import('/utils/supabase/info');
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
       const body = {
         systemInstruction: {
@@ -234,13 +267,8 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
         },
       };
 
-      const res = await fetch(`https://${projectId}.supabase.co/functions/v1/make-server-1119702f/proxy/google`, {
+      const res = await fetch(`https://${projectId}.supabase.co/functions/v1/ai-proxy-server-1119702f/proxy/google`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${publicAnonKey}`,
-          'apikey': publicAnonKey,
-        },
         body: JSON.stringify({ url, apiKey, body }),
       });
 
@@ -357,16 +385,11 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
 
   const readLeaguesCacheFromSupabase = async (country?: string) => {
     try {
-      const { projectId, publicAnonKey } = await import('/utils/supabase/info');
+      const { projectId } = await import('/utils/supabase/info');
       const res = await fetch(
-        `https://${projectId}.supabase.co/functions/v1/make-server-1119702f/cache/api-football/leagues/get`,
+        `https://${projectId}.supabase.co/functions/v1/cache-server-1119702f/cache/api-football/leagues/get`,
         {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${publicAnonKey}`,
-            'apikey': publicAnonKey,
-          },
           body: JSON.stringify({ country: country ?? null }),
         },
       );
@@ -384,16 +407,11 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
 
   const writeLeaguesCacheToSupabase = async (payload: { country?: string; fetchedAt: string; items: ApiFootballLeague[] }) => {
     try {
-      const { projectId, publicAnonKey } = await import('/utils/supabase/info');
+      const { projectId } = await import('/utils/supabase/info');
       await fetch(
-        `https://${projectId}.supabase.co/functions/v1/make-server-1119702f/cache/api-football/leagues/set`,
+        `https://${projectId}.supabase.co/functions/v1/cache-server-1119702f/cache/api-football/leagues/set`,
         {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${publicAnonKey}`,
-            'apikey': publicAnonKey,
-          },
           body: JSON.stringify({
             country: payload.country ?? null,
             payload: { fetchedAt: payload.fetchedAt, items: payload.items },
@@ -512,9 +530,6 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
     const loaded = loadApiConfig();
     if (loaded) {
       setConfig(loaded);
-      if (loaded.footballDataApiKey) {
-        setValidationStatus('valid');
-      }
       if (loaded.apiFootballKey) {
         setValidationStatusApiFootball('valid');
       }
@@ -542,40 +557,6 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
 
     void fetchLeagues();
   }, [tab, config.apiFootballKey]);
-
-  const handleValidateApiKey = async () => {
-    if (!config.footballDataApiKey.trim()) {
-      toast.error('Por favor, insira uma API key');
-      return;
-    }
-
-    setIsValidating(true);
-    setValidationStatus('idle');
-
-    try {
-      console.log('🔄 Iniciando validação da Football-Data API...');
-      const isValid = await validateFootballDataApiKey(config.footballDataApiKey);
-      setValidationStatus(isValid ? 'valid' : 'invalid');
-
-      if (isValid) {
-        toast.success('✅ API key validada com sucesso!', {
-          description: 'Verifique o console (F12) para mais detalhes'
-        });
-      } else {
-        toast.error('❌ API key inválida', {
-          description: 'Verifique o console (F12) para mais informações'
-        });
-      }
-    } catch (error) {
-      setValidationStatus('invalid');
-      console.error('Erro completo:', error);
-      toast.error('Erro ao validar API key', {
-        description: 'Verifique o console (F12) para detalhes'
-      });
-    } finally {
-      setIsValidating(false);
-    }
-  };
 
   const handleValidateApiFootballKey = async () => {
     if (!config.apiFootballKey.trim()) {
@@ -819,10 +800,8 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
   }
 
   const hasApiFootball = Boolean(config.apiFootballKey?.trim());
-  const hasFootballData = Boolean(config.footballDataApiKey?.trim());
-  const hasOpenLigaDb = config.openLigaDbEnabled ?? true;
-  const activeSourcesCount = Number(hasApiFootball) + Number(hasFootballData) + Number(hasOpenLigaDb);
-  const apiOverallStatus = activeSourcesCount > 0 ? 'Online' : 'Offline';
+  const activeSourcesCount = hasApiFootball ? 2 : 1;
+  const apiOverallStatus = hasApiFootball ? 'Online' : 'Parcial';
 
   const MobileApiCard = ({
     title,
@@ -976,72 +955,6 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
             </div>
           </div>
         )}
-
-        <MobileApiCard
-          title="Football-Data.org"
-          badgeText="FREE TIER"
-          badgeClassName="bg-gray-100 text-gray-700 border-gray-200"
-          statusText={hasFootballData ? (validationStatus === 'invalid' ? 'Inválida' : 'Ativa') : 'Desativada'}
-          statusTone={hasFootballData ? (validationStatus === 'invalid' ? 'warn' : 'ok') : 'off'}
-          isConfigured={hasFootballData}
-          onOpenSettings={() => setMobileExpandedApi((prev) => (prev === 'football-data' ? null : 'football-data'))}
-          onDisconnect={
-            hasFootballData
-              ? () => {
-                  setConfig({ ...config, footballDataApiKey: '' });
-                  setValidationStatus('idle');
-                  toast.success('Football-Data removida');
-                }
-              : undefined
-          }
-        />
-
-        {mobileExpandedApi === 'football-data' && (
-          <div className="bg-white border border-gray-200 rounded-2xl shadow-sm p-4">
-            <div className="text-sm font-bold text-gray-900 mb-3">Configurar Football-Data.org</div>
-            <Label htmlFor="mobile_footballDataApiKey">API Key</Label>
-            <div className="flex gap-2 mt-2">
-              <Input
-                id="mobile_footballDataApiKey"
-                type="password"
-                placeholder="Insira sua API key"
-                value={config.footballDataApiKey}
-                onChange={(e) => {
-                  setConfig({ ...config, footballDataApiKey: e.target.value });
-                  setValidationStatus('idle');
-                }}
-              />
-              <Button variant="outline" disabled={isValidating || !config.footballDataApiKey.trim()} onClick={handleValidateApiKey}>
-                {isValidating ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Validar'}
-              </Button>
-            </div>
-          </div>
-        )}
-
-        <div className="bg-white border border-gray-200 rounded-2xl shadow-sm">
-          <div className="px-4 py-4 flex items-start justify-between gap-3">
-            <div className="flex items-start gap-3 min-w-0">
-              <div className="w-12 h-12 rounded-2xl bg-gray-100 border border-gray-200 shrink-0 overflow-hidden">
-                <div className="w-full h-full bg-gradient-to-br from-blue-200 to-blue-50" />
-              </div>
-              <div className="min-w-0">
-                <div className="font-semibold text-gray-900 truncate">OpenLigaDB</div>
-                <div className="mt-2 text-[11px] text-gray-600">
-                  <div className="text-gray-500">Status</div>
-                  <div className={`font-semibold ${hasOpenLigaDb ? 'text-green-700' : 'text-gray-600'}`}>
-                    {hasOpenLigaDb ? 'Ativa' : 'Desativada'}
-                  </div>
-                </div>
-              </div>
-            </div>
-            <Switch
-              checked={hasOpenLigaDb}
-              onCheckedChange={(checked) => {
-                setConfig({ ...config, openLigaDbEnabled: checked });
-              }}
-            />
-          </div>
-        </div>
       </div>
 
       <div className="space-y-3">
@@ -1409,6 +1322,554 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
                   </div>
                 </div>
               </div>
+
+              <div className="mt-6 border-t pt-4">
+                <div className="text-sm font-semibold text-gray-900">Banca por mercado (percentual)</div>
+                <div className="text-sm text-gray-600 mt-1">
+                  Define quanto da banca total cada mercado pode usar por jogo (ex.: Correct Score 10%).
+                </div>
+
+                {(() => {
+                  const bankroll = Number(config.betfairBankroll ?? 0);
+                  const perc = (config.betfairMarketPercents && typeof config.betfairMarketPercents === 'object') ? config.betfairMarketPercents : {};
+                  const keys: Array<{ key: string; label: string }> = [
+                    { key: 'correctScore', label: 'Correct Score (Placar Correto)' },
+                    { key: 'winner', label: 'Match Odds (1X2)' },
+                    { key: 'overUnder', label: 'Over/Under' },
+                    { key: 'btts', label: 'Ambas marcam (BTTS)' },
+                    { key: 'asianHandicap', label: 'Asian Handicap' },
+                    { key: 'firstHalf', label: '1º tempo' },
+                    { key: 'secondHalf', label: '2º tempo' },
+                  ];
+                  const totalPct = keys.reduce((acc, x) => acc + (Number(perc[x.key]) || 0), 0);
+
+                  const setPct = (k: string, v: number) => {
+                    const next = {
+                      ...(config.betfairMarketPercents ?? {}),
+                      [k]: v,
+                    };
+                    setConfig({ ...config, betfairMarketPercents: next });
+                  };
+
+                  return (
+                    <div className="mt-4 space-y-4">
+                      <div className="flex items-center justify-between gap-3 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
+                        <div className="text-sm text-gray-700">
+                          {betfairFunds.status === 'ok' && typeof betfairFunds.availableToBetBalance === 'number'
+                            ? `Betfair disponível: ${betfairFunds.availableToBetBalance.toFixed(2)} ${betfairFunds.currencyCode ?? ''}`.trim()
+                            : 'Betfair disponível: —'}
+                          {betfairFunds.fetchedAt ? (
+                            <div className="text-[11px] text-gray-600 tabular-nums mt-1">{betfairFunds.fetchedAt}</div>
+                          ) : null}
+                        </div>
+                        <Button variant="outline" onClick={fetchBetfairFunds} disabled={betfairFunds.status === 'loading'}>
+                          {betfairFunds.status === 'loading' ? 'Buscando…' : 'Buscar banca na Betfair'}
+                        </Button>
+                      </div>
+
+                      <div className="grid md:grid-cols-3 gap-3">
+                        <div className="md:col-span-2">
+                          <Label htmlFor="betfairBankroll">Banca total (R$)</Label>
+                          <Input
+                            id="betfairBankroll"
+                            inputMode="decimal"
+                            placeholder="Ex: 1000"
+                            value={String(config.betfairBankroll ?? '')}
+                            onChange={(e) => {
+                              const raw = String(e.target.value ?? '').replace(',', '.');
+                              const n = Number(raw);
+                              setConfig({ ...config, betfairBankroll: Number.isFinite(n) ? n : 0 });
+                            }}
+                            className="mt-2"
+                          />
+                        </div>
+                        <div className="bg-gray-50 border border-gray-200 rounded-lg p-3">
+                          <div className="text-xs text-gray-600">Soma (%)</div>
+                          <div className={`mt-1 font-semibold tabular-nums ${totalPct > 100 ? 'text-red-700' : 'text-gray-900'}`}>
+                            {totalPct.toFixed(2)}%
+                          </div>
+                          <div className="text-[11px] text-gray-600 mt-1">
+                            {totalPct > 100 ? 'Ajuste para no máximo 100%.' : 'OK'}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="grid md:grid-cols-2 gap-3">
+                        {keys.map((x) => {
+                          const p = Number(perc[x.key]) || 0;
+                          const budget = Number.isFinite(bankroll) && bankroll > 0 ? (bankroll * p) / 100 : 0;
+                          return (
+                            <div key={x.key} className="border border-gray-200 rounded-lg p-3 bg-white">
+                              <div className="flex items-start justify-between gap-3">
+                                <div className="min-w-0">
+                                  <div className="text-sm font-semibold text-gray-900 truncate">{x.label}</div>
+                                  <div className="text-[11px] text-gray-600 tabular-nums mt-1">
+                                    Disponível por jogo: R$ {budget.toFixed(2)}
+                                  </div>
+                                </div>
+                                <div className="w-28 shrink-0 text-right">
+                                  <Label htmlFor={`pct_${x.key}`}>%</Label>
+                                  <Input
+                                    id={`pct_${x.key}`}
+                                    inputMode="decimal"
+                                    value={String(p)}
+                                    onChange={(e) => {
+                                      const raw = String(e.target.value ?? '').replace(',', '.');
+                                      const n = Number(raw);
+                                      const v = Number.isFinite(n) ? Math.min(100, Math.max(0, n)) : 0;
+                                      setPct(x.key, v);
+                                    }}
+                                    className="mt-2"
+                                  />
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      <div className="flex justify-end">
+                        <Button onClick={handleSave} disabled={isSaving || totalPct > 100}>
+                          {isSaving ? 'Salvando…' : 'Salvar banca por mercado'}
+                        </Button>
+                      </div>
+                    </div>
+                  );
+                })()}
+              </div>
+
+              <div className="mt-6 border-t pt-4">
+                <div className="text-sm font-semibold text-gray-900">Limites dos robôs</div>
+                <div className="text-sm text-gray-600 mt-1">
+                  Ajusta os parâmetros operacionais dos robôs (independentes das previsões).
+                </div>
+
+                {(() => {
+                  const raw = (config.betfairRobotLimits && typeof config.betfairRobotLimits === 'object') ? config.betfairRobotLimits : {};
+                  const scalping = (raw as any)?.scalpingGoals && typeof (raw as any).scalpingGoals === 'object' ? (raw as any).scalpingGoals : {};
+                  const ticks = (raw as any)?.scalpingTicks && typeof (raw as any).scalpingTicks === 'object' ? (raw as any).scalpingTicks : {};
+                  const over = (raw as any)?.overGoalsLimit && typeof (raw as any).overGoalsLimit === 'object' ? (raw as any).overGoalsLimit : {};
+
+                  const setLimits = (patch: any) => {
+                    const next = {
+                      ...(config.betfairRobotLimits ?? {}),
+                      ...(patch ?? {}),
+                    };
+                    setConfig({ ...config, betfairRobotLimits: next });
+                  };
+
+                  const setScalping = (patch: any) => {
+                    setLimits({
+                      scalpingGoals: {
+                        ...(config.betfairRobotLimits?.scalpingGoals ?? {}),
+                        ...(patch ?? {}),
+                      },
+                    });
+                  };
+
+                  const setTicks = (patch: any) => {
+                    setLimits({
+                      scalpingTicks: {
+                        ...(config.betfairRobotLimits?.scalpingTicks ?? {}),
+                        ...(patch ?? {}),
+                      },
+                    });
+                  };
+
+                  const setOver = (patch: any) => {
+                    setLimits({
+                      overGoalsLimit: {
+                        ...(config.betfairRobotLimits?.overGoalsLimit ?? {}),
+                        ...(patch ?? {}),
+                      },
+                    });
+                  };
+
+                  const sgProfitPct = Number(scalping?.profitTargetPct);
+                  const sgStakePct = Number(scalping?.stakePct);
+                  const sgEntryOffsetTicks = Number(scalping?.entryOffsetTicks);
+                  const sgSecondsToWaitMatch = Number(scalping?.secondsToWaitMatch);
+                  const stTargetTicks = Number(ticks?.targetTicks);
+                  const stEntryOffsetTicks = Number(ticks?.entryOffsetTicks);
+                  const stMaxSpreadTicks = Number(ticks?.maxSpreadTicks);
+                  const stMinSecondsBetweenCycles = Number(ticks?.minSecondsBetweenCycles);
+                  const stStakePct = Number(ticks?.stakePct);
+                  const stMaxCycles = Number(ticks?.maxCycles);
+                  const stSecondsToWaitMatch = Number(ticks?.secondsToWaitMatch);
+                  const ogMinOdds = Number(over?.minOdds);
+                  const ogMaxEntries = Number(over?.maxEntries);
+                  const ogProfitPct = Number(over?.profitTargetPct);
+                  const ogMinDelta = Number(over?.minDeltaTraded);
+                  const ogDominance = Number(over?.dominanceRatio);
+                  const ogMinSeconds = Number(over?.minSecondsBetweenEntries);
+                  const ogStakePct = Number(over?.stakePct);
+                  const ogEntryOffsetTicks = Number(over?.entryOffsetTicks);
+                  const ogSecondsToWaitMatch = Number(over?.secondsToWaitMatch);
+
+                  return (
+                    <div className="mt-4 space-y-4">
+                      <div className="rounded-lg border border-gray-200 bg-white p-3">
+                        <div className="text-sm font-semibold text-gray-900">Scalping Gol Acima</div>
+                        <div className="text-xs text-gray-600 mt-1">Cashout automático quando atingir a meta de lucro.</div>
+                        <div className="mt-3 grid md:grid-cols-3 gap-3">
+                          <div>
+                            <Label htmlFor="sg_profitTargetPct">Meta de lucro (%)</Label>
+                            <Input
+                              id="sg_profitTargetPct"
+                              inputMode="decimal"
+                              placeholder="Ex: 10"
+                              value={Number.isFinite(sgProfitPct) ? String(Math.round(sgProfitPct * 10000) / 100) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(0, Math.min(100, n)) / 100 : 0.1;
+                                setScalping({ profitTargetPct: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+                          <div>
+                            <Label htmlFor="sg_stakePct">Stake (% da cota)</Label>
+                            <Input
+                              id="sg_stakePct"
+                              inputMode="decimal"
+                              placeholder="Ex: 100"
+                              value={Number.isFinite(sgStakePct) ? String(Math.round(sgStakePct * 10000) / 100) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(1, Math.min(100, n)) / 100 : 1;
+                                setScalping({ stakePct: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+                          <div>
+                            <Label htmlFor="sg_entryOffsetTicks">Ticks de entrada (±)</Label>
+                            <Input
+                              id="sg_entryOffsetTicks"
+                              inputMode="numeric"
+                              placeholder="Ex: 2"
+                              value={Number.isFinite(sgEntryOffsetTicks) ? String(Math.max(-10, Math.min(10, Math.trunc(sgEntryOffsetTicks)))) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(-10, Math.min(10, Math.trunc(n))) : 2;
+                                setScalping({ entryOffsetTicks: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+                          <div>
+                            <Label htmlFor="sg_secondsToWaitMatch">Esperar corresponder (s)</Label>
+                            <Input
+                              id="sg_secondsToWaitMatch"
+                              inputMode="numeric"
+                              placeholder="Ex: 10"
+                              value={Number.isFinite(sgSecondsToWaitMatch) ? String(Math.max(1, Math.min(120, Math.floor(sgSecondsToWaitMatch)))) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(1, Math.min(120, Math.floor(n))) : 10;
+                                setScalping({ secondsToWaitMatch: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="rounded-lg border border-gray-200 bg-white p-3">
+                        <div className="text-sm font-semibold text-gray-900">Scalping em Ticks</div>
+                        <div className="text-xs text-gray-600 mt-1">Scalping no Under 0.5 acima do placar (0x0 → U1.5, 1 gol → U2.5, …).</div>
+                        <div className="mt-3 grid md:grid-cols-3 gap-3">
+                          <div>
+                            <Label htmlFor="st_targetTicks">Ticks por ciclo</Label>
+                            <Input
+                              id="st_targetTicks"
+                              inputMode="numeric"
+                              placeholder="Ex: 10"
+                              value={Number.isFinite(stTargetTicks) ? String(Math.max(1, Math.floor(stTargetTicks))) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(1, Math.min(50, Math.floor(n))) : 10;
+                                setTicks({ targetTicks: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="st_entryOffsetTicks">Ticks de entrada (±)</Label>
+                            <Input
+                              id="st_entryOffsetTicks"
+                              inputMode="numeric"
+                              placeholder="Ex: 2"
+                              value={Number.isFinite(stEntryOffsetTicks) ? String(Math.max(-10, Math.min(10, Math.trunc(stEntryOffsetTicks)))) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(-10, Math.min(10, Math.trunc(n))) : 2;
+                                setTicks({ entryOffsetTicks: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="st_maxSpreadTicks">Spread máx. (ticks)</Label>
+                            <Input
+                              id="st_maxSpreadTicks"
+                              inputMode="numeric"
+                              placeholder="Ex: 2"
+                              value={Number.isFinite(stMaxSpreadTicks) ? String(Math.max(0, Math.floor(stMaxSpreadTicks))) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(0, Math.min(10, Math.floor(n))) : 2;
+                                setTicks({ maxSpreadTicks: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="st_minSecondsBetweenCycles">Cooldown (s)</Label>
+                            <Input
+                              id="st_minSecondsBetweenCycles"
+                              inputMode="numeric"
+                              placeholder="Ex: 8"
+                              value={Number.isFinite(stMinSecondsBetweenCycles) ? String(Math.max(0, Math.floor(stMinSecondsBetweenCycles))) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(0, Math.min(600, Math.floor(n))) : 8;
+                                setTicks({ minSecondsBetweenCycles: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+                          <div>
+                            <Label htmlFor="st_secondsToWaitMatch">Esperar corresponder (s)</Label>
+                            <Input
+                              id="st_secondsToWaitMatch"
+                              inputMode="numeric"
+                              placeholder="Ex: 10"
+                              value={Number.isFinite(stSecondsToWaitMatch) ? String(Math.max(1, Math.min(120, Math.floor(stSecondsToWaitMatch)))) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(1, Math.min(120, Math.floor(n))) : 10;
+                                setTicks({ secondsToWaitMatch: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="st_stakePct">Stake (% da cota)</Label>
+                            <Input
+                              id="st_stakePct"
+                              inputMode="decimal"
+                              placeholder="Ex: 100"
+                              value={Number.isFinite(stStakePct) ? String(Math.round(stStakePct * 10000) / 100) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(1, Math.min(100, n)) / 100 : 1;
+                                setTicks({ stakePct: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="st_maxCycles">Máx. ciclos</Label>
+                            <Input
+                              id="st_maxCycles"
+                              inputMode="numeric"
+                              placeholder="Ex: 50"
+                              value={Number.isFinite(stMaxCycles) ? String(Math.max(1, Math.floor(stMaxCycles))) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(1, Math.min(500, Math.floor(n))) : 50;
+                                setTicks({ maxCycles: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="rounded-lg border border-gray-200 bg-white p-3">
+                        <div className="text-sm font-semibold text-gray-900">Over Gols Limite</div>
+                        <div className="text-xs text-gray-600 mt-1">Entradas por leitura de volume no próximo Over (limite de gols).</div>
+
+                        <div className="mt-3 grid md:grid-cols-3 gap-3">
+                          <div>
+                            <Label htmlFor="og_minOdds">Odd mínima</Label>
+                            <Input
+                              id="og_minOdds"
+                              inputMode="decimal"
+                              placeholder="Ex: 1.30"
+                              value={Number.isFinite(ogMinOdds) ? String(ogMinOdds) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(1.01, Math.min(10, n)) : 1.3;
+                                setOver({ minOdds: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="og_maxEntries">Máx. entradas</Label>
+                            <Input
+                              id="og_maxEntries"
+                              inputMode="numeric"
+                              placeholder="Ex: 3"
+                              value={Number.isFinite(ogMaxEntries) ? String(Math.max(0, Math.floor(ogMaxEntries))) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(1, Math.min(10, Math.floor(n))) : 3;
+                                setOver({ maxEntries: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="og_profitTargetPct">Meta lucro (%)</Label>
+                            <Input
+                              id="og_profitTargetPct"
+                              inputMode="decimal"
+                              placeholder="Ex: 2"
+                              value={Number.isFinite(ogProfitPct) ? String(Math.round(ogProfitPct * 10000) / 100) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(0, Math.min(100, n)) / 100 : 0.02;
+                                setOver({ profitTargetPct: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="og_minDeltaTraded">Delta volume mín.</Label>
+                            <Input
+                              id="og_minDeltaTraded"
+                              inputMode="decimal"
+                              placeholder="Ex: 200"
+                              value={Number.isFinite(ogMinDelta) ? String(ogMinDelta) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(0, Math.min(1_000_000, n)) : 200;
+                                setOver({ minDeltaTraded: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="og_dominanceRatio">Dominância (x)</Label>
+                            <Input
+                              id="og_dominanceRatio"
+                              inputMode="decimal"
+                              placeholder="Ex: 1.25"
+                              value={Number.isFinite(ogDominance) ? String(ogDominance) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(1.01, Math.min(10, n)) : 1.25;
+                                setOver({ dominanceRatio: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="og_minSecondsBetweenEntries">Cooldown (s)</Label>
+                            <Input
+                              id="og_minSecondsBetweenEntries"
+                              inputMode="numeric"
+                              placeholder="Ex: 30"
+                              value={Number.isFinite(ogMinSeconds) ? String(Math.max(0, Math.floor(ogMinSeconds))) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(0, Math.min(600, Math.floor(n))) : 30;
+                                setOver({ minSecondsBetweenEntries: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="og_stakePct">Stake (% da cota)</Label>
+                            <Input
+                              id="og_stakePct"
+                              inputMode="decimal"
+                              placeholder="Ex: 100"
+                              value={Number.isFinite(ogStakePct) ? String(Math.round(ogStakePct * 10000) / 100) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(1, Math.min(100, n)) / 100 : 1;
+                                setOver({ stakePct: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+                          <div>
+                            <Label htmlFor="og_entryOffsetTicks">Ticks de entrada (±)</Label>
+                            <Input
+                              id="og_entryOffsetTicks"
+                              inputMode="numeric"
+                              placeholder="Ex: 2"
+                              value={Number.isFinite(ogEntryOffsetTicks) ? String(Math.max(-10, Math.min(10, Math.trunc(ogEntryOffsetTicks)))) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(-10, Math.min(10, Math.trunc(n))) : 2;
+                                setOver({ entryOffsetTicks: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+                          <div>
+                            <Label htmlFor="og_secondsToWaitMatch">Esperar corresponder (s)</Label>
+                            <Input
+                              id="og_secondsToWaitMatch"
+                              inputMode="numeric"
+                              placeholder="Ex: 10"
+                              value={Number.isFinite(ogSecondsToWaitMatch) ? String(Math.max(1, Math.min(120, Math.floor(ogSecondsToWaitMatch)))) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(1, Math.min(120, Math.floor(n))) : 10;
+                                setOver({ secondsToWaitMatch: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex justify-end">
+                        <Button onClick={handleSave} disabled={isSaving}>
+                          {isSaving ? 'Salvando…' : 'Salvar limites dos robôs'}
+                        </Button>
+                      </div>
+                    </div>
+                  );
+                })()}
+              </div>
             </Card>
           </div>
         )}
@@ -1416,105 +1877,6 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
         {/* API Configuration */}
         {tab === 'apis' && (
         <div className="space-y-6">
-          {/* Football-data.org API */}
-          <Card className="p-6">
-            <div className="mb-6">
-              <div className="flex items-center justify-between mb-2">
-                <h2 className="text-xl font-bold flex items-center gap-2">
-                  <Key className="w-5 h-5 text-blue-600" />
-                  Football-data.org API
-                </h2>
-                {validationStatus !== 'idle' && (
-                  <Badge className={
-                    validationStatus === 'valid' 
-                      ? 'bg-green-100 text-green-800 border-green-300'
-                      : 'bg-red-100 text-red-800 border-red-300'
-                  }>
-                    {validationStatus === 'valid' ? (
-                      <>
-                        <CheckCircle className="w-3 h-3 mr-1" />
-                        Válida
-                      </>
-                    ) : (
-                      <>
-                        <XCircle className="w-3 h-3 mr-1" />
-                        Inválida
-                      </>
-                    )}
-                  </Badge>
-                )}
-              </div>
-              <p className="text-sm text-gray-600">
-                API principal para dados de partidas, times e competições internacionais
-              </p>
-            </div>
-
-            <div className="space-y-4">
-              <div>
-                <Label htmlFor="apiKey">API Key</Label>
-                <div className="flex gap-2 mt-2">
-                  <Input
-                    id="apiKey"
-                    type="password"
-                    placeholder="Insira sua API key do football-data.org"
-                    value={config.footballDataApiKey}
-                    onChange={(e) => {
-                      setConfig({ ...config, footballDataApiKey: e.target.value });
-                      setValidationStatus('idle');
-                    }}
-                    className="flex-1"
-                  />
-                  <Button 
-                    onClick={handleValidateApiKey}
-                    disabled={isValidating || !config.footballDataApiKey.trim()}
-                  >
-                    {isValidating ? (
-                      <>
-                        <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                        Validando...
-                      </>
-                    ) : (
-                      'Validar'
-                    )}
-                  </Button>
-                </div>
-              </div>
-
-              <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-                <h4 className="font-semibold text-sm text-blue-900 mb-2">Como obter sua API key:</h4>
-                <ol className="text-sm text-blue-800 space-y-1 list-decimal list-inside">
-                  <li>Acesse <a href="https://www.football-data.org/client/register" target="_blank" rel="noopener noreferrer" className="underline font-semibold">football-data.org/client/register</a></li>
-                  <li>Crie uma conta gratuita</li>
-                  <li>Copie sua API key do painel de controle</li>
-                  <li>Cole aqui e clique em "Validar"</li>
-                </ol>
-              </div>
-
-              <div className="bg-purple-50 border border-purple-200 rounded-lg p-4">
-                <h4 className="font-semibold text-sm text-purple-900 mb-2 flex items-center gap-2">
-                  🔧 Validação via servidor (solução CORS)
-                </h4>
-                <p className="text-sm text-purple-800 mb-2">
-                  A validação agora é feita pelo servidor Supabase para contornar restrições CORS.
-                </p>
-                <ul className="text-sm text-purple-700 space-y-1">
-                  <li>• Abra o console do navegador (F12) para ver logs detalhados</li>
-                  <li>• Se funcionar via curl mas falhar aqui, verifique o servidor</li>
-                  <li>• Consulte CORS_SOLUTION.md para mais informações</li>
-                </ul>
-              </div>
-
-              <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
-                <h4 className="font-semibold text-sm text-gray-900 mb-2">Limites do plano gratuito:</h4>
-                <ul className="text-sm text-gray-700 space-y-1">
-                  <li>• 10 requisições por minuto</li>
-                  <li>• Dados de competições selecionadas</li>
-                  <li>• Ideal para desenvolvimento e testes</li>
-                </ul>
-              </div>
-            </div>
-          </Card>
-
           {/* API-Football.com API */}
           <Card className="p-6">
             <div className="mb-6">
@@ -1609,45 +1971,6 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
                   <li>• Ideal para desenvolvimento e protótipos</li>
                 </ul>
               </div>
-            </div>
-          </Card>
-
-          {/* OpenLigaDB API */}
-          <Card className="p-6">
-            <div className="mb-6">
-              <h2 className="text-xl font-bold flex items-center gap-2 mb-2">
-                <Key className="w-5 h-5 text-green-600" />
-                OpenLigaDB API
-              </h2>
-              <p className="text-sm text-gray-600">
-                API gratuita para dados de ligas alemãs (Bundesliga) e outras competições
-              </p>
-            </div>
-
-            <div className="flex items-center justify-between">
-              <div>
-                <Label htmlFor="openligadb">Habilitar OpenLigaDB</Label>
-                <p className="text-sm text-gray-500 mt-1">
-                  Não requer API key - completamente gratuito
-                </p>
-              </div>
-              <Switch
-                id="openligadb"
-                checked={config.openLigaDbEnabled}
-                onCheckedChange={(checked) => 
-                  setConfig({ ...config, openLigaDbEnabled: checked })
-                }
-              />
-            </div>
-
-            <div className="mt-4 bg-green-50 border border-green-200 rounded-lg p-4">
-              <h4 className="font-semibold text-sm text-green-900 mb-2">Características:</h4>
-              <ul className="text-sm text-green-800 space-y-1">
-                <li>✓ Completamente gratuito</li>
-                <li>✓ Sem necessidade de registro</li>
-                <li>✓ Dados em tempo real de ligas alemãs</li>
-                <li>✓ Informações detalhadas de partidas</li>
-              </ul>
             </div>
           </Card>
 

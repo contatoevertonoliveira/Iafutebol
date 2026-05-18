@@ -1,4 +1,96 @@
-import { FootballMatch } from './footballDataService';
+export interface FootballTeam {
+  id: number;
+  name: string;
+  shortName: string;
+  tla: string;
+  crest: string;
+}
+
+export interface FootballCompetition {
+  id: number;
+  name: string;
+  code: string;
+  emblem: string;
+  area: {
+    name: string;
+    code: string;
+    flag: string;
+  };
+}
+
+export interface FootballMatch {
+  id: number;
+  utcDate: string;
+  status: string;
+  matchday: number;
+  homeTeam: FootballTeam;
+  awayTeam: FootballTeam;
+  score: {
+    fullTime: {
+      home: number | null;
+      away: number | null;
+    };
+  };
+  competition: FootballCompetition;
+  live?: {
+    elapsed: number | null;
+    statusShort?: string;
+    extra?: number | null;
+  };
+  betfair?: {
+    eventId: string | null;
+    eventName?: string | null;
+    marketId: string | null;
+    marketStartTime?: string | null;
+    runners?: {
+      homeSelectionId?: number | null;
+      drawSelectionId?: number | null;
+      awaySelectionId?: number | null;
+    };
+    matchedVolume?: number | null;
+    odds?: {
+      home?: { back?: number | null; backSize?: number | null; lay?: number | null; laySize?: number | null };
+      draw?: { back?: number | null; backSize?: number | null; lay?: number | null; laySize?: number | null };
+      away?: { back?: number | null; backSize?: number | null; lay?: number | null; laySize?: number | null };
+    };
+    oddsFetchedAt?: string | null;
+    correctScore?: {
+      marketId: string;
+      matchedVolume?: number | null;
+      prices?: Record<
+        string,
+        {
+          selectionId?: number;
+          runnerName?: string | null;
+          back?: number | null;
+          backSize?: number | null;
+          lay?: number | null;
+          laySize?: number | null;
+          impliedProb?: number | null;
+          prob?: number | null;
+        }
+      >;
+      topScores?: Array<{ score: string; back: number | null; lay: number | null; prob: number | null }>;
+      summary?: {
+        winner?: 'home' | 'draw' | 'away';
+        winnerProb?: number | null;
+        homeProb?: number | null;
+        drawProb?: number | null;
+        awayProb?: number | null;
+        bttsYesProb?: number | null;
+        over25Prob?: number | null;
+        overround?: number | null;
+      };
+      oddsFetchedAt?: string;
+    } | null;
+  };
+  preLive?: {
+    fetchedAt: string;
+    homeLast?: { played: number; gfAvg: number | null; gaAvg: number | null; w: number; d: number; l: number };
+    awayLast?: { played: number; gfAvg: number | null; gaAvg: number | null; w: number; d: number; l: number };
+    h2h?: { played: number; homeW: number; draw: number; awayW: number; goalsAvg: number | null };
+  };
+}
 
 type TrainingSessionLite = {
   agentId: string;
@@ -304,18 +396,14 @@ const isRetryableUpsertStatus = (status: number) => status === 429 || (status >=
 const upsertTrainingSamplesToServerOnce = async (
   items: TrainingSample[],
 ): Promise<{ added: number; upserted: number }> => {
-  const { baseUrl, anonKey } = await getSupabaseEdgeAuth();
+  const { baseUrl } = await getSupabaseEdgeAuth();
 
   const maxRetries = 6;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     let res: Response;
     try {
-      res = await fetch(`${baseUrl}/functions/v1/make-server-1119702f/training/samples/upsert`, {
+      res = await fetch(`${baseUrl}/functions/v1/training-server-1119702f/training/samples/upsert`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${anonKey}`,
-        },
         body: JSON.stringify({ items }),
       });
     } catch (e) {
@@ -382,15 +470,11 @@ export async function upsertTrainingSamplesToServer(
 
 export async function getTrainingSamplesCountFromServer(): Promise<number | null> {
   try {
-    const { baseUrl, anonKey } = await getSupabaseEdgeAuth();
+    const { baseUrl } = await getSupabaseEdgeAuth();
     const res = await fetch(
-      `${baseUrl}/functions/v1/make-server-1119702f/training/samples/count`,
+      `${baseUrl}/functions/v1/training-server-1119702f/training/samples/count`,
       {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${anonKey}`,
-        },
         body: JSON.stringify({}),
       },
     );
@@ -408,20 +492,16 @@ export async function listTrainingSamplesFromServer(opts?: {
   maxRows?: number;
 }): Promise<TrainingSample[]> {
   const maxRows = Math.max(1, Math.floor(opts?.maxRows ?? 50000));
-  const { baseUrl, anonKey } = await getSupabaseEdgeAuth();
+  const { baseUrl } = await getSupabaseEdgeAuth();
 
   const out: TrainingSample[] = [];
   let offset = 0;
   while (out.length < maxRows) {
     const limit = Math.min(500, maxRows - out.length);
     const res = await fetch(
-      `${baseUrl}/functions/v1/make-server-1119702f/training/samples/list`,
+      `${baseUrl}/functions/v1/training-server-1119702f/training/samples/list`,
       {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${anonKey}`,
-        },
         body: JSON.stringify({ offset, limit }),
       },
     );
@@ -791,15 +871,11 @@ export async function trainMetaModelFromLocalSamples(opts?: {
 
 export async function hydrateMetaModelFromServer(): Promise<boolean> {
   try {
-    const { baseUrl, anonKey } = await getSupabaseEdgeAuth();
+    const { baseUrl } = await getSupabaseEdgeAuth();
     const res = await fetch(
-      `${baseUrl}/functions/v1/make-server-1119702f/training/meta/get`,
+      `${baseUrl}/functions/v1/training-server-1119702f/training/meta/get`,
       {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${anonKey}`,
-        },
         body: JSON.stringify({}),
       },
     );
@@ -821,15 +897,11 @@ export async function pushLocalMetaModelToServer(): Promise<boolean> {
     const model = JSON.parse(raw) as any;
     if (!model || model.version !== 1) return false;
 
-    const { baseUrl, anonKey } = await getSupabaseEdgeAuth();
+    const { baseUrl } = await getSupabaseEdgeAuth();
     const res = await fetch(
-      `${baseUrl}/functions/v1/make-server-1119702f/training/meta/set`,
+      `${baseUrl}/functions/v1/training-server-1119702f/training/meta/set`,
       {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${anonKey}`,
-        },
         body: JSON.stringify({ model }),
       },
     );
@@ -1374,10 +1446,58 @@ export class AIAgent {
     const motivation = pseudoRandom() * 0.2; // 0-20% (necessidade de ganhar)
     const missingPlayers = pseudoRandom() * 0.15; // 0-15% (impacto de lesões/cartões)
 
+    const clamp = (v: number, min: number, max: number) => Math.max(min, Math.min(max, v));
+    const pre = match.preLive ?? null;
+    const preHome = pre?.homeLast ?? null;
+    const preAway = pre?.awayLast ?? null;
+    const preH2h = pre?.h2h ?? null;
+
+    const toNum = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+
+    const pointsPerGame = (x: { played: number; w: number; d: number; l: number } | null) => {
+      if (!x || !Number.isFinite(x.played) || x.played <= 0) return null;
+      const w = Number.isFinite(x.w) ? x.w : 0;
+      const d = Number.isFinite(x.d) ? x.d : 0;
+      return (w * 3 + d) / x.played;
+    };
+
+    const preHomePpg = pointsPerGame(preHome);
+    const preAwayPpg = pointsPerGame(preAway);
+    const preFormDelta =
+      preHomePpg != null && preAwayPpg != null ? clamp((preHomePpg - preAwayPpg) / 3, -1, 1) : 0;
+
+    const gfH = toNum(preHome?.gfAvg);
+    const gaH = toNum(preHome?.gaAvg);
+    const gfA = toNum(preAway?.gfAvg);
+    const gaA = toNum(preAway?.gaAvg);
+    const expTotalGoals =
+      gfH != null && gaH != null && gfA != null && gaA != null
+        ? clamp(((gfH + gaA) + (gfA + gaH)) / 2, 0, 6)
+        : null;
+
+    const h2hEdge =
+      preH2h && Number.isFinite(preH2h.played) && preH2h.played > 0
+        ? clamp((Number(preH2h.homeW) - Number(preH2h.awayW)) / preH2h.played, -1, 1)
+        : 0;
+    const h2hGoalsAvg = toNum(preH2h?.goalsAvg);
+
     // Ajusta as chances baseando-se nos fatores e no "momento"
     // Como não temos a API de desfalques, simulamos de forma realista via semente determinística
-    const homeScore = pseudoRandom() + homeAdvantage + formWeight - missingPlayers;
-    const awayScore = pseudoRandom() + (1 - formWeight) + motivation;
+    let homeScore = pseudoRandom() + homeAdvantage + formWeight - missingPlayers;
+    let awayScore = pseudoRandom() + (1 - formWeight) + motivation;
+
+    const applyDelta = (delta: number, strength: number) => {
+      const d = clamp(delta, -1, 1) * strength;
+      homeScore += d;
+      awayScore -= d;
+    };
+
+    if (this.profile.type === 'form') applyDelta(preFormDelta, 0.35);
+    else if (this.profile.type === 'head2head') applyDelta(h2hEdge, 0.25);
+    else if (this.profile.type === 'advanced' || this.profile.type === 'ensemble' || this.profile.type === 'statistical') {
+      applyDelta(preFormDelta, 0.12);
+      applyDelta(h2hEdge, 0.1);
+    }
 
     let winner: 'home' | 'away' | 'draw';
     let winnerConfidence: number;
@@ -1420,7 +1540,19 @@ export class AIAgent {
         winnerConfidence = 60;
     }
 
-    const expectedGoals = Math.max(0, (pseudoRandom() * 3.2) + motivation - (missingPlayers * 1.3));
+    let expectedGoals = Math.max(0, (pseudoRandom() * 3.2) + motivation - (missingPlayers * 1.3));
+    if (expTotalGoals != null) {
+      const delta = clamp((expTotalGoals - 2.5) / 2.0, -1, 1);
+      if (this.profile.type === 'goals' || this.profile.type === 'btts' || this.profile.type === 'advanced') {
+        expectedGoals = Math.max(0, expectedGoals + delta * (this.profile.type === 'goals' ? 1.05 : 0.55));
+      }
+    }
+    if (h2hGoalsAvg != null) {
+      const delta = clamp((h2hGoalsAvg - 2.5) / 2.0, -1, 1);
+      if (this.profile.type === 'goals' || this.profile.type === 'btts') {
+        expectedGoals = Math.max(0, expectedGoals + delta * 0.35);
+      }
+    }
     const goalsBias = expectedGoals + (pseudoRandom() * 0.6 - 0.3);
 
     let overUnderLine = 2.5;
@@ -1447,6 +1579,22 @@ export class AIAgent {
       bttsPrediction = bttsScore >= 0.55 || goalsBias >= 2.35 ? 'yes' : 'no';
       const stabilityBoost = 8 + (statsWeight * 10) + (h2hWeight * 6);
       bttsConfidence = Math.min(95, 72 + pseudoRandom() * 18 + stabilityBoost);
+    }
+
+    if (this.profile.type === 'btts' || this.profile.type === 'goals' || this.profile.type === 'advanced') {
+      if (gfH != null && gfA != null && gaH != null && gaA != null) {
+        const bttsScore = clamp(((gfH + gfA) / 2) - 0.9, -1, 1) + clamp(((gaH + gaA) / 2) - 1.0, -1, 1);
+        const wantYes = bttsScore >= 0.35 || (expTotalGoals != null && expTotalGoals >= 2.45);
+        const wantNo = bttsScore <= -0.5 || (expTotalGoals != null && expTotalGoals <= 2.0);
+        if (wantYes && !wantNo) {
+          if (this.profile.type !== 'btts' && bttsConfidence < 78) bttsConfidence = Math.min(90, bttsConfidence + 10);
+          if (this.profile.type === 'btts' && bttsConfidence < 85) bttsConfidence = Math.min(95, bttsConfidence + 8);
+          bttsPrediction = 'yes';
+        } else if (wantNo && !wantYes) {
+          bttsConfidence = Math.min(92, bttsConfidence + 6);
+          bttsPrediction = 'no';
+        }
+      }
     }
 
     let correctScorePrediction = this.generateScore(winner, pseudoRandom);
@@ -1558,6 +1706,14 @@ export class AIAgent {
                  winner === 'away' ? match.awayTeam.name : 'Ambos os times';
     
     let reason = `${team} demonstra superioridade técnica neste confronto. `;
+    const pre = match.preLive ?? null;
+    if (pre && (pre.homeLast?.played || pre.awayLast?.played || pre.h2h?.played)) {
+      if (this.profile.type === 'form') reason += `O momento recente (pré-live) influenciou a leitura de favoritismo. `;
+      else if (this.profile.type === 'head2head') reason += `O histórico H2H (pré-live) reforçou padrões deste confronto. `;
+      else if (this.profile.type === 'goals') reason += `Médias pré-live de gols ajudaram a calibrar a linha de Over/Under. `;
+      else if (this.profile.type === 'btts') reason += `Indicadores pré-live de ataque/defesa ajudaram a estimar BTTS. `;
+      else reason += `Sinais pré-live (forma e retrospecto) foram incorporados ao modelo. `;
+    }
 
     if (this.profile.type === 'goals') {
       reason += `Padrões de ritmo e tendência de gols (incluindo minutos finais) favoreceram a leitura de Over/Under. `;

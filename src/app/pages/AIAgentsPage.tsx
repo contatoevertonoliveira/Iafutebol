@@ -351,7 +351,7 @@ export default function AIAgentsPage() {
               <div>
                 <h3 className="font-semibold mb-2">🎯 Processo de Análise</h3>
                 <ul className="space-y-1 text-sm">
-                  <li>• Coleta de dados das APIs (football-data.org, openligadb.de)</li>
+                  <li>• Coleta de dados das APIs (api-football.com, Betfair)</li>
                   <li>• Processamento e normalização das estatísticas</li>
                   <li>• Aplicação do modelo específico de cada agente</li>
                   <li>• Geração de previsão com nível de confiança</li>

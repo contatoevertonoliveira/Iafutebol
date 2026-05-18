@@ -1,11 +1,10 @@
 import { Match, Prediction } from '../data/mockData';
-import { Calendar, Clock, TrendingUp, Star, Loader2, RefreshCw } from 'lucide-react';
+import { Calendar, Clock, TrendingUp, Star, Loader2, RefreshCw, Trash2 } from 'lucide-react';
 import { Badge } from './ui/badge';
 import { Card } from './ui/card';
 import { TeamLogo } from './TeamLogo';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { AgentEnsemble, getDynamicAgentProfiles } from '../services/aiAgents';
-import type { FootballMatch } from '../services/footballDataService';
+import { AgentEnsemble, getDynamicAgentProfiles, type FootballMatch } from '../services/aiAgents';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './ui/dialog';
 import { ScrollArea } from './ui/scroll-area';
 import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip';
@@ -15,8 +14,110 @@ import { toast } from 'sonner';
 
 const TIME_ZONE = 'America/Sao_Paulo';
 const teamFixturesCache = new Map<string, { fetchedAt: number; items: ApiFootballMatch[] }>();
+const automationQueueCache: {
+  fetchedAt: number;
+  ids: Set<string>;
+  byId: Map<string, any>;
+  inflight: Promise<Set<string>> | null;
+} = { fetchedAt: 0, ids: new Set<string>(), byId: new Map<string, any>(), inflight: null };
 
-type ApiSource = 'api-football' | 'football-data' | 'openligadb' | 'betfair' | 'mock';
+const ensureAutomationQueueIds = async () => {
+  const ttlMs = 30_000;
+  const now = Date.now();
+  if (automationQueueCache.inflight) return automationQueueCache.inflight;
+  if (now - automationQueueCache.fetchedAt < ttlMs) return automationQueueCache.ids;
+
+  automationQueueCache.inflight = (async () => {
+    try {
+      const { projectId } = await import('/utils/supabase/info');
+      const res = await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/queue/list`, {
+        method: 'POST',
+        body: '{}',
+      });
+      const raw = await res.text().catch(() => '');
+      const data = raw ? JSON.parse(raw) : null;
+      if (!res.ok || !data?.ok) throw new Error(String(data?.error ?? `HTTP ${res.status} ${res.statusText}`));
+      const items = Array.isArray(data?.items) ? data.items : [];
+      const ids = new Set<string>(items.map((x: any) => String(x?.matchId ?? '').trim()).filter(Boolean));
+      const byId = new Map<string, any>();
+      for (const it of items) {
+        const mid = String((it as any)?.matchId ?? '').trim();
+        if (!mid) continue;
+        if (!byId.has(mid)) byId.set(mid, it);
+      }
+      automationQueueCache.ids = ids;
+      automationQueueCache.byId = byId;
+      automationQueueCache.fetchedAt = Date.now();
+      return ids;
+    } finally {
+      automationQueueCache.inflight = null;
+    }
+  })();
+
+  return automationQueueCache.inflight;
+};
+
+const computeRobotTraffic = (item: any) => {
+  const status = String(item?.status ?? '').trim().toLowerCase();
+  if (status === 'paused') return { label: 'Em Pausa', className: 'bg-slate-200 text-slate-900 border-slate-300' };
+  if (status === 'stopped') return { label: 'Parado', className: 'bg-gray-200 text-gray-700 border-gray-300' };
+  if (status === 'queued') return { label: 'Na fila', className: 'bg-gray-100 text-gray-700 border-gray-300' };
+  if (status !== 'running') return { label: status ? status : '—', className: 'bg-gray-100 text-gray-700 border-gray-300' };
+
+  const agentRaw = String(item?.strategy?.agent ?? '').trim().toLowerCase();
+  const agent =
+    agentRaw === 'overgoalslimit' || agentRaw === 'over_goals_limit'
+      ? 'overGoalsLimit'
+      : agentRaw === 'scalpinggoals' || agentRaw === 'scalping_goals' || agentRaw === 'scalping_goals_above'
+        ? 'scalpingGoals'
+        : agentRaw === 'scalpingticks' || agentRaw === 'scalping_ticks'
+          ? 'scalpingTicks'
+          : 'correctScore';
+
+  const phase = (() => {
+    if (agent === 'scalpingGoals') return String(item?.strategy?.scalpingGoals?.phase ?? '').trim();
+    if (agent === 'scalpingTicks') return String(item?.strategy?.scalpingTicks?.phase ?? '').trim();
+    if (agent === 'overGoalsLimit') return String(item?.strategy?.overGoalsLimit?.phase ?? '').trim();
+    return String(item?.strategy?.correctScore?.lastPlan?.mode ?? item?.strategy?.correctScore?.planType ?? '').trim();
+  })();
+
+  const hasError =
+    Boolean(String(item?.mappingError ?? '').trim()) ||
+    String(item?.mappingStatus ?? '').trim().toLowerCase() === 'unmapped' ||
+    /\berr(or)?\b|fail|invalid|exception/i.test(phase);
+  if (hasError) return { label: 'Erro no Robô!', className: 'bg-red-600 text-white border-red-700' };
+
+  const lastIso = (() => {
+    if (agent === 'scalpingGoals') return String(item?.strategy?.scalpingGoals?.lastTickAt ?? '').trim();
+    if (agent === 'scalpingTicks') return String(item?.strategy?.scalpingTicks?.lastTickAt ?? '').trim();
+    if (agent === 'overGoalsLimit') return String(item?.strategy?.overGoalsLimit?.lastTickAt ?? '').trim();
+    const exec = String(item?.strategy?.correctScore?.lastExecutionAt ?? '').trim();
+    if (exec) return exec;
+    const plan = String(item?.strategy?.correctScore?.lastPlannedAt ?? '').trim();
+    if (plan) return plan;
+    return String(item?.updatedAt ?? '').trim();
+  })();
+  const lastMs = lastIso ? new Date(lastIso).getTime() : NaN;
+  const maxAgeMs =
+    agent === 'scalpingTicks' ? 12_000 : agent === 'scalpingGoals' ? 20_000 : agent === 'overGoalsLimit' ? 20_000 : 45_000;
+  if (Number.isFinite(lastMs) && Date.now() - lastMs > maxAgeMs) {
+    return { label: 'Oscilando', className: 'bg-amber-200 text-amber-950 border-amber-300' };
+  }
+
+  return { label: 'Rodando', className: 'bg-emerald-200 text-emerald-950 border-emerald-300' };
+};
+
+const broadcastAutomationQueueChanged = (payload?: { action?: 'add' | 'remove'; matchId?: string }) => {
+  try {
+    localStorage.setItem(
+      'automation_queue_changed_v1',
+      JSON.stringify({ at: new Date().toISOString(), action: payload?.action ?? null, matchId: payload?.matchId ?? null }),
+    );
+  } catch {}
+  window.dispatchEvent(new Event('automationQueueChanged'));
+};
+
+type ApiSource = 'api-football' | 'betfair' | 'mock';
 
 type FormMatchRow = {
   id: number;
@@ -354,6 +455,7 @@ interface MatchCardProps {
   footballMatch?: FootballMatch;
   isFavorite?: boolean;
   onToggleFavorite?: (matchId: string) => void;
+  onRemoveMatch?: (matchId: string) => void;
   onRefreshMatch?: (matchId: string) => void;
   isRefreshing?: boolean;
   lastUpdatedAt?: Date | null;
@@ -364,6 +466,7 @@ export function MatchCard({
   prediction,
   apiSource = 'mock',
   onViewDetails,
+  onRemoveMatch,
   homeCrest,
   awayCrest,
   footballMatch,
@@ -379,7 +482,16 @@ export function MatchCard({
   const [tick, setTick] = useState(0);
   const [formOpen, setFormOpen] = useState(false);
   const [betfairConfirmOpen, setBetfairConfirmOpen] = useState(false);
+  const [removeConfirmOpen, setRemoveConfirmOpen] = useState(false);
   const [isEnqueueingBetfair, setIsEnqueueingBetfair] = useState(false);
+  const [isInAutomation, setIsInAutomation] = useState(false);
+  const [automationTraffic, setAutomationTraffic] = useState<{ label: string; className: string } | null>(null);
+  const [isRemovingBetfair, setIsRemovingBetfair] = useState(false);
+  const [guardOpen, setGuardOpen] = useState(false);
+  const [guardMatchId, setGuardMatchId] = useState<string | null>(null);
+  const [guardOrdersCount, setGuardOrdersCount] = useState(0);
+  const [guardMatchedCount, setGuardMatchedCount] = useState(0);
+  const [guardIsBusy, setGuardIsBusy] = useState(false);
   const [homeHomeRows, setHomeHomeRows] = useState<FormMatchRow[] | null>(null);
   const [awayAwayRows, setAwayAwayRows] = useState<FormMatchRow[] | null>(null);
   const [isLoadingForm, setIsLoadingForm] = useState(false);
@@ -388,8 +500,30 @@ export function MatchCard({
 
   const toMatchStatus = (status: string | undefined): 'scheduled' | 'live' | 'finished' => {
     const normalized = String(status || '').toUpperCase();
-    if (['FINISHED', 'FT', 'AET', 'PEN'].includes(normalized)) return 'finished';
-    if (['IN_PLAY', 'PAUSED', 'BREAK', 'LIVE', '1H', '2H', 'HT', 'ET', 'BT', 'P', 'SUSP', 'INT', 'SUSPENDED', 'INTERRUPTED'].includes(normalized)) return 'live';
+    if (['FINISHED', 'FT', 'AET', 'PEN', 'CLOSED', 'SETTLED', 'ENDED', 'END', 'RESULT', 'ABANDONED', 'CANCELLED', 'CANCELED'].includes(normalized)) {
+      return 'finished';
+    }
+    if (
+      [
+        'IN_PLAY',
+        'INPLAY',
+        'PAUSED',
+        'BREAK',
+        'LIVE',
+        '1H',
+        '2H',
+        'HT',
+        'ET',
+        'BT',
+        'P',
+        'SUSP',
+        'INT',
+        'SUSPENDED',
+        'INTERRUPTED',
+      ].includes(normalized)
+    ) {
+      return 'live';
+    }
     return 'scheduled';
   };
 
@@ -437,6 +571,41 @@ export function MatchCard({
     if (fromApi !== 'scheduled') return fromApi;
     return match.status as 'scheduled' | 'live' | 'finished';
   }, [footballMatch?.status, match.status, resolvedLive.statusShort]);
+
+  useEffect(() => {
+    let alive = true;
+    const mid = String(match.id ?? '').trim();
+    if (!mid) return;
+    const refresh = () => {
+      automationQueueCache.fetchedAt = 0;
+      void ensureAutomationQueueIds()
+        .then((ids) => {
+          if (!alive) return;
+          setIsInAutomation(ids.has(mid));
+          const item = automationQueueCache.byId.get(mid) ?? null;
+          setAutomationTraffic(item ? computeRobotTraffic(item) : null);
+        })
+        .catch(() => {
+          if (!alive) return;
+          setIsInAutomation(false);
+          setAutomationTraffic(null);
+        });
+    };
+    refresh();
+    const onChanged = () => refresh();
+    const onStorage = (e: StorageEvent) => {
+      if (!e.key || e.key === 'automation_queue_changed_v1') refresh();
+    };
+    window.addEventListener('automationQueueChanged' as any, onChanged as any);
+    window.addEventListener('storage', onStorage);
+    window.addEventListener('focus', refresh);
+    return () => {
+      alive = false;
+      window.removeEventListener('automationQueueChanged' as any, onChanged as any);
+      window.removeEventListener('storage', onStorage);
+      window.removeEventListener('focus', refresh);
+    };
+  }, [match.id]);
 
   const kickoffMs = useMemo(() => new Date(match.date as unknown as Date).getTime(), [match.date]);
   const isEstimatedLive = useMemo(() => {
@@ -504,11 +673,6 @@ export function MatchCard({
     return 'Empate';
   };
 
-  const resultAvailable =
-    isFinished &&
-    typeof match.result?.home === 'number' &&
-    typeof match.result?.away === 'number';
-
   const displayHomeScore =
     typeof match.result?.home === 'number'
       ? match.result.home
@@ -523,7 +687,8 @@ export function MatchCard({
         ? footballMatch.score.fullTime.away
         : null;
 
-  const shouldShowScoreboard = resultAvailable || isLive;
+  const resultAvailable = isFinished && typeof displayHomeScore === 'number' && typeof displayAwayScore === 'number';
+  const showKickoff = !isLive && !resultAvailable;
   const hasPrediction = Boolean(prediction);
   const bttsOpportunity =
     Boolean(prediction) &&
@@ -569,8 +734,8 @@ export function MatchCard({
 
   const actualWinner = (() => {
     if (!resultAvailable) return null;
-    if (match.result!.home! > match.result!.away!) return 'home' as const;
-    if (match.result!.home! < match.result!.away!) return 'away' as const;
+    if (displayHomeScore > displayAwayScore) return 'home' as const;
+    if (displayHomeScore < displayAwayScore) return 'away' as const;
     return 'draw' as const;
   })();
 
@@ -578,11 +743,11 @@ export function MatchCard({
   const winnerHit = actualWinner && predictedWinner ? actualWinner === predictedWinner : null;
   const winnerPush = actualWinner === 'draw';
 
-  const actualScoreText = resultAvailable ? `${match.result!.home}-${match.result!.away}` : null;
+  const actualScoreText = resultAvailable ? `${displayHomeScore}-${displayAwayScore}` : null;
   const predictedScoreText = prediction?.correctScore?.score ?? null;
   const scoreHit = actualScoreText && predictedScoreText ? actualScoreText === predictedScoreText : null;
 
-  const totalGoals = resultAvailable ? match.result!.home! + match.result!.away! : null;
+  const totalGoals = resultAvailable ? displayHomeScore + displayAwayScore : null;
   const overUnderLine = prediction?.overUnder?.line ?? null;
   const actualOverUnder =
     totalGoals === null || typeof overUnderLine !== 'number'
@@ -593,7 +758,7 @@ export function MatchCard({
   const overUnderHit = actualOverUnder && prediction?.overUnder?.prediction ? actualOverUnder === prediction.overUnder.prediction : null;
 
   const actualBtts =
-    resultAvailable ? ((match.result!.home! > 0 && match.result!.away! > 0 ? 'yes' : 'no') as const) : null;
+    resultAvailable ? ((displayHomeScore > 0 && displayAwayScore > 0 ? 'yes' : 'no') as const) : null;
   const bttsHit = actualBtts && prediction?.btts?.prediction ? actualBtts === prediction.btts.prediction : null;
 
   const marketHits = {
@@ -613,14 +778,9 @@ export function MatchCard({
     if (isEnqueueingBetfair) return;
     setIsEnqueueingBetfair(true);
     try {
-      const { projectId, publicAnonKey } = await import('/utils/supabase/info');
-      const res = await fetch(`https://${projectId}.supabase.co/functions/v1/make-server-1119702f/automation/betfair/queue/add`, {
+      const { projectId } = await import('/utils/supabase/info');
+      const res = await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/queue/add`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${publicAnonKey}`,
-          apikey: publicAnonKey,
-        },
         body: JSON.stringify({
           matchId: match.id,
           source: apiSource,
@@ -648,11 +808,123 @@ export function MatchCard({
         : 'Jogo adicionado. Mapeamento Betfair pendente';
       const desc = !mapped && data?.item?.mappingError ? String(data.item.mappingError).slice(0, 220) : undefined;
       toast.success(msg, desc ? { description: desc } : undefined);
+      const mid = String(match.id ?? '').trim();
+      if (mid) {
+        automationQueueCache.ids.add(mid);
+        automationQueueCache.fetchedAt = Date.now();
+        setIsInAutomation(true);
+        setAutomationTraffic({ label: 'Na fila', className: 'bg-gray-100 text-gray-700 border-gray-300' });
+        broadcastAutomationQueueChanged({ action: 'add', matchId: mid });
+      }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       toast.error('Falha ao adicionar à automação', { description: msg.slice(0, 220) });
     } finally {
       setIsEnqueueingBetfair(false);
+    }
+  };
+
+  const getAdminTokenOrToast = () => {
+    const cfg = loadApiConfig();
+    const adminToken = String(cfg?.automationAdminToken ?? '').trim();
+    if (!adminToken) {
+      toast.error('Informe o Automation Admin Token em Configurações → Betfair.');
+      return null;
+    }
+    return adminToken;
+  };
+
+  const fetchOrdersSummary = async (matchId: string) => {
+    const adminToken = getAdminTokenOrToast();
+    if (!adminToken) return null;
+    const { projectId } = await import('/utils/supabase/info');
+    const res = await fetch(
+      `https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/strategy/correctScore/openOrdersSummary`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ matchId, adminToken }),
+      },
+    );
+    const raw = await res.text().catch(() => '');
+    const data = raw ? JSON.parse(raw) : null;
+    if (!res.ok || !data?.ok) throw new Error(String(data?.error ?? `HTTP ${res.status} ${res.statusText}`));
+    const openCount = Number(data?.openOrdersCount);
+    const matchedCount = Number(data?.matchedBetsCount);
+    const open = Number.isFinite(openCount) ? openCount : 0;
+    const matched = Number.isFinite(matchedCount) ? matchedCount : 0;
+    return { open, matched };
+  };
+
+  const cashoutCorrectScore = async (matchId: string) => {
+    const adminToken = getAdminTokenOrToast();
+    if (!adminToken) return false;
+    const { projectId } = await import('/utils/supabase/info');
+    const res = await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/strategy/correctScore/cashout`, {
+      method: 'POST',
+      body: JSON.stringify({ matchId, adminToken }),
+    });
+    const raw = await res.text().catch(() => '');
+    const data = raw ? JSON.parse(raw) : null;
+    if (!res.ok || !data?.ok) throw new Error(String(data?.error ?? `HTTP ${res.status} ${res.statusText}`));
+    return true;
+  };
+
+  const cancelOpenOrdersCorrectScore = async (matchId: string) => {
+    const adminToken = getAdminTokenOrToast();
+    if (!adminToken) return false;
+    const { projectId } = await import('/utils/supabase/info');
+    const res = await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/strategy/correctScore/cancelOpenOrders`, {
+      method: 'POST',
+      body: JSON.stringify({ matchId, adminToken }),
+    });
+    const raw = await res.text().catch(() => '');
+    const data = raw ? JSON.parse(raw) : null;
+    if (!res.ok || !data?.ok) throw new Error(String(data?.error ?? `HTTP ${res.status} ${res.statusText}`));
+    return true;
+  };
+
+  const removeFromAutomation = async (matchId: string) => {
+    if (isRemovingBetfair) return false;
+    setIsRemovingBetfair(true);
+    try {
+      const { projectId } = await import('/utils/supabase/info');
+      const res = await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/queue/remove`, {
+        method: 'POST',
+        body: JSON.stringify({ matchId }),
+      });
+      const raw = await res.text().catch(() => '');
+      const data = raw ? JSON.parse(raw) : null;
+      if (!res.ok || !data?.ok) throw new Error(String(data?.error ?? `HTTP ${res.status} ${res.statusText}`));
+      automationQueueCache.ids.delete(matchId);
+      automationQueueCache.fetchedAt = Date.now();
+      setIsInAutomation(false);
+      setAutomationTraffic(null);
+      toast.success('Item removido da automação');
+      broadcastAutomationQueueChanged({ action: 'remove', matchId });
+      return true;
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      toast.error('Falha ao remover item', { description: msg.slice(0, 220) });
+      return false;
+    } finally {
+      setIsRemovingBetfair(false);
+    }
+  };
+
+  const handleRemoveWithChecks = async (matchId: string) => {
+    try {
+      const summary = await fetchOrdersSummary(matchId);
+      if (summary && (summary.open > 0 || summary.matched > 0)) {
+        setGuardMatchId(matchId);
+        setGuardOrdersCount(summary.open);
+        setGuardMatchedCount(summary.matched);
+        setGuardOpen(true);
+        return;
+      }
+      await removeFromAutomation(matchId);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      toast.error('Falha ao checar ordens', { description: msg.slice(0, 220) });
     }
   };
 
@@ -693,8 +965,8 @@ export function MatchCard({
       },
       score: {
         fullTime: {
-          home: resultAvailable ? match.result!.home : null,
-          away: resultAvailable ? match.result!.away : null,
+          home: resultAvailable ? displayHomeScore : null,
+          away: resultAvailable ? displayAwayScore : null,
         },
       },
       competition: {
@@ -722,9 +994,7 @@ export function MatchCard({
       const ensemble = new AgentEnsemble(profiles);
       const preds = await ensemble.predictWithAllAgents(baseMatch);
 
-      const totalGoalsLocal = typeof match.result?.home === 'number' && typeof match.result?.away === 'number'
-        ? match.result.home + match.result.away
-        : null;
+      const totalGoalsLocal = resultAvailable ? displayHomeScore + displayAwayScore : null;
 
       const byName = new Map(profiles.map((p) => [p.name, p] as const));
       const lineKey = (line: number) => {
@@ -1073,7 +1343,11 @@ export function MatchCard({
     <>
       <Card
         className={`overflow-hidden hover:shadow-lg transition-shadow ${
-          isFinished ? 'bg-gray-100 text-gray-700 grayscale cursor-pointer' : 'cursor-pointer'
+          isFinished
+            ? 'bg-gray-100 text-gray-700 grayscale cursor-pointer'
+            : isInAutomation
+              ? 'bg-amber-200 border-amber-400 ring-2 ring-amber-400 cursor-pointer'
+              : 'cursor-pointer'
         }`}
         onClick={handleCardClick}
       >
@@ -1091,19 +1365,47 @@ export function MatchCard({
           <Badge variant="secondary" className="bg-white/20 text-white border-0">
             {match.country}
           </Badge>
-          {hasPrediction ? (
+          {isInAutomation ? (
+            <Badge
+              variant="outline"
+              className={`${(automationTraffic ?? { label: 'Rodando', className: 'bg-emerald-200 text-emerald-950 border-emerald-300' }).className} text-[11px] px-2 py-0.5`}
+              title={automationTraffic ? undefined : 'Status estimado (sem leitura do robô)'}
+            >
+              {(automationTraffic ?? { label: 'Rodando', className: '' }).label}
+            </Badge>
+          ) : null}
+          {onRemoveMatch ? (
             <button
               onClick={(e) => {
                 e.stopPropagation();
-                setBetfairConfirmOpen(true);
+                setRemoveConfirmOpen(true);
               }}
               className="p-1 rounded-md hover:bg-white/20 transition-colors"
-              aria-label="Automatizar trade na Betfair"
-              title="Automatizar trade na Betfair"
+              aria-label="Remover do dashboard"
+              title="Remover do dashboard"
             >
-              <img src="/utils/betfair.png" alt="Betfair" className="w-4 h-4" />
+              <Trash2 className="w-4 h-4 text-white" />
             </button>
           ) : null}
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              if (isFinished) return;
+              setBetfairConfirmOpen(true);
+            }}
+            disabled={isFinished}
+            className={`p-1 rounded-md transition-colors ${
+              isFinished
+                ? 'opacity-60 cursor-not-allowed'
+                : isInAutomation
+                  ? 'bg-red-600/25 hover:bg-red-600/35'
+                  : 'bg-emerald-600/25 hover:bg-emerald-600/35'
+            }`}
+            aria-label={isInAutomation ? 'Remover da automação (Betfair)' : 'Adicionar à automação (Betfair)'}
+            title={isInAutomation ? 'Remover da automação (Betfair)' : 'Adicionar à automação (Betfair)'}
+          >
+            <img src="/utils/betfair.png" alt="Betfair" className="w-4 h-4" />
+          </button>
           {onRefreshMatch && (
             <button
               onClick={(e) => {
@@ -1149,7 +1451,19 @@ export function MatchCard({
         </div>
 
         {/* Times com Escudos */}
-        {shouldShowScoreboard ? (
+        {showKickoff ? (
+          <div className="grid grid-cols-3 items-center mb-4">
+            <div className="flex items-center gap-2 min-w-0">
+              <TeamLogo teamName={match.homeTeam} logoUrl={homeCrest} size="lg" showName={false} />
+              <div className="font-medium text-lg truncate">{match.homeTeam}</div>
+            </div>
+            <div className="text-center text-xl font-bold text-gray-900 tabular-nums">{match.time || '—'}</div>
+            <div className="flex items-center justify-end gap-2 min-w-0">
+              <div className="font-medium text-lg truncate">{match.awayTeam}</div>
+              <TeamLogo teamName={match.awayTeam} logoUrl={awayCrest} size="lg" showName={false} />
+            </div>
+          </div>
+        ) : (
           <div className="grid grid-cols-[1fr_3rem] gap-x-3 gap-y-3 items-center mb-4">
             <div className="flex items-center gap-2 min-w-0">
               <TeamLogo teamName={match.homeTeam} logoUrl={homeCrest} size="lg" showName={false} />
@@ -1162,11 +1476,6 @@ export function MatchCard({
               <div className="font-medium text-lg truncate">{match.awayTeam}</div>
             </div>
             <div className="text-right text-xl font-bold text-gray-900 tabular-nums">{displayAwayScore ?? '-'}</div>
-          </div>
-        ) : (
-          <div className="space-y-3 mb-4">
-            <TeamLogo teamName={match.homeTeam} logoUrl={homeCrest} size="lg" showName={true} />
-            <TeamLogo teamName={match.awayTeam} logoUrl={awayCrest} size="lg" showName={true} />
           </div>
         )}
 
@@ -1388,21 +1697,64 @@ export function MatchCard({
       </div>
       </Card>
 
-      <Dialog open={betfairConfirmOpen} onOpenChange={setBetfairConfirmOpen}>
+      <Dialog open={removeConfirmOpen} onOpenChange={setRemoveConfirmOpen}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
-            <DialogTitle>Automatizar trade (Betfair)</DialogTitle>
-            <DialogDescription>
-              Confirmar inclusão deste jogo na lista de automação?
-            </DialogDescription>
+            <DialogTitle>Excluir card?</DialogTitle>
+            <DialogDescription>Esse jogo será removido do dashboard.</DialogDescription>
+          </DialogHeader>
+
+          <div className="mt-2 text-sm text-gray-700">
+            <div className="font-semibold text-gray-900">
+              {match.homeTeam} x {match.awayTeam}
+            </div>
+            <div className="mt-1 text-xs text-gray-600 tabular-nums">{new Date(match.date).toLocaleString('pt-BR', { hour12: false })}</div>
+          </div>
+
+          <div className="mt-4 flex items-center justify-end gap-2">
+            <button
+              onClick={() => setRemoveConfirmOpen(false)}
+              className="px-3 py-2 rounded-md border border-gray-300 bg-white text-gray-800 hover:bg-gray-50 text-sm"
+            >
+              Cancelar
+            </button>
+            <button
+              onClick={() => {
+                setRemoveConfirmOpen(false);
+                onRemoveMatch?.(match.id);
+              }}
+              className="px-3 py-2 rounded-md text-sm font-semibold bg-red-600 hover:bg-red-700 text-white"
+            >
+              Excluir
+            </button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={betfairConfirmOpen}
+        onOpenChange={(v) => {
+          if (isEnqueueingBetfair || isRemovingBetfair) return;
+          setBetfairConfirmOpen(v);
+        }}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Automação (Betfair)</DialogTitle>
+            <DialogDescription>{isInAutomation ? 'Este jogo já está na automação. Deseja remover?' : 'Deseja adicionar este jogo na automação?'}</DialogDescription>
           </DialogHeader>
 
           <div className="mt-2 text-sm text-gray-700">
             <div className="font-semibold text-gray-900">{match.homeTeam} x {match.awayTeam}</div>
             <div className="mt-1 text-xs text-gray-600 tabular-nums">{new Date(match.date).toLocaleString('pt-BR', { hour12: false })}</div>
             <div className="mt-2 text-xs text-gray-600">
-              A automação vai tentar mapear este jogo na Betfair (eventId/marketId/1X2) e preencher as odds na página Automação.
+              {isInAutomation
+                ? 'Ao remover, o jogo sai da lista de automação.'
+                : 'A automação vai tentar mapear este jogo na Betfair (eventId/marketId/1X2) e preencher as odds na página Automação.'}
             </div>
+            {!hasPrediction && !isInAutomation ? (
+              <div className="mt-2 text-xs text-gray-600">Análise ainda não pronta. O jogo pode ser adicionado mesmo assim.</div>
+            ) : null}
           </div>
 
           <div className="mt-4 flex items-center justify-end gap-2">
@@ -1412,19 +1764,116 @@ export function MatchCard({
             >
               Cancelar
             </button>
+            {isInAutomation ? (
+              <button
+                onClick={async () => {
+                  setBetfairConfirmOpen(false);
+                  await handleRemoveWithChecks(String(match.id ?? '').trim());
+                }}
+                disabled={isRemovingBetfair}
+                className={`px-3 py-2 rounded-md text-sm font-semibold ${
+                  isRemovingBetfair ? 'bg-gray-200 text-gray-600 cursor-not-allowed' : 'bg-red-600 hover:bg-red-700 text-white'
+                }`}
+              >
+                {isRemovingBetfair ? 'Removendo…' : 'Remover'}
+              </button>
+            ) : (
+              <button
+                onClick={async () => {
+                  await enqueueBetfairAutomation();
+                  if (!hasPrediction) toast.message('Análise em geração', { description: 'A previsão ainda está sendo gerada; o jogo foi adicionado na automação.' });
+                  setBetfairConfirmOpen(false);
+                }}
+                disabled={isEnqueueingBetfair}
+                className={`px-3 py-2 rounded-md text-sm font-semibold ${
+                  isEnqueueingBetfair ? 'bg-gray-200 text-gray-600 cursor-not-allowed' : 'bg-emerald-600 hover:bg-emerald-700 text-white'
+                }`}
+              >
+                {isEnqueueingBetfair ? 'Adicionando…' : 'Adicionar'}
+              </button>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={guardOpen}
+        onOpenChange={(v) => {
+          if (guardIsBusy) return;
+          setGuardOpen(v);
+        }}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Ordens abertas detectadas</DialogTitle>
+            <DialogDescription>
+              Há {guardOrdersCount} ordem(ns) aberta(s) e {guardMatchedCount} ordem(ns) executada(s) no mercado de Placar Correto. Confirme a ação.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="flex items-center justify-end gap-2 mt-2">
             <button
-              onClick={async () => {
-                await enqueueBetfairAutomation();
-                setBetfairConfirmOpen(false);
+              onClick={() => {
+                setGuardOpen(false);
+                setGuardMatchId(null);
+                setGuardOrdersCount(0);
+                setGuardMatchedCount(0);
               }}
-              disabled={!hasPrediction || isEnqueueingBetfair}
+              disabled={guardIsBusy}
+              className="px-3 py-2 rounded-md border border-gray-300 bg-white text-gray-800 hover:bg-gray-50 text-sm"
+            >
+              Cancelar
+            </button>
+
+            <button
+              disabled={guardIsBusy || !guardMatchId || guardMatchedCount > 0}
+              onClick={async () => {
+                if (!guardMatchId) return;
+                setGuardIsBusy(true);
+                try {
+                  await cancelOpenOrdersCorrectScore(guardMatchId);
+                  await removeFromAutomation(guardMatchId);
+                  setGuardOpen(false);
+                  toast.success('Ordens canceladas e item removido');
+                } finally {
+                  setGuardIsBusy(false);
+                  setGuardMatchId(null);
+                  setGuardOrdersCount(0);
+                  setGuardMatchedCount(0);
+                }
+              }}
               className={`px-3 py-2 rounded-md text-sm font-semibold ${
-                !hasPrediction || isEnqueueingBetfair
-                  ? 'bg-gray-200 text-gray-600 cursor-not-allowed'
-                  : 'bg-emerald-600 hover:bg-emerald-700 text-white'
+                guardIsBusy || !guardMatchId ? 'bg-gray-200 text-gray-600 cursor-not-allowed' : 'bg-gray-700 hover:bg-gray-800 text-white'
               }`}
             >
-              {isEnqueueingBetfair ? 'Adicionando…' : 'Automatizar'}
+              Cancelar ordens e remover
+            </button>
+
+            <button
+              disabled={guardIsBusy || !guardMatchId}
+              onClick={async () => {
+                if (!guardMatchId) return;
+                setGuardIsBusy(true);
+                try {
+                  await cashoutCorrectScore(guardMatchId);
+                  await removeFromAutomation(guardMatchId);
+                  setGuardOpen(false);
+                  toast.success('Cashout enviado e item removido');
+                } catch (e) {
+                  const msg = e instanceof Error ? e.message : String(e);
+                  toast.error('Falha ao remover com cashout', { description: msg.slice(0, 220) });
+                } finally {
+                  setGuardIsBusy(false);
+                  setGuardMatchId(null);
+                  setGuardOrdersCount(0);
+                  setGuardMatchedCount(0);
+                }
+              }}
+              className={`px-3 py-2 rounded-md text-sm font-semibold ${
+                guardIsBusy || !guardMatchId ? 'bg-gray-200 text-gray-600 cursor-not-allowed' : 'bg-red-600 hover:bg-red-700 text-white'
+              }`}
+            >
+              Cashout e remover
             </button>
           </div>
         </DialogContent>

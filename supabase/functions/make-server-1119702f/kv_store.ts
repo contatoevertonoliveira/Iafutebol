@@ -10,69 +10,108 @@ CREATE TABLE kv_store_1119702f (
 // View at https://supabase.com/dashboard/project/ygxcalveixkfwgztrzud/database/tables
 
 // This file provides a simple key-value interface for storing Figma Make data. It should be adequate for most small-scale use cases.
-import { createClient } from "jsr:@supabase/supabase-js@2.49.8";
+const getSupabaseEnv = () => {
+  const url = String(Deno.env.get("SUPABASE_URL") ?? "").trim();
+  const serviceKey = String(Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "").trim();
+  if (!url) throw new Error("SUPABASE_URL ausente");
+  if (!serviceKey) throw new Error("SUPABASE_SERVICE_ROLE_KEY ausente");
+  return { url: url.replace(/\/+$/, ""), serviceKey } as const;
+};
 
-const client = () =>
-  createClient(
-    Deno.env.get("SUPABASE_URL"),
-    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY"),
-  );
+const readError = async (res: Response): Promise<string> => {
+  const text = await res.text().catch(() => "");
+  const msg = text || `${res.status} ${res.statusText}`;
+  return msg.length > 800 ? msg.slice(0, 800) : msg;
+};
+
+const tableUrl = (baseUrl: string) => `${baseUrl}/rest/v1/kv_store_1119702f`;
+
+const authHeaders = (serviceKey: string) => ({
+  Authorization: `Bearer ${serviceKey}`,
+  apikey: serviceKey,
+});
 
 export const set = async (key: string, value: any): Promise<void> => {
-  const supabase = client();
-  const { error } = await supabase.from("kv_store_1119702f").upsert({
-    key,
-    value,
+  const { url, serviceKey } = getSupabaseEnv();
+  const res = await fetch(`${tableUrl(url)}?on_conflict=key`, {
+    method: "POST",
+    headers: {
+      ...authHeaders(serviceKey),
+      "Content-Type": "application/json",
+      Prefer: "resolution=merge-duplicates,return=minimal",
+    },
+    body: JSON.stringify([{ key, value }]),
   });
-  if (error) {
-    throw new Error(error.message);
-  }
+  if (!res.ok) throw new Error(await readError(res));
 };
 
 export const get = async (key: string): Promise<any> => {
-  const supabase = client();
-  const { data, error } = await supabase
-    .from("kv_store_1119702f")
-    .select("value")
-    .eq("key", key)
-    .maybeSingle();
-  if (error) {
-    throw new Error(error.message);
-  }
-  return data?.value;
+  const { url, serviceKey } = getSupabaseEnv();
+  const qs = new URLSearchParams();
+  qs.set("select", "value");
+  qs.set("key", `eq.${key}`);
+  qs.set("limit", "1");
+  const res = await fetch(`${tableUrl(url)}?${qs.toString()}`, {
+    method: "GET",
+    headers: {
+      ...authHeaders(serviceKey),
+      Accept: "application/json",
+    },
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  const data = (await res.json().catch(() => null)) as any;
+  if (!Array.isArray(data) || data.length === 0) return null;
+  return data[0]?.value ?? null;
 };
 
 export const del = async (key: string): Promise<void> => {
-  const supabase = client();
-  const { error } = await supabase.from("kv_store_1119702f").delete().eq("key", key);
-  if (error) {
-    throw new Error(error.message);
-  }
+  const { url, serviceKey } = getSupabaseEnv();
+  const qs = new URLSearchParams();
+  qs.set("key", `eq.${key}`);
+  const res = await fetch(`${tableUrl(url)}?${qs.toString()}`, {
+    method: "DELETE",
+    headers: {
+      ...authHeaders(serviceKey),
+      Prefer: "return=minimal",
+    },
+  });
+  if (!res.ok) throw new Error(await readError(res));
 };
 
 export const mset = async (keys: string[], values: any[]): Promise<void> => {
-  const supabase = client();
-  const { error } = await supabase.from("kv_store_1119702f").upsert(
-    keys.map((k, i) => ({ key: k, value: values[i] })),
-  );
-  if (error) {
-    throw new Error(error.message);
-  }
+  const { url, serviceKey } = getSupabaseEnv();
+  const rows = keys.map((k, i) => ({ key: k, value: values[i] }));
+  const res = await fetch(`${tableUrl(url)}?on_conflict=key`, {
+    method: "POST",
+    headers: {
+      ...authHeaders(serviceKey),
+      "Content-Type": "application/json",
+      Prefer: "resolution=merge-duplicates,return=minimal",
+    },
+    body: JSON.stringify(rows),
+  });
+  if (!res.ok) throw new Error(await readError(res));
 };
 
 export const mget = async (keys: string[]): Promise<any[]> => {
-  const supabase = client();
   const safeKeys = Array.isArray(keys) ? keys.filter((k) => typeof k === "string" && k.length > 0) : [];
   if (safeKeys.length === 0) return [];
-  const { data, error } = await supabase
-    .from("kv_store_1119702f")
-    .select("key,value")
-    .in("key", safeKeys);
-  if (error) {
-    throw new Error(error.message);
-  }
+  const { url, serviceKey } = getSupabaseEnv();
+  const quoted = safeKeys.map((k) => `"${String(k).replaceAll('"', '\\"')}"`).join(",");
+  const qs = new URLSearchParams();
+  qs.set("select", "key,value");
+  qs.set("key", `in.(${quoted})`);
+  const res = await fetch(`${tableUrl(url)}?${qs.toString()}`, {
+    method: "GET",
+    headers: {
+      ...authHeaders(serviceKey),
+      Accept: "application/json",
+    },
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  const data = (await res.json().catch(() => null)) as any;
   const map = new Map<string, any>();
-  for (const row of data ?? []) {
+  for (const row of Array.isArray(data) ? data : []) {
     const k = String((row as any)?.key ?? "");
     if (!k) continue;
     map.set(k, (row as any)?.value);
@@ -81,21 +120,82 @@ export const mget = async (keys: string[]): Promise<any[]> => {
 };
 
 export const mdel = async (keys: string[]): Promise<void> => {
-  const supabase = client();
-  const { error } = await supabase.from("kv_store_1119702f").delete().in("key", keys);
-  if (error) {
-    throw new Error(error.message);
-  }
+  const safeKeys = Array.isArray(keys) ? keys.filter((k) => typeof k === "string" && k.length > 0) : [];
+  if (safeKeys.length === 0) return;
+  const { url, serviceKey } = getSupabaseEnv();
+  const quoted = safeKeys.map((k) => `"${String(k).replaceAll('"', '\\"')}"`).join(",");
+  const qs = new URLSearchParams();
+  qs.set("key", `in.(${quoted})`);
+  const res = await fetch(`${tableUrl(url)}?${qs.toString()}`, {
+    method: "DELETE",
+    headers: {
+      ...authHeaders(serviceKey),
+      Prefer: "return=minimal",
+    },
+  });
+  if (!res.ok) throw new Error(await readError(res));
 };
 
 export const getByPrefix = async (prefix: string): Promise<any[]> => {
-  const supabase = client();
-  const { data, error } = await supabase
-    .from("kv_store_1119702f")
-    .select("key, value")
-    .like("key", prefix + "%");
-  if (error) {
-    throw new Error(error.message);
-  }
-  return data?.map((d) => d.value) ?? [];
+  const { url, serviceKey } = getSupabaseEnv();
+  const qs = new URLSearchParams();
+  qs.set("select", "key,value");
+  qs.set("key", `like.${prefix}%`);
+  const res = await fetch(`${tableUrl(url)}?${qs.toString()}`, {
+    method: "GET",
+    headers: {
+      ...authHeaders(serviceKey),
+      Accept: "application/json",
+    },
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  const data = (await res.json().catch(() => null)) as any;
+  return Array.isArray(data) ? data.map((d: any) => d?.value).filter((v: any) => v != null) : [];
+};
+
+export const countByPrefix = async (prefix: string): Promise<number> => {
+  const { url, serviceKey } = getSupabaseEnv();
+  const qs = new URLSearchParams();
+  qs.set("select", "key");
+  qs.set("key", `like.${prefix}%`);
+  const res = await fetch(`${tableUrl(url)}?${qs.toString()}`, {
+    method: "HEAD",
+    headers: {
+      ...authHeaders(serviceKey),
+      Prefer: "count=exact",
+    },
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  const contentRange = res.headers.get("content-range") || res.headers.get("Content-Range") || "";
+  const totalRaw = contentRange.includes("/") ? contentRange.split("/").pop() : null;
+  const total = totalRaw ? Number(totalRaw) : 0;
+  return Number.isFinite(total) ? total : 0;
+};
+
+export const listByPrefix = async (
+  prefix: string,
+  args: { offset?: number; limit?: number } = {},
+): Promise<Array<{ key: string; value: any }>> => {
+  const { url, serviceKey } = getSupabaseEnv();
+  const offset = Number.isFinite(Number(args.offset)) ? Math.max(0, Math.floor(Number(args.offset))) : 0;
+  const limit = Number.isFinite(Number(args.limit)) ? Math.max(1, Math.min(500, Math.floor(Number(args.limit)))) : 200;
+  const qs = new URLSearchParams();
+  qs.set("select", "key,value");
+  qs.set("key", `like.${prefix}%`);
+  qs.set("order", "key.asc");
+  qs.set("offset", String(offset));
+  qs.set("limit", String(limit));
+  const res = await fetch(`${tableUrl(url)}?${qs.toString()}`, {
+    method: "GET",
+    headers: {
+      ...authHeaders(serviceKey),
+      Accept: "application/json",
+    },
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  const data = (await res.json().catch(() => null)) as any;
+  if (!Array.isArray(data)) return [];
+  return data
+    .map((r: any) => ({ key: String(r?.key ?? ""), value: r?.value }))
+    .filter((r: any) => r.key);
 };

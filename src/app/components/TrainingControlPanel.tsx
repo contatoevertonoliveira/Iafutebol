@@ -193,14 +193,9 @@ export default function TrainingControlPanel({ className = '' }: TrainingControl
 
     setIsImportingKaggle(true);
     try {
-      const { projectId, publicAnonKey } = await import('/utils/supabase/info');
-      const res = await fetch(`https://${projectId}.supabase.co/functions/v1/make-server-1119702f/kaggle/download-csv`, {
+      const { projectId } = await import('/utils/supabase/info');
+      const res = await fetch(`https://${projectId}.supabase.co/functions/v1/kaggle-server-1119702f/kaggle/download-csv`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${publicAnonKey}`,
-          apikey: publicAnonKey,
-        },
         body: JSON.stringify({ username, apiKey, dataset, fileName, maxBytes: 12 * 1024 * 1024 }),
       });
       const raw = await res.text();
@@ -244,14 +239,9 @@ export default function TrainingControlPanel({ className = '' }: TrainingControl
 
     setIsListingKaggleFiles(true);
     try {
-      const { projectId, publicAnonKey } = await import('/utils/supabase/info');
-      const res = await fetch(`https://${projectId}.supabase.co/functions/v1/make-server-1119702f/kaggle/list-files`, {
+      const { projectId } = await import('/utils/supabase/info');
+      const res = await fetch(`https://${projectId}.supabase.co/functions/v1/kaggle-server-1119702f/kaggle/list-files`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${publicAnonKey}`,
-          apikey: publicAnonKey,
-        },
         body: JSON.stringify({ username, apiKey, dataset }),
       });
       const raw = await res.text();

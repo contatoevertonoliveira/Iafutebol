@@ -1,80 +1,37 @@
-import { Hono } from "npm:hono";
-import { cors } from "npm:hono/cors";
-import { logger } from "npm:hono/logger";
+import { Hono } from "https://deno.land/x/hono@v4.3.11/mod.ts";
 import * as kv from "./kv_store.ts";
-import { createClient } from "jsr:@supabase/supabase-js@2.49.8";
-import { unzipSync } from "npm:fflate@0.8.2";
+let __bootError: unknown = null;
+try {
 const app = new Hono();
 
-app.use('*', logger(console.log));
+const CORS_HEADERS: Record<string, string> = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, apikey, x-automation-token",
+  "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+  "Access-Control-Expose-Headers": "Content-Length",
+  "Access-Control-Max-Age": "600",
+};
 
-app.use(
-  "/*",
-  cors({
-    origin: "*",
-    allowHeaders: ["Content-Type", "Authorization", "apikey"],
-    allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    exposeHeaders: ["Content-Length"],
-    maxAge: 600,
-  }),
-);
-
-app.get("/make-server-1119702f/health", (c) => {
-  return c.json({ status: "ok" });
+app.use("*", async (c, next) => {
+  const startedAt = Date.now();
+  await next();
+  for (const [k, v] of Object.entries(CORS_HEADERS)) c.header(k, v);
+  const ms = Date.now() - startedAt;
+  try {
+    console.log(`${c.req.method} ${c.req.path} -> ${c.res.status} (${ms}ms)`);
+  } catch {
+  }
 });
+
+app.options("*", (c) => {
+  for (const [k, v] of Object.entries(CORS_HEADERS)) c.header(k, v);
+  return c.text("", 204);
+});
+
 app.get("/health", (c) => {
   return c.json({ status: "ok" });
 });
 
-app.post("/make-server-1119702f/validate-api/football-data", async (c) => {
-  try {
-    const { apiKey } = await c.req.json();
-
-    if (!apiKey) {
-      return c.json({ valid: false, error: "API key não fornecida" }, 400);
-    }
-
-    console.log("🔍 Validando Football-Data API key via servidor...");
-
-    const response = await fetch("https://api.football-data.org/v4/competitions", {
-      method: "GET",
-      headers: {
-        "X-Auth-Token": apiKey,
-      },
-    });
-
-    console.log("📡 Status:", response.status);
-
-    if (response.ok) {
-      const data = await response.json();
-      return c.json({
-        valid: true,
-        message: "API key válida",
-        competitionsCount: data.competitions?.length || 0,
-      });
-    } else {
-      const errorText = await response.text();
-      console.error("❌ Erro da API:", errorText);
-      return c.json(
-        {
-          valid: false,
-          error: `API retornou status ${response.status}`,
-          details: errorText,
-        },
-        response.status,
-      );
-    }
-  } catch (error) {
-    console.error("❌ Erro ao validar API key:", error);
-    return c.json(
-      {
-        valid: false,
-        error: error.message || "Erro ao validar API key",
-      },
-      500,
-    );
-  }
-});
 app.post("/validate-api/football-data", async (c) => {
   try {
     const { apiKey } = await c.req.json();
@@ -125,55 +82,6 @@ app.post("/validate-api/football-data", async (c) => {
   }
 });
 
-app.post("/make-server-1119702f/validate-api/api-football", async (c) => {
-  try {
-    const { apiKey } = await c.req.json();
-
-    if (!apiKey) {
-      return c.json({ valid: false, error: "API key não fornecida" }, 400);
-    }
-
-    console.log("🔍 Validando API-Football key via servidor...");
-
-    const response = await fetch("https://v3.football.api-sports.io/timezone", {
-      method: "GET",
-      headers: {
-        "x-apisports-key": apiKey,
-      },
-    });
-
-    console.log("📡 Status:", response.status);
-
-    if (response.ok) {
-      const data = await response.json();
-      return c.json({
-        valid: true,
-        message: "API key válida",
-        results: data.results || 0,
-      });
-    } else {
-      const errorText = await response.text();
-      console.error("❌ Erro da API:", errorText);
-      return c.json(
-        {
-          valid: false,
-          error: `API retornou status ${response.status}`,
-          details: errorText,
-        },
-        response.status,
-      );
-    }
-  } catch (error) {
-    console.error("❌ Erro ao validar API key:", error);
-    return c.json(
-      {
-        valid: false,
-        error: error.message || "Erro ao validar API key",
-      },
-      500,
-    );
-  }
-});
 app.post("/validate-api/api-football", async (c) => {
   try {
     const { apiKey } = await c.req.json();
@@ -276,7 +184,6 @@ const validateGoogleGeminiKey = async (c: any) => {
   }
 };
 
-app.post("/make-server-1119702f/validate-api/google-gemini", validateGoogleGeminiKey);
 app.post("/validate-api/google-gemini", validateGoogleGeminiKey);
 
 const kaggleBasicAuth = (username: unknown, apiKey: unknown) => {
@@ -339,6 +246,7 @@ async function kaggleDownloadDatasetFile(params: {
   let chosenName = "";
   let chosenBytes: Uint8Array | null = null;
   try {
+    const { unzipSync } = await import("https://esm.sh/fflate@0.8.2");
     const files = unzipSync(buf);
     const names = Object.keys(files);
     const preferred = names.find((n) => n.toLowerCase().endsWith(".csv") && n.toLowerCase().includes(fileName.toLowerCase()));
@@ -393,15 +301,6 @@ async function kaggleListDatasetFiles(params: {
     .filter((f: any) => f?.name);
 }
 
-app.post("/make-server-1119702f/kaggle/download-csv", async (c) => {
-  try {
-    const body = await c.req.json();
-    const { csvText, fileName } = await kaggleDownloadDatasetFile(body);
-    return c.json({ ok: true, fileName, csvText });
-  } catch (error) {
-    return c.json({ ok: false, error: error?.message ?? "Erro ao baixar CSV do Kaggle" }, 400);
-  }
-});
 app.post("/kaggle/download-csv", async (c) => {
   try {
     const body = await c.req.json();
@@ -412,15 +311,6 @@ app.post("/kaggle/download-csv", async (c) => {
   }
 });
 
-app.post("/make-server-1119702f/kaggle/list-files", async (c) => {
-  try {
-    const body = await c.req.json();
-    const files = await kaggleListDatasetFiles(body);
-    return c.json({ ok: true, files });
-  } catch (error) {
-    return c.json({ ok: false, error: error?.message ?? "Erro ao listar arquivos do Kaggle" }, 400);
-  }
-});
 app.post("/kaggle/list-files", async (c) => {
   try {
     const body = await c.req.json();
@@ -431,69 +321,6 @@ app.post("/kaggle/list-files", async (c) => {
   }
 });
 
-app.post("/make-server-1119702f/proxy/football-data", async (c) => {
-  try {
-    const { url, apiKey } = await c.req.json();
-
-    if (!apiKey) {
-      return c.json({ error: "API key não fornecida" }, 400);
-    }
-
-    if (!url || typeof url !== "string") {
-      return c.json({ error: "URL não fornecida" }, 400);
-    }
-
-    const allowedPrefix = "https://api.football-data.org/v4/";
-    if (!url.startsWith(allowedPrefix)) {
-      return c.json({ error: "URL não permitida" }, 400);
-    }
-
-    const response = await fetch(url, {
-      method: "GET",
-      headers: {
-        "X-Auth-Token": apiKey,
-      },
-    });
-
-    const contentType = response.headers.get("content-type") || "";
-    const isJson = contentType.includes("application/json");
-
-    if (isJson) {
-      const data = await response.json();
-      if (!response.ok) {
-        return c.json(
-          {
-            error: `API retornou status ${response.status}`,
-            details: data,
-          },
-          response.status,
-        );
-      }
-      return c.json(data);
-    }
-
-    const text = await response.text();
-    if (!response.ok) {
-      return c.json(
-        {
-          error: `API retornou status ${response.status}`,
-          details: text,
-        },
-        response.status,
-      );
-    }
-
-    return c.body(text, 200, {
-      "Content-Type": contentType || "text/plain; charset=utf-8",
-    });
-  } catch (error) {
-    console.error("❌ Erro no proxy Football-Data:", error);
-    return c.json(
-      { error: error.message || "Erro ao fazer proxy para Football-Data" },
-      500,
-    );
-  }
-});
 app.post("/proxy/football-data", async (c) => {
   try {
     const { url, apiKey } = await c.req.json();
@@ -558,69 +385,6 @@ app.post("/proxy/football-data", async (c) => {
   }
 });
 
-app.post("/make-server-1119702f/proxy/api-football", async (c) => {
-  try {
-    const { url, apiKey } = await c.req.json();
-
-    if (!apiKey) {
-      return c.json({ error: "API key não fornecida" }, 400);
-    }
-
-    if (!url || typeof url !== "string") {
-      return c.json({ error: "URL não fornecida" }, 400);
-    }
-
-    const allowedPrefix = "https://v3.football.api-sports.io/";
-    if (!url.startsWith(allowedPrefix)) {
-      return c.json({ error: "URL não permitida" }, 400);
-    }
-
-    const response = await fetch(url, {
-      method: "GET",
-      headers: {
-        "x-apisports-key": apiKey,
-      },
-    });
-
-    const contentType = response.headers.get("content-type") || "";
-    const isJson = contentType.includes("application/json");
-
-    if (isJson) {
-      const data = await response.json();
-      if (!response.ok) {
-        return c.json(
-          {
-            error: `API retornou status ${response.status}`,
-            details: data,
-          },
-          response.status,
-        );
-      }
-      return c.json(data);
-    }
-
-    const text = await response.text();
-    if (!response.ok) {
-      return c.json(
-        {
-          error: `API retornou status ${response.status}`,
-          details: text,
-        },
-        response.status,
-      );
-    }
-
-    return c.body(text, 200, {
-      "Content-Type": contentType || "text/plain; charset=utf-8",
-    });
-  } catch (error) {
-    console.error("❌ Erro no proxy API-Football:", error);
-    return c.json(
-      { error: error.message || "Erro ao fazer proxy para API-Football" },
-      500,
-    );
-  }
-});
 app.post("/proxy/api-football", async (c) => {
   try {
     const { url, apiKey } = await c.req.json();
@@ -751,7 +515,6 @@ const deepseekProxy = async (c: any) => {
   }
 };
 app.post("/proxy/deepseek", deepseekProxy);
-app.post("/make-server-1119702f/proxy/deepseek", deepseekProxy);
 
 const openaiProxy = async (c: any) => {
   try {
@@ -819,7 +582,6 @@ const openaiProxy = async (c: any) => {
   }
 };
 app.post("/proxy/openai", openaiProxy);
-app.post("/make-server-1119702f/proxy/openai", openaiProxy);
 
 const anthropicProxy = async (c: any) => {
   try {
@@ -888,7 +650,6 @@ const anthropicProxy = async (c: any) => {
   }
 };
 app.post("/proxy/anthropic", anthropicProxy);
-app.post("/make-server-1119702f/proxy/anthropic", anthropicProxy);
 
 const googleProxy = async (c: any) => {
   try {
@@ -965,7 +726,6 @@ const googleProxy = async (c: any) => {
   }
 };
 app.post("/proxy/google", googleProxy);
-app.post("/make-server-1119702f/proxy/google", googleProxy);
 
 const normalizeLeagueCountryKey = (country: unknown) => {
   const c = String(country ?? "").trim();
@@ -1172,6 +932,40 @@ const betfairJsonRpcRaw = async (params: { method: string; params: any; sessionT
   return first?.result ?? null;
 };
 
+const betfairJsonRpcRawWithUrl = async (params: { url: string; method: string; params: any; sessionToken: string }) => {
+  const cfg = getBetfairConfig();
+  if (!cfg.appKey) throw new Error("Betfair: APP_KEY ausente");
+  const url = String(params.url ?? "").trim();
+  if (!url) throw new Error("Betfair: url ausente");
+  const method = String(params.method ?? "").trim();
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "X-Application": cfg.appKey,
+      "X-Authentication": params.sessionToken,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify([{ jsonrpc: "2.0", id: 1, method, params: params.params ?? {} }]),
+  });
+
+  const data = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(`Betfair API falhou (HTTP ${res.status})`);
+  const first = Array.isArray(data) ? data[0] : data;
+  if (first?.error) {
+    const msg = first?.error?.message ? String(first.error.message) : JSON.stringify(first.error);
+    const codeRaw =
+      String(first?.error?.data?.APINGException?.errorCode ?? first?.error?.data?.exceptionname ?? "").trim() ||
+      String(first?.error?.data?.errorCode ?? "").trim();
+    const code = codeRaw || msg;
+    const isSessionInvalid = /INVALID_SESSION|NO_SESSION|SESSION.*INVALID/i.test(code);
+    const err = new Error(`Betfair API error: ${msg}`.slice(0, 600)) as any;
+    err.__betfairSessionInvalid = isSessionInvalid;
+    throw err;
+  }
+  return first?.result ?? null;
+};
+
 const betfairJsonRpc = async (params: { method: string; params: any; sessionToken: string }) => {
   const method = String(params.method ?? "").trim();
   const allowed = new Set([
@@ -1188,54 +982,27 @@ const betfairJsonRpc = async (params: { method: string; params: any; sessionToke
   return await betfairJsonRpcRaw({ ...params, method });
 };
 
+const betfairJsonRpcAccount = async (params: { method: string; params: any; sessionToken: string }) => {
+  const method = String(params.method ?? "").trim();
+  const allowed = new Set(["AccountAPING/v1.0/getAccountFunds"]);
+  if (!allowed.has(method)) throw new Error("Betfair: método não permitido");
+  const cfg = getBetfairConfig();
+  const accountUrl = `https://${cfg.apiHost}/exchange/account/json-rpc/v1`;
+  return await betfairJsonRpcRawWithUrl({ url: accountUrl, ...params, method });
+};
+
 const betfairJsonRpcTrading = async (params: { method: string; params: any; sessionToken: string }) => {
   const method = String(params.method ?? "").trim();
-  const allowed = new Set(["SportsAPING/v1.0/placeOrders"]);
+  const allowed = new Set([
+    "SportsAPING/v1.0/placeOrders",
+    "SportsAPING/v1.0/listCurrentOrders",
+    "SportsAPING/v1.0/cancelOrders",
+    "SportsAPING/v1.0/listMarketProfitAndLoss",
+  ]);
   if (!allowed.has(method)) throw new Error("Betfair: método não permitido");
   return await betfairJsonRpcRaw({ ...params, method });
 };
 
-app.post("/make-server-1119702f/betfair/session", async (c) => {
-  const authError = requireBearer(c);
-  if (authError) return authError;
-  try {
-    const token = await getBetfairSessionToken();
-    const cached = await loadBetfairSession();
-    const tokenPreview = token ? `${token.slice(0, 6)}…${token.slice(-4)}` : null;
-    const debug = new URL(c.req.url).searchParams.get("debug") === "1";
-    if (!debug) return c.json({ ok: true, hasSession: Boolean(token), tokenPreview, fetchedAt: cached?.fetchedAt ?? null });
-    const cfg = getBetfairConfig();
-    const certSha256 = await pemSha256Hex(cfg.certPem, "CERTIFICATE");
-    const keyType = cfg.keyPem.includes("BEGIN RSA PRIVATE KEY") ? "RSA PRIVATE KEY"
-      : cfg.keyPem.includes("BEGIN PRIVATE KEY") ? "PRIVATE KEY"
-      : cfg.keyPem.includes("BEGIN ENCRYPTED PRIVATE KEY") ? "ENCRYPTED PRIVATE KEY"
-      : "UNKNOWN";
-    return c.json({
-      ok: true,
-      hasSession: Boolean(token),
-      tokenPreview,
-      fetchedAt: cached?.fetchedAt ?? null,
-      debug: { ssoHost: cfg.ssoHost, apiHost: cfg.apiHost, certSha256, keyType, certSource: cfg.certSource, keySource: cfg.keySource },
-    });
-  } catch (error) {
-    const debug = new URL(c.req.url).searchParams.get("debug") === "1";
-    if (!debug) return c.json({ ok: false, error: error.message || "Erro ao criar sessão Betfair" }, 500);
-    try {
-      const cfg = getBetfairConfig();
-      const certSha256 = await pemSha256Hex(cfg.certPem, "CERTIFICATE");
-      const keyType = cfg.keyPem.includes("BEGIN RSA PRIVATE KEY") ? "RSA PRIVATE KEY"
-        : cfg.keyPem.includes("BEGIN PRIVATE KEY") ? "PRIVATE KEY"
-        : cfg.keyPem.includes("BEGIN ENCRYPTED PRIVATE KEY") ? "ENCRYPTED PRIVATE KEY"
-        : "UNKNOWN";
-      return c.json(
-        { ok: false, error: error.message || "Erro ao criar sessão Betfair", debug: { ssoHost: cfg.ssoHost, apiHost: cfg.apiHost, certSha256, keyType, certSource: cfg.certSource, keySource: cfg.keySource } },
-        500,
-      );
-    } catch {
-      return c.json({ ok: false, error: error.message || "Erro ao criar sessão Betfair", debug: { failedToLoadEnv: true } }, 500);
-    }
-  }
-});
 app.post("/betfair/session", async (c) => {
   const authError = requireBearer(c);
   if (authError) return authError;
@@ -1278,28 +1045,9 @@ app.post("/betfair/session", async (c) => {
   }
 });
 
-app.post("/make-server-1119702f/betfair/rpc", async (c) => {
-  const authError = requireBearer(c);
-  if (authError) return authError;
-  try {
-    const body = await c.req.json().catch(() => ({}));
-    const method = String(body?.method ?? "").trim();
-    const params = body?.params ?? {};
-    const sessionToken = await getBetfairSessionToken();
-    let result: any = null;
-    try {
-      result = await betfairJsonRpc({ method, params, sessionToken });
-    } catch (e) {
-      const invalid = Boolean((e as any)?.__betfairSessionInvalid);
-      if (!invalid) throw e;
-      const refreshed = await getBetfairSessionToken({ force: true });
-      result = await betfairJsonRpc({ method, params, sessionToken: refreshed });
-    }
-    return c.json({ ok: true, result });
-  } catch (error) {
-    return c.json({ ok: false, error: error.message || "Erro ao chamar Betfair" }, 500);
-  }
-});
+app.post("/automation/betfair/account/funds", betfairAccountFundsHandler);
+app.post("/betfair/account/funds", betfairAccountFundsHandler);
+
 app.post("/betfair/rpc", async (c) => {
   const authError = requireBearer(c);
   if (authError) return authError;
@@ -1323,6 +1071,52 @@ app.post("/betfair/rpc", async (c) => {
   }
 });
 
+async function betfairAccountFundsHandler(c: any) {
+  const authError = requireBearer(c);
+  if (authError) return authError;
+  const adminError = requireAutomationAdmin(c);
+  if (adminError) return adminError;
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const wallet = String(body?.wallet ?? "").trim() || null;
+    const sessionToken = await getBetfairSessionToken();
+    let result: any = null;
+    try {
+      result = await betfairJsonRpcAccount({
+        method: "AccountAPING/v1.0/getAccountFunds",
+        params: wallet ? { wallet } : {},
+        sessionToken,
+      });
+    } catch (e) {
+      const invalid = Boolean((e as any)?.__betfairSessionInvalid);
+      if (!invalid) throw e;
+      const refreshed = await getBetfairSessionToken({ force: true });
+      result = await betfairJsonRpcAccount({
+        method: "AccountAPING/v1.0/getAccountFunds",
+        params: wallet ? { wallet } : {},
+        sessionToken: refreshed,
+      });
+    }
+
+    const availableToBetBalance = Number(result?.availableToBetBalance);
+    const exposure = Number(result?.exposure);
+    const currencyCode = String(result?.currencyCode ?? "").trim() || null;
+
+    return c.json({
+      ok: true,
+      funds: result ?? null,
+      summary: {
+        availableToBetBalance: Number.isFinite(availableToBetBalance) ? availableToBetBalance : null,
+        exposure: Number.isFinite(exposure) ? exposure : null,
+        currencyCode,
+      },
+      fetchedAt: new Date().toISOString(),
+    });
+  } catch (error) {
+    return c.json({ ok: false, error: error.message || "Erro ao buscar banca (Betfair)" }, 500);
+  }
+}
+
 const validatePlaceOrdersPayload = (payload: any) => {
   const marketId = String(payload?.marketId ?? "").trim();
   if (!marketId) return { ok: false, error: "marketId obrigatório" } as const;
@@ -1334,34 +1128,6 @@ const validatePlaceOrdersPayload = (payload: any) => {
   if (customerRef && customerRef.length > 32) return { ok: false, error: "customerRef grande demais" } as const;
   return { ok: true } as const;
 };
-
-app.post("/make-server-1119702f/betfair/placeOrders", async (c) => {
-  const authError = requireBearer(c);
-  if (authError) return authError;
-  const adminError = requireAutomationAdmin(c);
-  if (adminError) return adminError;
-  try {
-    const body = await c.req.json().catch(() => ({}));
-    const validation = validatePlaceOrdersPayload(body);
-    if (!validation.ok) return c.json({ ok: false, error: validation.error }, 400);
-    const sessionToken = await getBetfairSessionToken();
-    const result = await betfairJsonRpcTrading({
-      method: "SportsAPING/v1.0/placeOrders",
-      params: {
-        marketId: String(body.marketId),
-        instructions: body.instructions,
-        customerRef: body.customerRef ?? undefined,
-        marketVersion: body.marketVersion ?? undefined,
-        customerStrategyRef: body.customerStrategyRef ?? undefined,
-        async: Boolean(body.async ?? false),
-      },
-      sessionToken,
-    });
-    return c.json({ ok: true, result });
-  } catch (error) {
-    return c.json({ ok: false, error: error.message || "Erro ao enviar placeOrders" }, 500);
-  }
-});
 
 app.post("/betfair/placeOrders", async (c) => {
   const authError = requireBearer(c);
@@ -1762,12 +1528,15 @@ const resolveBetfairMatchOdds = async (params: { homeTeam: string; awayTeam: str
     () =>
       call("SportsAPING/v1.0/listMarketBook", {
         marketIds: [marketId],
-        priceProjection: { priceData: ["EX_BEST_OFFERS"], virtualise: true },
+        priceProjection: { priceData: ["EX_BEST_OFFERS", "EX_TRADED"], virtualise: true },
       }),
     8000,
   );
 
   const book = Array.isArray(marketBook) ? marketBook[0] : null;
+  const marketStatus = String(book?.status ?? "").trim() || null;
+  const isClosed = String(marketStatus ?? "").toUpperCase() === "CLOSED";
+  const inPlay = isClosed ? false : Boolean(book?.inplay ?? false);
   const totalMatched = Number(book?.totalMatched);
   const runnersBook = Array.isArray(book?.runners) ? book.runners : [];
   const odds: any = {};
@@ -1776,10 +1545,11 @@ const resolveBetfairMatchOdds = async (params: { homeTeam: string; awayTeam: str
     const ex = rb?.ex ?? {};
     const back0 = Array.isArray(ex?.availableToBack) ? ex.availableToBack[0] : null;
     const lay0 = Array.isArray(ex?.availableToLay) ? ex.availableToLay[0] : null;
+    const ltp = Number(rb?.lastPriceTraded);
     return {
-      back: back0 ? Number(back0.price) : null,
+      back: back0 ? Number(back0.price) : Number.isFinite(ltp) ? ltp : null,
       backSize: back0 ? Number(back0.size) : null,
-      lay: lay0 ? Number(lay0.price) : null,
+      lay: lay0 ? Number(lay0.price) : Number.isFinite(ltp) ? ltp : null,
       laySize: lay0 ? Number(lay0.size) : null,
     };
   };
@@ -1793,6 +1563,8 @@ const resolveBetfairMatchOdds = async (params: { homeTeam: string; awayTeam: str
     eventName: String(best?.name ?? "").trim() || null,
     marketId,
     marketStartTime: String(mk?.marketStartTime ?? "").trim() || null,
+    inPlay,
+    marketStatus,
     runners: {
       homeSelectionId: Number.isFinite(selectionByRole.home) ? selectionByRole.home : null,
       drawSelectionId: Number.isFinite(selectionByRole.draw) ? selectionByRole.draw : null,
@@ -1803,29 +1575,6 @@ const resolveBetfairMatchOdds = async (params: { homeTeam: string; awayTeam: str
     oddsFetchedAt: new Date().toISOString(),
   };
 };
-
-app.post("/make-server-1119702f/betfair/matches/list", async (c) => {
-  const authError = requireBearer(c);
-  if (authError) return authError;
-  try {
-    const body = await c.req.json().catch(() => ({}));
-    const dateFrom = String(body?.dateFrom ?? "").trim();
-    const dateTo = String(body?.dateTo ?? "").trim();
-    const maxResults = Number(body?.maxResults ?? body?.maxEvents ?? 200);
-
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateFrom) || !/^\d{4}-\d{2}-\d{2}$/.test(dateTo)) {
-      return c.json({ ok: false, error: "dateFrom/dateTo devem estar no formato YYYY-MM-DD" }, 400);
-    }
-
-    const fromIso = new Date(`${dateFrom}T00:00:00-03:00`).toISOString();
-    const toIso = new Date(`${dateTo}T23:59:59-03:00`).toISOString();
-
-    const matches = await listBetfairSoccerMatchOddsRange({ fromIso, toIso, maxResults: Number.isFinite(maxResults) ? maxResults : 200 });
-    return c.json({ ok: true, matches });
-  } catch (error) {
-    return c.json({ ok: false, error: error.message || "Erro ao listar jogos (Betfair)" }, 500);
-  }
-});
 
 app.post("/betfair/matches/list", async (c) => {
   const authError = requireBearer(c);
@@ -1877,6 +1626,357 @@ const parseCorrectScoreKey = (runnerName: unknown) => {
   if (n.includes("qualquer") && n.includes("outro") && n.includes("empate")) return "AOD";
 
   return null;
+};
+
+type CorrectScorePlanConfig = {
+  minProfitPct: number;
+  targetProfitPct: number;
+  maxProfitPct: number;
+  bankroll: number;
+  maxSelections: number;
+  maxGoals: number;
+  includeAnyOther: boolean;
+};
+
+type CorrectScorePlanLeg = {
+  key: string;
+  selectionId: number | null;
+  back: number | null;
+  lay: number | null;
+  impliedProb: number | null;
+  stake: number | null;
+};
+
+type CorrectScorePlan = {
+  ok: boolean;
+  reason?: string | null;
+  mode: "dutch_back" | "staged_back" | "ladder_volume" | "skip";
+  marketId: string | null;
+  favorite?: "home" | "away" | null;
+  score?: { home: number; away: number } | null;
+  scenario?: "base_0_0_to_2_2" | "favorite_losing_ht_1_2" | null;
+  isFinished: boolean;
+  isLive: boolean;
+  achievableProfitPct: number | null;
+  plannedProfitPct: number | null;
+  legs: CorrectScorePlanLeg[];
+  instructions: any[];
+  createdAt: string;
+};
+
+const clamp = (v: number, min: number, max: number) => Math.min(max, Math.max(min, v));
+const round2 = (v: number) => Math.round(v * 100) / 100;
+
+const parseScoreKey = (key: string) => {
+  const m = String(key ?? "").trim().match(/^(\d+)-(\d+)$/);
+  if (!m) return null;
+  const home = Number(m[1]);
+  const away = Number(m[2]);
+  if (!Number.isFinite(home) || !Number.isFinite(away)) return null;
+  return { home, away };
+};
+
+const pickPreLiveFavorite = (item: any) => {
+  const p = item?.prediction && typeof item.prediction === "object" ? item.prediction : null;
+  const pred = String(p?.winner?.prediction ?? "").trim();
+  const conf = Number(p?.winner?.confidence);
+  const favorite = pred === "home" || pred === "away" ? pred : null;
+  const confidence = Number.isFinite(conf) ? conf : null;
+  if (!favorite) return { favorite: null as ("home" | "away" | null), confidence };
+  if (confidence != null && confidence < 55) return { favorite: null as ("home" | "away" | null), confidence };
+  return { favorite: favorite as "home" | "away", confidence };
+};
+
+const extractCorrectScorePrice = (cs: any, key: string) => {
+  const p = cs?.prices?.[key] ?? null;
+  if (!p || typeof p !== "object") return null;
+  const selectionId = Number(p?.selectionId);
+  const back = Number(p?.back);
+  const lay = Number(p?.lay);
+  const impliedProb = Number(p?.impliedProb);
+  return {
+    selectionId: Number.isFinite(selectionId) ? selectionId : null,
+    back: Number.isFinite(back) ? back : null,
+    lay: Number.isFinite(lay) ? lay : null,
+    impliedProb: Number.isFinite(impliedProb) ? impliedProb : null,
+  };
+};
+
+const pickCoverageKeys = (item: any, cfg: CorrectScorePlanConfig) => {
+  const scoreHome = Number(item?.scoreHome);
+  const scoreAway = Number(item?.scoreAway);
+  const score =
+    Number.isFinite(scoreHome) && Number.isFinite(scoreAway) && scoreHome >= 0 && scoreAway >= 0
+      ? { home: Math.floor(scoreHome), away: Math.floor(scoreAway) }
+      : null;
+
+  const { favorite } = pickPreLiveFavorite(item);
+  const hasMarket = Boolean(item?.betfair?.marketId);
+  const marketStatus = String(item?.betfair?.marketStatus ?? "").toUpperCase();
+  const isFinished = hasMarket && marketStatus === "CLOSED";
+
+  const isFirstHalf = (() => {
+    const short = String(item?.live?.statusShort ?? "").toUpperCase();
+    if (short === "HT" || short === "1H") return true;
+    const elapsed = Number(item?.live?.elapsed);
+    if (Number.isFinite(elapsed) && elapsed >= 35 && elapsed <= 55) return true;
+    return false;
+  })();
+
+  const isFavoriteLosing1to2AtHT =
+    Boolean(favorite) && Boolean(score) && isFirstHalf && !isFinished && (() => {
+      const fav = favorite as "home" | "away";
+      const favGoals = fav === "home" ? (score as any).home : (score as any).away;
+      const oppGoals = fav === "home" ? (score as any).away : (score as any).home;
+      const d = oppGoals - favGoals;
+      return d === 1 || d === 2;
+    })();
+
+  if (isFavoriteLosing1to2AtHT && favorite && score) {
+    const maxGoals = cfg.maxGoals;
+    const fav = favorite;
+    const set = new Set<string>();
+    set.add(`${score.home}-${score.away}`);
+
+    for (let h = score.home; h <= maxGoals; h += 1) {
+      for (let a = score.away; a <= maxGoals; a += 1) {
+        const margin = fav === "home" ? a - h : h - a;
+        if (margin > 2) continue;
+        set.add(`${h}-${a}`);
+      }
+    }
+
+    const keys = Array.from(set).filter((k) => {
+      const s = parseScoreKey(k);
+      if (!s) return false;
+      if (s.home > maxGoals || s.away > maxGoals) return false;
+      return true;
+    });
+    return { keys, score, favorite, scenario: "favorite_losing_ht_1_2" as const };
+  }
+
+  const keys: string[] = [];
+  for (let h = 0; h <= 2; h += 1) for (let a = 0; a <= 2; a += 1) keys.push(`${h}-${a}`);
+  return { keys, score, favorite, scenario: "base_0_0_to_2_2" as const };
+};
+
+const buildDutchBackPlan = (legs: CorrectScorePlanLeg[], cfg: CorrectScorePlanConfig) => {
+  const usable = legs
+    .filter((l) => typeof l.back === "number" && Number.isFinite(l.back) && (l.back as number) > 1.01 && (l.back as number) <= 1000)
+    .map((l) => ({ ...l, back: l.back as number }));
+
+  if (usable.length < 3) {
+    return { ok: false, reason: "Poucas seleções com preço BACK disponível" as const, mode: "skip" as const, legs: [] as CorrectScorePlanLeg[], instructions: [] as any[], achievableProfitPct: null as number | null, plannedProfitPct: null as number | null };
+  }
+
+  usable.sort((a, b) => (Number(b.impliedProb ?? (1 / (b.back as number))) - Number(a.impliedProb ?? (1 / (a.back as number)))));
+  const chosen = usable.slice(0, Math.max(3, Math.min(cfg.maxSelections, usable.length)));
+
+  const sumInv = chosen.reduce((acc, l) => acc + (1 / (l.back as number)), 0);
+  const achievableProfitPct = Number.isFinite(sumInv) && sumInv > 0 ? (1 / sumInv) - 1 : null;
+  if (achievableProfitPct == null) {
+    return { ok: false, reason: "Falha ao calcular overround" as const, mode: "skip" as const, legs: [] as CorrectScorePlanLeg[], instructions: [] as any[], achievableProfitPct: null as number | null, plannedProfitPct: null as number | null };
+  }
+
+  if (achievableProfitPct < cfg.minProfitPct) {
+    return {
+      ok: false,
+      reason: `Não dá para garantir ${Math.round(cfg.minProfitPct * 100)}% com os preços atuais (achievable ${(achievableProfitPct * 100).toFixed(2)}%)`,
+      mode: "staged_back" as const,
+      legs: chosen.map((l) => ({ ...l, stake: null })),
+      instructions: [],
+      achievableProfitPct,
+      plannedProfitPct: null,
+    };
+  }
+
+  const plannedProfitPct = Math.min(cfg.maxProfitPct, Math.max(cfg.minProfitPct, Math.min(cfg.targetProfitPct, achievableProfitPct)));
+  const bankroll = Math.max(2, cfg.bankroll);
+  const A = 1 / (1 + plannedProfitPct);
+  const T = bankroll / A;
+
+  const withStakes = chosen.map((l) => ({ ...l, stake: round2(T / (l.back as number)) }));
+  const instructions = withStakes
+    .filter((l) => l.selectionId && l.stake && l.stake >= 2 && l.back)
+    .map((l) => ({
+      selectionId: l.selectionId,
+      side: "BACK",
+      orderType: "LIMIT",
+      limitOrder: {
+        size: l.stake,
+        price: l.back,
+        persistenceType: "LAPSE",
+      },
+    }));
+
+  return { ok: true, reason: null as string | null, mode: "dutch_back" as const, legs: withStakes, instructions, achievableProfitPct, plannedProfitPct };
+};
+
+const buildLadderVolumePlan = (item: any, cs: any, cfg: CorrectScorePlanConfig): CorrectScorePlan => {
+  const createdAt = new Date().toISOString();
+  const scoreHome = Number(item?.scoreHome);
+  const scoreAway = Number(item?.scoreAway);
+  const score =
+    Number.isFinite(scoreHome) && Number.isFinite(scoreAway) && scoreHome >= 0 && scoreAway >= 0
+      ? { home: Math.floor(scoreHome), away: Math.floor(scoreAway) }
+      : { home: 0, away: 0 };
+
+  const clampGoals = (v: number) => Math.max(0, Math.min(cfg.maxGoals, Math.floor(v)));
+  const h = clampGoals(score.home);
+  const a = clampGoals(score.away);
+
+  const baseKeys = Array.from(new Set([`${h}-${a}`, `${clampGoals(h + 1)}-${a}`, `${h}-${clampGoals(a + 1)}`]));
+
+  const read = (key: string) => {
+    const p = cs?.prices?.[key] ?? null;
+    if (!p || typeof p !== "object") return null;
+    const selectionId = Number(p?.selectionId);
+    const back = Number(p?.back);
+    const lay = Number(p?.lay);
+    const impliedProb = Number(p?.impliedProb);
+    const backSize = Number(p?.backSize);
+    const laySize = Number(p?.laySize);
+    const tradedVolume = Number(p?.tradedVolume);
+    return {
+      selectionId: Number.isFinite(selectionId) ? selectionId : null,
+      back: Number.isFinite(back) ? back : null,
+      lay: Number.isFinite(lay) ? lay : null,
+      impliedProb: Number.isFinite(impliedProb) ? impliedProb : (Number.isFinite(back) && back > 1.01 ? 1 / back : null),
+      backSize: Number.isFinite(backSize) ? backSize : null,
+      laySize: Number.isFinite(laySize) ? laySize : null,
+      tradedVolume: Number.isFinite(tradedVolume) ? tradedVolume : null,
+    };
+  };
+
+  const legs: CorrectScorePlanLeg[] = baseKeys.map((k) => {
+    const p = read(k);
+    return {
+      key: k,
+      selectionId: p?.selectionId ?? null,
+      back: p?.back ?? null,
+      lay: p?.lay ?? null,
+      impliedProb: p?.impliedProb ?? null,
+      stake: null,
+    };
+  });
+
+  const usable = legs.filter((l) => l.selectionId && typeof l.back === "number" && Number.isFinite(l.back) && (l.back as number) > 1.01);
+  if (usable.length === 0) {
+    return { ok: false, reason: "Sem preços BACK disponíveis para placar atual/próximos", mode: "skip", marketId: String(cs?.marketId ?? "").trim() || null, score, scenario: "base_0_0_to_2_2", isFinished: false, isLive: Boolean(item?.betfair?.inPlay), achievableProfitPct: null, plannedProfitPct: null, legs, instructions: [], createdAt };
+  }
+
+  const weights = usable.map((l) => {
+    const p = read(l.key);
+    const wVol = Number(p?.tradedVolume);
+    const wBack = Number(p?.backSize);
+    const wProb = Number(l.impliedProb);
+    const w = (Number.isFinite(wVol) ? wVol : 0) * 1.0 + (Number.isFinite(wBack) ? wBack : 0) * 0.2 + (Number.isFinite(wProb) ? wProb : 0) * 100.0;
+    return { key: l.key, w: Number.isFinite(w) && w > 0 ? w : 1 };
+  });
+  const sumW = weights.reduce((acc, x) => acc + x.w, 0) || 1;
+
+  const bankroll = Math.max(2, cfg.bankroll);
+  const plannedProfitPct = cfg.targetProfitPct;
+  const withStakes = legs.map((l) => {
+    const w = weights.find((x) => x.key === l.key)?.w ?? 0;
+    const stake = l.selectionId && l.back ? round2((bankroll * w) / sumW) : null;
+    return { ...l, stake: stake != null && stake >= 2 ? stake : null };
+  });
+
+  const instructions = withStakes
+    .filter((l) => l.selectionId && l.stake && l.stake >= 2 && l.back)
+    .map((l) => ({
+      selectionId: l.selectionId,
+      side: "BACK",
+      orderType: "LIMIT",
+      limitOrder: {
+        size: l.stake,
+        price: l.back,
+        persistenceType: "LAPSE",
+      },
+    }));
+
+  return {
+    ok: instructions.length > 0,
+    reason: instructions.length > 0 ? null : "Stake mínima não atingida nas seleções",
+    mode: "ladder_volume",
+    marketId: String(cs?.marketId ?? "").trim() || null,
+    favorite: pickPreLiveFavorite(item).favorite,
+    score,
+    scenario: "base_0_0_to_2_2",
+    isFinished: false,
+    isLive: Boolean(item?.betfair?.inPlay),
+    achievableProfitPct: null,
+    plannedProfitPct,
+    legs: withStakes,
+    instructions,
+    createdAt,
+  };
+};
+
+const planCorrectScoreForQueueItem = (item: any, override?: Partial<CorrectScorePlanConfig>): CorrectScorePlan => {
+  const createdAt = new Date().toISOString();
+  const hasMarket = Boolean(item?.betfair?.marketId);
+  const marketStatus = String(item?.betfair?.marketStatus ?? "").toUpperCase();
+  const isFinished = hasMarket && marketStatus === "CLOSED";
+  const isLive = Boolean(item?.betfair?.inPlay) && !isFinished;
+
+  const cs = item?.betfair?.correctScore ?? null;
+  const marketId = String(cs?.marketId ?? "").trim() || null;
+  if (!marketId) {
+    return { ok: false, reason: "Market CORRECT_SCORE não resolvido ainda", mode: "skip", marketId: null, isFinished, isLive, achievableProfitPct: null, plannedProfitPct: null, legs: [], instructions: [], createdAt };
+  }
+  if (isFinished) {
+    return { ok: true, reason: null, mode: "skip", marketId, isFinished, isLive: false, achievableProfitPct: null, plannedProfitPct: null, legs: [], instructions: [], createdAt };
+  }
+
+  const cfg: CorrectScorePlanConfig = {
+    minProfitPct: clamp(Number(override?.minProfitPct ?? 0.02), 0.0, 0.2),
+    targetProfitPct: clamp(Number(override?.targetProfitPct ?? 0.03), 0.0, 0.25),
+    maxProfitPct: clamp(Number(override?.maxProfitPct ?? 0.05), 0.0, 0.5),
+    bankroll: clamp(Number(override?.bankroll ?? 50), 2, 10_000),
+    maxSelections: clamp(Number(override?.maxSelections ?? 10), 3, 25),
+    maxGoals: clamp(Number(override?.maxGoals ?? 3), 2, 6),
+    includeAnyOther: Boolean(override?.includeAnyOther ?? true),
+  };
+
+  const planType = String(item?.strategy?.correctScore?.planType ?? "").trim().toLowerCase();
+  if (planType === "ladder_volume") {
+    return buildLadderVolumePlan(item, cs, cfg);
+  }
+
+  const picked = pickCoverageKeys(item, cfg);
+  const keys = cfg.includeAnyOther ? [...picked.keys, "AOHW", "AOD", "AOAW"] : picked.keys;
+
+  const legs: CorrectScorePlanLeg[] = keys.map((k) => {
+    const px = extractCorrectScorePrice(cs, k);
+    return {
+      key: k,
+      selectionId: px?.selectionId ?? null,
+      back: px?.back ?? null,
+      lay: px?.lay ?? null,
+      impliedProb: px?.impliedProb ?? (typeof px?.back === "number" && px.back > 1 ? 1 / px.back : null),
+      stake: null,
+    };
+  });
+
+  const dutch = buildDutchBackPlan(legs, cfg);
+  return {
+    ok: dutch.ok,
+    reason: dutch.reason ?? null,
+    mode: dutch.mode,
+    marketId,
+    favorite: picked.favorite,
+    score: picked.score,
+    scenario: picked.scenario,
+    isFinished,
+    isLive,
+    achievableProfitPct: dutch.achievableProfitPct,
+    plannedProfitPct: dutch.plannedProfitPct,
+    legs: dutch.legs.length > 0 ? dutch.legs : legs,
+    instructions: dutch.instructions,
+    createdAt,
+  };
 };
 
 const resolveBetfairCorrectScoreMarket = async (params: { eventId: string }) => {
@@ -1938,10 +2038,15 @@ const resolveBetfairCorrectScoreMarket = async (params: { eventId: string }) => 
     const ex = rb?.ex ?? {};
     const back0 = Array.isArray(ex?.availableToBack) ? ex.availableToBack[0] : null;
     const lay0 = Array.isArray(ex?.availableToLay) ? ex.availableToLay[0] : null;
+    const traded = Array.isArray(ex?.tradedVolume) ? ex.tradedVolume : [];
     const back = back0 ? Number(back0.price) : null;
     const lay = lay0 ? Number(lay0.price) : null;
     const backSize = back0 ? Number(back0.size) : null;
     const laySize = lay0 ? Number(lay0.size) : null;
+    const tradedVolume = traded.reduce((acc: number, t: any) => {
+      const sz = Number(t?.size);
+      return Number.isFinite(sz) ? acc + sz : acc;
+    }, 0);
 
     const implied = back && Number.isFinite(back) && back > 1.001 ? 1 / back : 0;
     if (implied > 0) sumImplied += implied;
@@ -1953,6 +2058,7 @@ const resolveBetfairCorrectScoreMarket = async (params: { eventId: string }) => 
       backSize: backSize && Number.isFinite(backSize) ? backSize : null,
       lay: lay && Number.isFinite(lay) ? lay : null,
       laySize: laySize && Number.isFinite(laySize) ? laySize : null,
+      tradedVolume: Number.isFinite(tradedVolume) ? tradedVolume : null,
       impliedProb: implied > 0 ? implied : null,
       prob: null as number | null,
     };
@@ -2021,42 +2127,2251 @@ const resolveBetfairCorrectScoreMarket = async (params: { eventId: string }) => 
   };
 };
 
-app.post("/make-server-1119702f/betfair/match/resolve", async (c) => {
+const resolveBetfairOverUnderMarket = async (params: { eventId: string; line: number }) => {
+  const eventId = String(params.eventId ?? "").trim();
+  const lineRaw = Number(params.line);
+  if (!eventId) throw new Error("Betfair: eventId ausente (over/under)");
+  if (!Number.isFinite(lineRaw)) throw new Error("Betfair: linha inválida (over/under)");
+  const line10 = Math.round(lineRaw * 10);
+  if (!Number.isFinite(line10) || line10 < 5 || line10 > 105 || line10 % 10 !== 5) throw new Error("Betfair: linha inválida (over/under)");
+  const line = line10 / 10;
+  const marketTypeCode = `OVER_UNDER_${String(line10).padStart(2, "0")}`;
+
+  let sessionToken = await getBetfairSessionToken();
+  const call = async (method: string, rpcParams: any) => {
+    try {
+      return await betfairJsonRpc({ method, params: rpcParams, sessionToken });
+    } catch (e) {
+      const invalid = Boolean((e as any)?.__betfairSessionInvalid);
+      if (!invalid) throw e;
+      sessionToken = await getBetfairSessionToken({ force: true });
+      return await betfairJsonRpc({ method, params: rpcParams, sessionToken });
+    }
+  };
+
+  const catalogue = await withTimeout(
+    () =>
+      call("SportsAPING/v1.0/listMarketCatalogue", {
+        filter: { eventIds: [eventId], marketTypeCodes: [marketTypeCode] },
+        maxResults: 1,
+        marketProjection: ["RUNNER_DESCRIPTION", "MARKET_START_TIME"],
+      }),
+    8000,
+  );
+
+  const mk = Array.isArray(catalogue) ? catalogue[0] : null;
+  const marketId = String(mk?.marketId ?? "").trim();
+  if (!marketId) throw new Error(`Betfair: marketId (${marketTypeCode}) não encontrado`);
+
+  const marketBook = await withTimeout(
+    () =>
+      call("SportsAPING/v1.0/listMarketBook", {
+        marketIds: [marketId],
+        priceProjection: { priceData: ["EX_BEST_OFFERS", "EX_TRADED"], virtualise: true },
+      }),
+    8000,
+  );
+
+  const book = Array.isArray(marketBook) ? marketBook[0] : null;
+  const runnersBook = Array.isArray(book?.runners) ? book.runners : [];
+  const catalogueRunners = Array.isArray(mk?.runners) ? mk.runners : [];
+
+  const byRole: any = { under: null as any, over: null as any };
+  const best = (ex: any, key: "availableToBack" | "availableToLay") => {
+    const a = Array.isArray(ex?.[key]) ? ex[key] : [];
+    const p0 = a[0] ?? null;
+    const price = p0 ? Number(p0.price) : null;
+    const size = p0 ? Number(p0.size) : null;
+    return { price: Number.isFinite(price) ? price : null, size: Number.isFinite(size) ? size : null };
+  };
+  const sumTraded = (ex: any) => {
+    const tv = Array.isArray(ex?.tradedVolume) ? ex.tradedVolume : [];
+    const total = tv.reduce((acc: number, t: any) => {
+      const sz = Number(t?.size);
+      return Number.isFinite(sz) ? acc + sz : acc;
+    }, 0);
+    return Number.isFinite(total) ? round2(total) : null;
+  };
+
+  for (const rb of runnersBook) {
+    const selectionId = Number(rb?.selectionId);
+    if (!Number.isFinite(selectionId)) continue;
+    const runnerName =
+      catalogueRunners.find((r: any) => Number(r?.selectionId) === selectionId)?.runnerName ??
+      rb?.runnerName ??
+      "";
+    const n = String(runnerName).toLowerCase();
+    const role = n.includes("under") ? "under" : n.includes("over") ? "over" : null;
+    if (!role) continue;
+    if (byRole[role]) continue;
+    const ex = rb?.ex ?? {};
+    const back0 = best(ex, "availableToBack");
+    const lay0 = best(ex, "availableToLay");
+    byRole[role] = {
+      selectionId,
+      runnerName: String(runnerName).trim() || null,
+      back: back0.price,
+      backSize: back0.size,
+      lay: lay0.price,
+      laySize: lay0.size,
+      tradedVolume: sumTraded(ex),
+    };
+  }
+
+  return {
+    marketId,
+    marketTypeCode,
+    line,
+    marketStartTime: String(mk?.marketStartTime ?? "").trim() || null,
+    runners: {
+      underSelectionId: byRole.under?.selectionId ?? null,
+      overSelectionId: byRole.over?.selectionId ?? null,
+    },
+    odds: { under: byRole.under, over: byRole.over },
+    oddsFetchedAt: new Date().toISOString(),
+  };
+};
+
+const betfairCorrectScorePlanHandler = async (c: any) => {
   const authError = requireBearer(c);
   if (authError) return authError;
   try {
     const body = await c.req.json().catch(() => ({}));
-    const homeTeam = String(body?.homeTeam ?? "").trim();
-    const awayTeam = String(body?.awayTeam ?? "").trim();
-    const utcDate = body?.utcDate == null ? null : String(body.utcDate);
-    const force = Boolean(body?.force ?? false);
-    const includeCorrectScore = Boolean(body?.includeCorrectScore ?? false);
-    const minFreshSecondsRaw = Number(body?.minFreshSeconds ?? 600);
-    const minFreshSeconds = Math.max(0, Math.min(86_400, Number.isFinite(minFreshSecondsRaw) ? minFreshSecondsRaw : 600));
+    const matchId = String(body?.matchId ?? "").trim() || null;
+    const maxRaw = Number(body?.max ?? 6);
+    const max = Number.isFinite(maxRaw) ? Math.max(1, Math.min(30, Math.floor(maxRaw))) : 6;
+    const persist = Boolean(body?.persist ?? true);
+    const overrides = (body?.config && typeof body.config === "object") ? body.config : {};
 
-    if (!homeTeam || !awayTeam) return c.json({ ok: false, error: "homeTeam/awayTeam obrigatórios" }, 400);
+    const items = await kv.getByPrefix(BETFAIR_QUEUE_PREFIX);
+    const list = Array.isArray(items) ? items : [];
+    const filtered = matchId ? list.filter((x: any) => String(x?.matchId ?? "") === matchId) : list.slice(0, max);
 
-    const bucket = toIsoHourBucket(utcDate);
-    const key = `${BETFAIR_RESOLVE_CACHE_PREFIX}${normalizeName(homeTeam)}__${normalizeName(awayTeam)}__${bucket ?? "na"}`;
-    const cached = force ? null : await kv.get(key);
-    const cachedAt = String(cached?.fetchedAt ?? cached?.betfair?.oddsFetchedAt ?? "").trim();
-    if (cached && cached?.betfair && cachedAt) {
-      const ageSec = (Date.now() - new Date(cachedAt).getTime()) / 1000;
-      if (Number.isFinite(ageSec) && ageSec >= 0 && ageSec < minFreshSeconds) {
-        return c.json({ ok: true, betfair: cached.betfair, cached: true, fetchedAt: cachedAt });
+    const plans: any[] = [];
+    const updates: Array<{ matchId: string; patch: any }> = [];
+
+    for (const x of filtered) {
+      const plan = planCorrectScoreForQueueItem(x, overrides);
+      plans.push({ matchId: String(x?.matchId ?? ""), plan });
+      if (persist) {
+        updates.push({
+          matchId: String(x?.matchId ?? ""),
+          patch: { strategy: { ...(x?.strategy ?? {}), correctScore: { ...(x?.strategy?.correctScore ?? {}), lastPlan: plan, lastPlannedAt: new Date().toISOString() } } },
+        });
       }
     }
 
-    const base = await resolveBetfairMatchOdds({ homeTeam, awayTeam, utcDate });
-    const correctScore = includeCorrectScore ? await resolveBetfairCorrectScoreMarket({ eventId: base.eventId }) : null;
-    const betfair = includeCorrectScore ? { ...base, correctScore } : base;
-    const fetchedAt = String(betfair?.oddsFetchedAt ?? new Date().toISOString());
-    await kv.set(key, { betfair, fetchedAt, homeTeam, awayTeam, bucket, updatedAt: new Date().toISOString() });
-    return c.json({ ok: true, betfair, cached: false, fetchedAt });
+    if (persist && updates.length > 0) {
+      const byId = new Map<string, any>();
+      for (const u of updates) byId.set(u.matchId, u.patch);
+      const matchIds = Array.from(byId.keys());
+      const keys = matchIds.map((id) => `${BETFAIR_QUEUE_PREFIX}${id}`);
+      const existing = await kv.mget(keys);
+      const nowIso = new Date().toISOString();
+      const nextValues = existing.map((cur, i) => {
+        const base = (cur && typeof cur === "object") ? cur : {};
+        const patch = byId.get(matchIds[i]) ?? {};
+        return { ...base, ...patch, updatedAt: nowIso };
+      });
+      await kv.mset(keys, nextValues);
+    }
+
+    return c.json({ ok: true, plans });
   } catch (error) {
-    return c.json({ ok: false, error: error.message || "Erro ao resolver jogo (Betfair)" }, 500);
+    return c.json({ ok: false, error: error.message || "Erro ao planejar Correct Score" }, 500);
   }
-});
+};
+
+const betfairCorrectScoreExecuteHandler = async (c: any) => {
+  const authError = requireBearer(c);
+  if (authError) return authError;
+  const adminError = requireAutomationAdmin(c);
+  if (adminError) return adminError;
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const matchId = String(body?.matchId ?? "").trim();
+    if (!matchId) return c.json({ ok: false, error: "matchId obrigatório" }, 400);
+    const dryRun = Boolean(body?.dryRun ?? true);
+    const overrides = (body?.config && typeof body.config === "object") ? body.config : {};
+
+    const key = `${BETFAIR_QUEUE_PREFIX}${matchId}`;
+    const item = (await kv.get(key)) ?? null;
+    if (!item) return c.json({ ok: false, error: "Item não encontrado na fila" }, 404);
+
+    const plan = planCorrectScoreForQueueItem(item, overrides);
+    if (!plan.marketId) return c.json({ ok: false, error: plan.reason ?? "Sem marketId" }, 400);
+    if (plan.isFinished) return c.json({ ok: false, error: "Jogo já finalizado (Betfair)" }, 400);
+
+    const sessionToken = await getBetfairSessionToken();
+    const listExisting = await betfairJsonRpcTrading({
+      method: "SportsAPING/v1.0/listCurrentOrders",
+      params: { marketIds: [String(plan.marketId)] },
+      sessionToken,
+    });
+    const existingOrders = Array.isArray(listExisting?.currentOrders) ? listExisting.currentOrders : [];
+    const openOrdersCount = existingOrders.filter((o: any) => Number(o?.sizeRemaining ?? 0) > 0).length;
+    const matchedBetsCount = existingOrders.filter((o: any) => Number(o?.sizeMatched ?? 0) > 0).length;
+    const hasExistingPosition = openOrdersCount > 0 || matchedBetsCount > 0;
+
+    if (hasExistingPosition) {
+      if (dryRun) {
+        return c.json({
+          ok: true,
+          dryRun: true,
+          plan,
+          placed: false,
+          adoptedExisting: true,
+          openOrdersCount,
+          matchedBetsCount,
+          reason: "Já existem ordens/execuções no mercado (posição manual detectada)",
+        });
+      }
+
+      const nextStrategy = {
+        ...(item?.strategy ?? {}),
+        correctScore: {
+          ...(item?.strategy?.correctScore ?? {}),
+          lastPlan: plan,
+          lastPlannedAt: plan.createdAt,
+          lastExecutionAt: new Date().toISOString(),
+          lastExecution: { adoptedExisting: true, openOrdersCount, matchedBetsCount },
+          adoptedExistingAt: new Date().toISOString(),
+          adoptedExisting: { openOrdersCount, matchedBetsCount, marketId: plan.marketId },
+        },
+      };
+      await kv.set(key, { ...item, strategy: nextStrategy, updatedAt: new Date().toISOString() });
+
+      return c.json({
+        ok: true,
+        dryRun: false,
+        plan,
+        placed: false,
+        adoptedExisting: true,
+        openOrdersCount,
+        matchedBetsCount,
+        reason: "Já existem ordens/execuções no mercado (posição manual detectada)",
+      });
+    }
+
+    const instructions = Array.isArray(plan.instructions) ? plan.instructions : [];
+    if (instructions.length === 0) return c.json({ ok: true, dryRun, plan, placed: false, reason: plan.reason ?? "Sem instruções" });
+
+    if (dryRun) return c.json({ ok: true, dryRun: true, plan, placed: false });
+
+    const result = await betfairJsonRpcTrading({
+      method: "SportsAPING/v1.0/placeOrders",
+      params: {
+        marketId: String(plan.marketId),
+        instructions,
+        customerRef: `CS_${matchId}_${Date.now()}`.slice(0, 32),
+        async: false,
+      },
+      sessionToken,
+    });
+
+    const nextStrategy = {
+      ...(item?.strategy ?? {}),
+      correctScore: {
+        ...(item?.strategy?.correctScore ?? {}),
+        lastPlan: plan,
+        lastPlannedAt: plan.createdAt,
+        lastExecutionAt: new Date().toISOString(),
+        lastExecution: result,
+      },
+    };
+    await kv.set(key, { ...item, strategy: nextStrategy, updatedAt: new Date().toISOString() });
+
+    return c.json({ ok: true, dryRun: false, plan, placed: true, result });
+  } catch (error) {
+    return c.json({ ok: false, error: error.message || "Erro ao executar Correct Score" }, 500);
+  }
+};
+
+const betfairCorrectScoreOpenOrdersSummaryHandler = async (c: any) => {
+  const authError = requireBearer(c);
+  if (authError) return authError;
+  const adminError = requireAutomationAdmin(c);
+  if (adminError) return adminError;
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const matchId = String(body?.matchId ?? "").trim();
+    if (!matchId) return c.json({ ok: false, error: "matchId obrigatório" }, 400);
+
+    const key = `${BETFAIR_QUEUE_PREFIX}${matchId}`;
+    const item = (await kv.get(key)) ?? null;
+    if (!item) return c.json({ ok: false, error: "Item não encontrado na fila" }, 404);
+
+    const marketId = String(item?.betfair?.correctScore?.marketId ?? "").trim();
+    if (!marketId) {
+      return c.json({
+        ok: true,
+        matchId,
+        marketId: null,
+        hasOpenOrders: false,
+        hasMatchedBets: false,
+        openOrdersCount: 0,
+        matchedBetsCount: 0,
+        orders: [],
+      });
+    }
+
+    const sessionToken = await getBetfairSessionToken();
+    const result = await betfairJsonRpcTrading({
+      method: "SportsAPING/v1.0/listCurrentOrders",
+      params: { marketIds: [marketId] },
+      sessionToken,
+    });
+
+    const ordersRaw = Array.isArray(result?.currentOrders) ? result.currentOrders : [];
+    const orders = ordersRaw.map((o: any) => {
+      const betId = String(o?.betId ?? "").trim() || null;
+      const selectionId = Number(o?.selectionId);
+      const side = String(o?.side ?? "").trim() || null;
+      const status = String(o?.status ?? "").trim() || null;
+      const priceSize = o?.priceSize ?? null;
+      const price = Number(priceSize?.price);
+      const size = Number(priceSize?.size);
+      const sizeMatched = Number(o?.sizeMatched);
+      const sizeRemaining = Number(o?.sizeRemaining);
+      const averagePriceMatched = Number(o?.averagePriceMatched);
+      return {
+        betId,
+        selectionId: Number.isFinite(selectionId) ? selectionId : null,
+        side,
+        status,
+        price: Number.isFinite(price) ? price : null,
+        size: Number.isFinite(size) ? size : null,
+        sizeMatched: Number.isFinite(sizeMatched) ? sizeMatched : null,
+        sizeRemaining: Number.isFinite(sizeRemaining) ? sizeRemaining : null,
+        averagePriceMatched: Number.isFinite(averagePriceMatched) ? averagePriceMatched : null,
+      };
+    });
+
+    const openOrdersCount = orders.filter((o: any) => Number(o?.sizeRemaining ?? 0) > 0).length;
+    const matchedBetsCount = orders.filter((o: any) => Number(o?.sizeMatched ?? 0) > 0).length;
+    const hasOpenOrders = openOrdersCount > 0;
+    const hasMatchedBets = matchedBetsCount > 0;
+    return c.json({ ok: true, matchId, marketId, hasOpenOrders, hasMatchedBets, openOrdersCount, matchedBetsCount, orders });
+  } catch (error) {
+    return c.json({ ok: false, error: error.message || "Erro ao buscar ordens abertas" }, 500);
+  }
+};
+
+const betfairCorrectScoreCancelOpenOrdersHandler = async (c: any) => {
+  const authError = requireBearer(c);
+  if (authError) return authError;
+  const adminError = requireAutomationAdmin(c);
+  if (adminError) return adminError;
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const matchId = String(body?.matchId ?? "").trim();
+    if (!matchId) return c.json({ ok: false, error: "matchId obrigatório" }, 400);
+
+    const key = `${BETFAIR_QUEUE_PREFIX}${matchId}`;
+    const item = (await kv.get(key)) ?? null;
+    if (!item) return c.json({ ok: false, error: "Item não encontrado na fila" }, 404);
+
+    const marketId = String(item?.betfair?.correctScore?.marketId ?? "").trim();
+    if (!marketId) return c.json({ ok: true, matchId, marketId: null, cancelled: false, cancelledCount: 0, message: "Sem mercado Correct Score" });
+
+    const marketStatus = String(item?.betfair?.marketStatus ?? "").toUpperCase();
+    if (marketStatus === "CLOSED") {
+      return c.json({ ok: true, matchId, marketId, cancelled: false, cancelledCount: 0, message: "Mercado já está CLOSED" });
+    }
+
+    const sessionToken = await getBetfairSessionToken();
+    const listResult = await betfairJsonRpcTrading({
+      method: "SportsAPING/v1.0/listCurrentOrders",
+      params: { marketIds: [marketId] },
+      sessionToken,
+    });
+
+    const currentOrders = Array.isArray(listResult?.currentOrders) ? listResult.currentOrders : [];
+    const toCancel = currentOrders
+      .filter((o: any) => Number(o?.sizeRemaining ?? 0) > 0 && String(o?.betId ?? "").trim())
+      .map((o: any) => String(o.betId));
+
+    let cancelResult: any = null;
+    if (toCancel.length > 0) {
+      cancelResult = await betfairJsonRpcTrading({
+        method: "SportsAPING/v1.0/cancelOrders",
+        params: { marketId, instructions: toCancel.map((betId: string) => ({ betId })) },
+        sessionToken,
+      });
+    }
+
+    const nextStrategy = {
+      ...(item?.strategy ?? {}),
+      correctScore: {
+        ...(item?.strategy?.correctScore ?? {}),
+        lastCancelAt: new Date().toISOString(),
+        lastCancel: { cancelResult, cancelledBetIdsCount: toCancel.length },
+      },
+    };
+    await kv.set(key, { ...item, strategy: nextStrategy, updatedAt: new Date().toISOString() });
+
+    return c.json({ ok: true, matchId, marketId, cancelled: toCancel.length > 0, cancelledCount: toCancel.length, cancelResult });
+  } catch (error) {
+    return c.json({ ok: false, error: error.message || "Erro ao cancelar ordens" }, 500);
+  }
+};
+
+const betfairCorrectScoreTradePreviewHandler = async (c: any) => {
+  const authError = requireBearer(c);
+  if (authError) return authError;
+  const adminError = requireAutomationAdmin(c);
+  if (adminError) return adminError;
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const matchId = String(body?.matchId ?? "").trim();
+    if (!matchId) return c.json({ ok: false, error: "matchId obrigatório" }, 400);
+
+    const key = `${BETFAIR_QUEUE_PREFIX}${matchId}`;
+    const item = (await kv.get(key)) ?? null;
+    if (!item) return c.json({ ok: false, error: "Item não encontrado na fila" }, 404);
+
+    const marketId = String(item?.betfair?.correctScore?.marketId ?? "").trim();
+    if (!marketId) {
+      return c.json({ ok: true, matchId, marketId: null, risk: null, cashOut: null, profit: null, fetchedAt: new Date().toISOString() });
+    }
+
+    const sessionToken = await getBetfairSessionToken();
+    const listOrders = await betfairJsonRpcTrading({
+      method: "SportsAPING/v1.0/listCurrentOrders",
+      params: { marketIds: [marketId] },
+      sessionToken,
+    });
+
+    const currentOrders = Array.isArray(listOrders?.currentOrders) ? listOrders.currentOrders : [];
+    const risk = currentOrders.reduce((acc: number, o: any) => {
+      const side = String(o?.side ?? "").trim().toUpperCase();
+      const price = Number(o?.priceSize?.price);
+      const sizeRemaining = Number(o?.sizeRemaining);
+      const sizeMatched = Number(o?.sizeMatched);
+      const size = (Number.isFinite(sizeRemaining) ? sizeRemaining : 0) + (Number.isFinite(sizeMatched) ? sizeMatched : 0);
+      if (!Number.isFinite(size) || size <= 0) return acc;
+      if (side === "LAY") {
+        if (!Number.isFinite(price) || price <= 1.01) return acc;
+        return acc + size * (price - 1);
+      }
+      return acc + size;
+    }, 0);
+
+    const pnlRes = await betfairJsonRpcTrading({
+      method: "SportsAPING/v1.0/listMarketProfitAndLoss",
+      params: { marketIds: [marketId], includeSettledBets: false, includeBspBets: false, netOfCommission: true },
+      sessionToken,
+    });
+    const marketPnl = Array.isArray(pnlRes) ? pnlRes[0] : null;
+    const pnlList = Array.isArray(marketPnl?.profitAndLosses)
+      ? marketPnl.profitAndLosses
+      : Array.isArray(marketPnl?.profitAndLoss)
+        ? marketPnl.profitAndLoss
+        : [];
+    const values = pnlList.map((x: any) => Number(x?.ifWin)).filter((v: any) => typeof v === "number" && Number.isFinite(v));
+    const profit = values.length > 0 ? values.reduce((m: number, v: number) => (v < m ? v : m), values[0]) : null;
+    const cashOut = typeof profit === "number" && Number.isFinite(profit) && Number.isFinite(risk) ? risk + profit : null;
+
+    return c.json({
+      ok: true,
+      matchId,
+      marketId,
+      risk: Number.isFinite(risk) ? round2(risk) : null,
+      cashOut: typeof cashOut === "number" && Number.isFinite(cashOut) ? round2(cashOut) : null,
+      profit: typeof profit === "number" && Number.isFinite(profit) ? round2(profit) : null,
+      fetchedAt: new Date().toISOString(),
+    });
+  } catch (error) {
+    return c.json({ ok: false, error: error.message || "Erro ao calcular prévia do trade" }, 500);
+  }
+};
+
+const betfairCorrectScoreCashoutHandler = async (c: any) => {
+  const authError = requireBearer(c);
+  if (authError) return authError;
+  const adminError = requireAutomationAdmin(c);
+  if (adminError) return adminError;
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const matchId = String(body?.matchId ?? "").trim();
+    if (!matchId) return c.json({ ok: false, error: "matchId obrigatório" }, 400);
+
+    const key = `${BETFAIR_QUEUE_PREFIX}${matchId}`;
+    const item = (await kv.get(key)) ?? null;
+    if (!item) return c.json({ ok: false, error: "Item não encontrado na fila" }, 404);
+
+    const marketId = String(item?.betfair?.correctScore?.marketId ?? "").trim();
+    if (!marketId) return c.json({ ok: true, matchId, marketId: null, cancelled: false, hedged: false, message: "Sem mercado Correct Score" });
+
+    const marketStatus = String(item?.betfair?.marketStatus ?? "").toUpperCase();
+    if (marketStatus === "CLOSED") {
+      return c.json({ ok: true, matchId, marketId, cancelled: false, hedged: false, message: "Mercado já está CLOSED" });
+    }
+
+    const sessionToken = await getBetfairSessionToken();
+    const listResult = await betfairJsonRpcTrading({
+      method: "SportsAPING/v1.0/listCurrentOrders",
+      params: { marketIds: [marketId] },
+      sessionToken,
+    });
+
+    const currentOrders = Array.isArray(listResult?.currentOrders) ? listResult.currentOrders : [];
+    const toCancel = currentOrders
+      .filter((o: any) => Number(o?.sizeRemaining ?? 0) > 0 && String(o?.betId ?? "").trim())
+      .map((o: any) => String(o.betId));
+
+    let cancelResult: any = null;
+    if (toCancel.length > 0) {
+      cancelResult = await betfairJsonRpcTrading({
+        method: "SportsAPING/v1.0/cancelOrders",
+        params: { marketId, instructions: toCancel.map((betId: string) => ({ betId })) },
+        sessionToken,
+      });
+    }
+
+    const book = await betfairJsonRpc({
+      method: "SportsAPING/v1.0/listMarketBook",
+      params: {
+        marketIds: [marketId],
+        priceProjection: { priceData: ["EX_BEST_OFFERS"], virtualise: true },
+      },
+      sessionToken,
+    });
+    const book0 = Array.isArray(book) ? book[0] : book;
+    const runners = Array.isArray(book0?.runners) ? book0.runners : [];
+    const bySelection = new Map<number, any>();
+    for (const r of runners) {
+      const sid = Number(r?.selectionId);
+      if (!Number.isFinite(sid)) continue;
+      const ex = r?.ex ?? {};
+      const back0 = Array.isArray(ex?.availableToBack) ? ex.availableToBack[0] : null;
+      const lay0 = Array.isArray(ex?.availableToLay) ? ex.availableToLay[0] : null;
+      bySelection.set(sid, {
+        bestBack: back0 ? Number(back0.price) : null,
+        bestLay: lay0 ? Number(lay0.price) : null,
+      });
+    }
+
+    const hedgeInstructions: any[] = [];
+    for (const o of currentOrders) {
+      const sizeMatched = Number(o?.sizeMatched ?? 0);
+      if (!Number.isFinite(sizeMatched) || sizeMatched <= 0) continue;
+      const selectionId = Number(o?.selectionId);
+      if (!Number.isFinite(selectionId)) continue;
+      const side = String(o?.side ?? "").toUpperCase();
+      const px = bySelection.get(selectionId) ?? {};
+      if (side === "BACK") {
+        const layPrice = Number(px?.bestLay);
+        if (!Number.isFinite(layPrice) || layPrice <= 1.01) continue;
+        hedgeInstructions.push({
+          selectionId,
+          side: "LAY",
+          orderType: "LIMIT",
+          limitOrder: { size: round2(sizeMatched), price: layPrice, persistenceType: "LAPSE" },
+        });
+      } else if (side === "LAY") {
+        const backPrice = Number(px?.bestBack);
+        if (!Number.isFinite(backPrice) || backPrice <= 1.01) continue;
+        hedgeInstructions.push({
+          selectionId,
+          side: "BACK",
+          orderType: "LIMIT",
+          limitOrder: { size: round2(sizeMatched), price: backPrice, persistenceType: "LAPSE" },
+        });
+      }
+    }
+
+    let hedgeResult: any = null;
+    if (hedgeInstructions.length > 0) {
+      hedgeResult = await betfairJsonRpcTrading({
+        method: "SportsAPING/v1.0/placeOrders",
+        params: {
+          marketId,
+          instructions: hedgeInstructions.slice(0, 50),
+          customerRef: `CS_CASH_${matchId}_${Date.now()}`.slice(0, 32),
+          async: false,
+        },
+        sessionToken,
+      });
+    }
+
+    const nextStrategy = {
+      ...(item?.strategy ?? {}),
+      correctScore: {
+        ...(item?.strategy?.correctScore ?? {}),
+        lastCashoutAt: new Date().toISOString(),
+        lastCashout: { cancelResult, hedgeResult, hedgeInstructionsCount: hedgeInstructions.length, cancelledBetIdsCount: toCancel.length },
+      },
+    };
+    await kv.set(key, { ...item, strategy: nextStrategy, updatedAt: new Date().toISOString() });
+
+    return c.json({
+      ok: true,
+      matchId,
+      marketId,
+      cancelled: toCancel.length > 0,
+      hedged: hedgeInstructions.length > 0,
+      cancelledCount: toCancel.length,
+      hedgedCount: hedgeInstructions.length,
+      cancelResult,
+      hedgeResult,
+    });
+  } catch (error) {
+    return c.json({ ok: false, error: error.message || "Erro ao fazer cashout" }, 500);
+  }
+};
+
+const betfairScalpingGoalsTickHandler = async (c: any) => {
+  const authError = requireBearer(c);
+  if (authError) return authError;
+  const adminError = requireAutomationAdmin(c);
+  if (adminError) return adminError;
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const matchId = String(body?.matchId ?? "").trim();
+    if (!matchId) return c.json({ ok: false, error: "matchId obrigatório" }, 400);
+
+    const cfg = (body?.config && typeof body.config === "object") ? body.config : {};
+    const bankrollRaw = Number(cfg?.bankroll ?? 50);
+    const bankroll = Number.isFinite(bankrollRaw) ? clamp(bankrollRaw, 2, 10_000) : 50;
+    const profitTargetPctRaw = Number(cfg?.profitTargetPct ?? 0.1);
+    const profitTargetPct = Number.isFinite(profitTargetPctRaw) ? clamp(profitTargetPctRaw, 0.01, 0.5) : 0.1;
+    const stakePctRaw = Number(cfg?.stakePct ?? 1);
+    const stakePct = Number.isFinite(stakePctRaw) ? clamp(stakePctRaw, 0.01, 1) : 1;
+    const stakeBankroll = round2(clamp(bankroll * stakePct, 2, bankroll));
+    const entryOffsetTicksRaw = Number(cfg?.entryOffsetTicks ?? 2);
+    const entryOffsetTicks = Number.isFinite(entryOffsetTicksRaw) ? clamp(Math.trunc(entryOffsetTicksRaw), -10, 10) : 2;
+    const secondsToWaitMatchRaw = Number(cfg?.secondsToWaitMatch ?? 10);
+    const secondsToWaitMatch = Number.isFinite(secondsToWaitMatchRaw) ? clamp(Math.floor(secondsToWaitMatchRaw), 1, 120) : 10;
+
+    const stepsForPrice = (p: number) => {
+      if (p < 2) return 0.01;
+      if (p < 3) return 0.02;
+      if (p < 4) return 0.05;
+      if (p < 6) return 0.1;
+      if (p < 10) return 0.2;
+      if (p < 20) return 0.5;
+      if (p < 30) return 1;
+      if (p < 50) return 2;
+      if (p < 100) return 5;
+      return 10;
+    };
+    const roundPrice = (p: number) => round2(p);
+    const tickUpOnce = (p: number) => roundPrice(p + stepsForPrice(p));
+    const tickDownOnce = (p: number) => {
+      const s = stepsForPrice(p);
+      const next = p - s;
+      return roundPrice(next < 1.01 ? 1.01 : next);
+    };
+    const tickUp = (p: number, n: number) => {
+      let v = p;
+      for (let i = 0; i < n; i += 1) v = tickUpOnce(v);
+      return v;
+    };
+    const tickDown = (p: number, n: number) => {
+      let v = p;
+      for (let i = 0; i < n; i += 1) v = tickDownOnce(v);
+      return v;
+    };
+    const applyOffsetTicks = (p: number, ticks: number) => {
+      if (!Number.isFinite(p) || p <= 1.01) return null;
+      if (!Number.isFinite(ticks) || ticks === 0) return roundPrice(p);
+      const t = Math.trunc(ticks);
+      return t > 0 ? tickUp(p, t) : tickDown(p, Math.abs(t));
+    };
+
+    const key = `${BETFAIR_QUEUE_PREFIX}${matchId}`;
+    const item = (await kv.get(key)) ?? null;
+    if (!item) return c.json({ ok: false, error: "Item não encontrado na fila" }, 404);
+
+    const agentRaw = String(item?.strategy?.agent ?? "").trim().toLowerCase();
+    const agent = agentRaw === "scalpinggoals" || agentRaw === "scalping_goals" ? "scalpingGoals" : "correctScore";
+    if (agent !== "scalpingGoals") return c.json({ ok: false, error: "Robô não é Scalping Gol Acima" }, 400);
+
+    const betfair = item?.betfair ?? null;
+    let eventId = String(betfair?.eventId ?? "").trim();
+    if (!eventId && String(item?.homeTeam ?? "").trim() && String(item?.awayTeam ?? "").trim()) {
+      try {
+        const mapped = await resolveBetfairMatchOdds({
+          homeTeam: String(item.homeTeam),
+          awayTeam: String(item.awayTeam),
+          utcDate: item?.utcDate,
+        });
+        eventId = String(mapped?.eventId ?? "").trim();
+        item.betfair = { ...(item?.betfair ?? {}), ...mapped };
+      } catch {}
+    }
+    if (!eventId) return c.json({ ok: false, error: "Betfair: eventId não resolvido" }, 400);
+
+    const scoreHome = Number.isFinite(Number(item?.scoreHome)) ? Number(item.scoreHome) : 0;
+    const scoreAway = Number.isFinite(Number(item?.scoreAway)) ? Number(item.scoreAway) : 0;
+    const totalGoals = Math.max(0, Math.floor(scoreHome)) + Math.max(0, Math.floor(scoreAway));
+
+    const ouPrev = (item?.betfair?.overUnder && typeof item.betfair.overUnder === "object") ? item.betfair.overUnder : {};
+    let ou15 = ouPrev?.["1.5"] ?? null;
+    let ou25 = ouPrev?.["2.5"] ?? null;
+    let ou35 = ouPrev?.["3.5"] ?? null;
+
+    try {
+      if (!ou15?.marketId) ou15 = await resolveBetfairOverUnderMarket({ eventId, line: 1.5 });
+    } catch {}
+    try {
+      if (!ou25?.marketId) ou25 = await resolveBetfairOverUnderMarket({ eventId, line: 2.5 });
+    } catch {}
+    try {
+      if (!ou35?.marketId) ou35 = await resolveBetfairOverUnderMarket({ eventId, line: 3.5 });
+    } catch {}
+
+    const markets = [ou15, ou25, ou35].filter((x: any) => x && String(x?.marketId ?? "").trim());
+    if (markets.length === 0) return c.json({ ok: false, error: "Sem mercados Over/Under resolvidos" }, 400);
+
+    const marketIds = markets.map((m: any) => String(m.marketId));
+    const sessionToken = await getBetfairSessionToken();
+
+    const listOrders = await betfairJsonRpcTrading({
+      method: "SportsAPING/v1.0/listCurrentOrders",
+      params: { marketIds },
+      sessionToken,
+    });
+    const currentOrders = Array.isArray(listOrders?.currentOrders) ? listOrders.currentOrders : [];
+    const openOrdersCount = currentOrders.filter((o: any) => Number(o?.sizeRemaining ?? 0) > 0).length;
+    const matchedBetsCount = currentOrders.filter((o: any) => Number(o?.sizeMatched ?? 0) > 0).length;
+    const hasExistingPosition = openOrdersCount > 0 || matchedBetsCount > 0;
+
+    const calcRisk = (orders: any[]) => {
+      return round2(
+        orders.reduce((acc: number, o: any) => {
+          const side = String(o?.side ?? "").trim().toUpperCase();
+          const price = Number(o?.priceSize?.price);
+          const sizeRemaining = Number(o?.sizeRemaining);
+          const sizeMatched = Number(o?.sizeMatched);
+          const size = (Number.isFinite(sizeRemaining) ? sizeRemaining : 0) + (Number.isFinite(sizeMatched) ? sizeMatched : 0);
+          if (!Number.isFinite(size) || size <= 0) return acc;
+          if (side === "LAY") {
+            if (!Number.isFinite(price) || price <= 1.01) return acc;
+            return acc + size * (price - 1);
+          }
+          return acc + size;
+        }, 0),
+      );
+    };
+
+    const calcWorstProfit = async (marketId: string) => {
+      const pnlRes = await betfairJsonRpcTrading({
+        method: "SportsAPING/v1.0/listMarketProfitAndLoss",
+        params: { marketIds: [marketId], includeSettledBets: false, includeBspBets: false, netOfCommission: true },
+        sessionToken,
+      });
+      const mk = Array.isArray(pnlRes) ? pnlRes[0] : null;
+      const pnlList = Array.isArray(mk?.profitAndLosses)
+        ? mk.profitAndLosses
+        : Array.isArray(mk?.profitAndLoss)
+          ? mk.profitAndLoss
+          : [];
+      const values = pnlList.map((x: any) => Number(x?.ifWin)).filter((v: any) => typeof v === "number" && Number.isFinite(v));
+      return values.length > 0 ? round2(values.reduce((m: number, v: number) => (v < m ? v : m), values[0])) : null;
+    };
+
+    const cashoutMarket = async (marketId: string) => {
+      const listRes = await betfairJsonRpcTrading({
+        method: "SportsAPING/v1.0/listCurrentOrders",
+        params: { marketIds: [marketId] },
+        sessionToken,
+      });
+      const orders = Array.isArray(listRes?.currentOrders) ? listRes.currentOrders : [];
+      const toCancel = orders.filter((o: any) => Number(o?.sizeRemaining ?? 0) > 0 && String(o?.betId ?? "").trim()).map((o: any) => String(o.betId));
+      if (toCancel.length > 0) {
+        await betfairJsonRpcTrading({
+          method: "SportsAPING/v1.0/cancelOrders",
+          params: { marketId, instructions: toCancel.map((betId: string) => ({ betId })) },
+          sessionToken,
+        });
+      }
+
+      const book = await betfairJsonRpc({
+        method: "SportsAPING/v1.0/listMarketBook",
+        params: { marketIds: [marketId], priceProjection: { priceData: ["EX_BEST_OFFERS"], virtualise: true } },
+        sessionToken,
+      });
+      const book0 = Array.isArray(book) ? book[0] : book;
+      const runners = Array.isArray(book0?.runners) ? book0.runners : [];
+      const bySelection = new Map<number, any>();
+      for (const r of runners) {
+        const sid = Number(r?.selectionId);
+        if (!Number.isFinite(sid)) continue;
+        const ex = r?.ex ?? {};
+        const back0 = Array.isArray(ex?.availableToBack) ? ex.availableToBack[0] : null;
+        const lay0 = Array.isArray(ex?.availableToLay) ? ex.availableToLay[0] : null;
+        bySelection.set(sid, {
+          bestBack: back0 ? Number(back0.price) : null,
+          bestLay: lay0 ? Number(lay0.price) : null,
+        });
+      }
+
+      const hedgeInstructions: any[] = [];
+      for (const o of orders) {
+        const sizeMatched = Number(o?.sizeMatched ?? 0);
+        if (!Number.isFinite(sizeMatched) || sizeMatched <= 0) continue;
+        const selectionId = Number(o?.selectionId);
+        if (!Number.isFinite(selectionId)) continue;
+        const side = String(o?.side ?? "").toUpperCase();
+        const px = bySelection.get(selectionId) ?? {};
+        if (side === "BACK") {
+          const layPrice = Number(px?.bestLay);
+          if (!Number.isFinite(layPrice) || layPrice <= 1.01) continue;
+          hedgeInstructions.push({ selectionId, side: "LAY", orderType: "LIMIT", limitOrder: { size: round2(sizeMatched), price: layPrice, persistenceType: "LAPSE" } });
+        } else if (side === "LAY") {
+          const backPrice = Number(px?.bestBack);
+          if (!Number.isFinite(backPrice) || backPrice <= 1.01) continue;
+          hedgeInstructions.push({ selectionId, side: "BACK", orderType: "LIMIT", limitOrder: { size: round2(sizeMatched), price: backPrice, persistenceType: "LAPSE" } });
+        }
+      }
+
+      if (hedgeInstructions.length > 0) {
+        await betfairJsonRpcTrading({
+          method: "SportsAPING/v1.0/placeOrders",
+          params: { marketId, instructions: hedgeInstructions.slice(0, 50), customerRef: `SG_CASH_${matchId}_${Date.now()}`.slice(0, 32), async: false },
+          sessionToken,
+        });
+      }
+      return { cancelledCount: toCancel.length, hedgedCount: hedgeInstructions.length };
+    };
+
+    const scalpingPrev = (item?.strategy?.scalpingGoals && typeof item.strategy.scalpingGoals === "object") ? item.strategy.scalpingGoals : {};
+    const adoptedExistingAt = String(scalpingPrev?.adoptedExistingAt ?? "").trim() || null;
+    let phase = String(scalpingPrev?.phase ?? "").trim() || "idle";
+
+    const profitByMarket: any[] = [];
+    let profitSum = 0;
+    for (const m of markets) {
+      const marketId = String(m.marketId);
+      try {
+        const p = await calcWorstProfit(marketId);
+        profitByMarket.push({ marketId, line: m.line, profit: p });
+        if (typeof p === "number" && Number.isFinite(p)) profitSum += p;
+      } catch {
+        profitByMarket.push({ marketId, line: m.line, profit: null });
+      }
+    }
+    profitSum = round2(profitSum);
+    const risk = calcRisk(currentOrders);
+    const profitPct = risk > 0 ? round2(profitSum / risk) : null;
+
+    if (hasExistingPosition && !adoptedExistingAt && phase === "idle") {
+      const nextStrategy = {
+        ...(item?.strategy ?? {}),
+        agent: "scalpingGoals",
+        scalpingGoals: {
+          ...(scalpingPrev ?? {}),
+          phase: "adopted_existing",
+          adoptedExistingAt: new Date().toISOString(),
+          adoptedExisting: { openOrdersCount, matchedBetsCount, marketIds },
+          lastTickAt: new Date().toISOString(),
+          lastSummary: { risk, profitSum, profitPct, totalGoals },
+        },
+      };
+      const nextBetfair = { ...(item?.betfair ?? {}), overUnder: { ...ouPrev, "1.5": ou15, "2.5": ou25, "3.5": ou35 } };
+      await kv.set(key, { ...item, betfair: nextBetfair, strategy: nextStrategy, updatedAt: new Date().toISOString() });
+      return c.json({ ok: true, matchId, adoptedExisting: true, openOrdersCount, matchedBetsCount, risk, profitSum, profitPct });
+    }
+
+    let placed: any[] = [];
+    let cashouted: any[] = [];
+    let repriced: any[] = [];
+
+    const shouldCashout = typeof profitPct === "number" && Number.isFinite(profitPct) && profitPct >= profitTargetPct;
+    if (shouldCashout && risk > 0) {
+      for (const m of markets) {
+        try {
+          const r = await cashoutMarket(String(m.marketId));
+          cashouted.push({ marketId: String(m.marketId), line: m.line, ...r });
+        } catch (e) {
+          cashouted.push({ marketId: String(m.marketId), line: m.line, error: e instanceof Error ? e.message : String(e) });
+        }
+      }
+      phase = "closed";
+    } else if (!adoptedExistingAt) {
+      if (openOrdersCount > 0) {
+        const nowMs = Date.now();
+        const waitMs = Math.max(1_000, Math.floor(secondsToWaitMatch * 1000));
+
+        const cancelOrder = async (marketId: string, betId: string) => {
+          const bid = String(betId ?? "").trim();
+          if (!bid) return null;
+          return await betfairJsonRpcTrading({
+            method: "SportsAPING/v1.0/cancelOrders",
+            params: { marketId, instructions: [{ betId: bid }] },
+            sessionToken,
+          });
+        };
+
+        const mk15 = ou15?.marketId ? String(ou15.marketId) : null;
+        const mk25 = ou25?.marketId ? String(ou25.marketId) : null;
+        const mk35 = ou35?.marketId ? String(ou35.marketId) : null;
+        const sel15 = Number(ou15?.odds?.under?.selectionId ?? ou15?.runners?.underSelectionId);
+        const sel25 = Number(ou25?.odds?.under?.selectionId ?? ou25?.runners?.underSelectionId);
+        const sel35 = Number(ou35?.odds?.under?.selectionId ?? ou35?.runners?.underSelectionId);
+        const base15 = Number(ou15?.odds?.under?.back);
+        const base25 = Number(ou25?.odds?.under?.back);
+        const base35 = Number(ou35?.odds?.under?.back);
+        const px15 = applyOffsetTicks(base15, entryOffsetTicks) ?? (Number.isFinite(base15) ? base15 : null);
+        const px25 = applyOffsetTicks(base25, entryOffsetTicks) ?? (Number.isFinite(base25) ? base25 : null);
+        const px35 = applyOffsetTicks(base35, entryOffsetTicks) ?? (Number.isFinite(base35) ? base35 : null);
+        const marketInfo = new Map<string, { selectionId: number; price: number | null; line: number }>();
+        if (mk15 && Number.isFinite(sel15)) marketInfo.set(mk15, { selectionId: sel15, price: Number.isFinite(px15) ? px15 : null, line: 1.5 });
+        if (mk25 && Number.isFinite(sel25)) marketInfo.set(mk25, { selectionId: sel25, price: Number.isFinite(px25) ? px25 : null, line: 2.5 });
+        if (mk35 && Number.isFinite(sel35)) marketInfo.set(mk35, { selectionId: sel35, price: Number.isFinite(px35) ? px35 : null, line: 3.5 });
+
+        for (const o of currentOrders) {
+          const marketId = String(o?.marketId ?? "").trim();
+          if (!marketId || !marketInfo.has(marketId)) continue;
+          const side = String(o?.side ?? "").toUpperCase();
+          if (side !== "BACK") continue;
+          const sizeMatched = Number(o?.sizeMatched ?? 0);
+          if (Number.isFinite(sizeMatched) && sizeMatched > 0) continue;
+          const sizeRemaining = Number(o?.sizeRemaining ?? 0);
+          if (!Number.isFinite(sizeRemaining) || sizeRemaining <= 0) continue;
+          const betId = String(o?.betId ?? "").trim();
+          if (!betId) continue;
+          const placedIso = String(o?.placedDate ?? "").trim();
+          const placedMs = placedIso ? new Date(placedIso).getTime() : 0;
+          if (placedMs && Number.isFinite(placedMs) && nowMs - placedMs < waitMs) continue;
+
+          const info = marketInfo.get(marketId)!;
+          if (!Number.isFinite(info.selectionId) || !Number.isFinite(info.price) || !info.price || info.price <= 1.01) continue;
+          if (sizeRemaining < 2) continue;
+
+          try {
+            await cancelOrder(marketId, betId);
+          } catch {}
+          const res = await betfairJsonRpcTrading({
+            method: "SportsAPING/v1.0/placeOrders",
+            params: {
+              marketId,
+              instructions: [{ selectionId: info.selectionId, side: "BACK", orderType: "LIMIT", limitOrder: { size: round2(sizeRemaining), price: info.price, persistenceType: "LAPSE" } }],
+              customerRef: `SG_RE_${matchId}_${Date.now()}`.slice(0, 32),
+              async: false,
+            },
+            sessionToken,
+          });
+          repriced.push({ marketId, line: info.line, stake: round2(sizeRemaining), price: info.price, result: res });
+        }
+      }
+
+      const isInPlay = Boolean(item?.betfair?.inPlay ?? false);
+      if (phase === "idle" && !isInPlay) {
+        const mk15 = ou15?.marketId ? String(ou15.marketId) : null;
+        const mk25 = ou25?.marketId ? String(ou25.marketId) : null;
+        const sel15 = Number(ou15?.odds?.under?.selectionId ?? ou15?.runners?.underSelectionId);
+        const sel25 = Number(ou25?.odds?.under?.selectionId ?? ou25?.runners?.underSelectionId);
+        const base15 = Number(ou15?.odds?.under?.back);
+        const base25 = Number(ou25?.odds?.under?.back);
+        const px15 = applyOffsetTicks(base15, entryOffsetTicks) ?? (Number.isFinite(base15) ? base15 : null);
+        const px25 = applyOffsetTicks(base25, entryOffsetTicks) ?? (Number.isFinite(base25) ? base25 : null);
+        const stake15 = round2(stakeBankroll * 0.5);
+        const stake25 = round2(stakeBankroll - stake15);
+        if (mk15 && mk25 && Number.isFinite(sel15) && Number.isFinite(sel25) && Number.isFinite(px15) && Number.isFinite(px25) && stake15 >= 2 && stake25 >= 2) {
+          const r15 = await betfairJsonRpcTrading({
+            method: "SportsAPING/v1.0/placeOrders",
+            params: {
+              marketId: mk15,
+              instructions: [{ selectionId: sel15, side: "BACK", orderType: "LIMIT", limitOrder: { size: stake15, price: px15, persistenceType: "LAPSE" } }],
+              customerRef: `SG_U15_${matchId}_${Date.now()}`.slice(0, 32),
+              async: false,
+            },
+            sessionToken,
+          });
+          const r25 = await betfairJsonRpcTrading({
+            method: "SportsAPING/v1.0/placeOrders",
+            params: {
+              marketId: mk25,
+              instructions: [{ selectionId: sel25, side: "BACK", orderType: "LIMIT", limitOrder: { size: stake25, price: px25, persistenceType: "LAPSE" } }],
+              customerRef: `SG_U25_${matchId}_${Date.now()}`.slice(0, 32),
+              async: false,
+            },
+            sessionToken,
+          });
+          placed.push({ marketId: mk15, line: 1.5, stake: stake15, price: px15, result: r15 });
+          placed.push({ marketId: mk25, line: 2.5, stake: stake25, price: px25, result: r25 });
+          phase = "entered_pre";
+        }
+      } else if ((phase === "entered_pre" || phase === "recovery") && totalGoals >= 1) {
+        const mk35 = ou35?.marketId ? String(ou35.marketId) : null;
+        const sel35 = Number(ou35?.odds?.under?.selectionId ?? ou35?.runners?.underSelectionId);
+        const base35 = Number(ou35?.odds?.under?.back);
+        const px35 = applyOffsetTicks(base35, entryOffsetTicks) ?? (Number.isFinite(base35) ? base35 : null);
+        const wantsRecovery = phase === "entered_pre";
+        if (wantsRecovery && mk35 && Number.isFinite(sel35) && Number.isFinite(px35) && px35 > 1.01) {
+          const needed = profitSum < 0 ? Math.abs(profitSum) * 1.2 : stakeBankroll * 0.3;
+          const stake35 = round2(clamp(needed, 2, stakeBankroll));
+          const r35 = await betfairJsonRpcTrading({
+            method: "SportsAPING/v1.0/placeOrders",
+            params: {
+              marketId: mk35,
+              instructions: [{ selectionId: sel35, side: "BACK", orderType: "LIMIT", limitOrder: { size: stake35, price: px35, persistenceType: "LAPSE" } }],
+              customerRef: `SG_U35_${matchId}_${Date.now()}`.slice(0, 32),
+              async: false,
+            },
+            sessionToken,
+          });
+          placed.push({ marketId: mk35, line: 3.5, stake: stake35, price: px35, result: r35 });
+          phase = "recovery";
+        }
+      }
+    }
+
+    const nextStrategy = {
+      ...(item?.strategy ?? {}),
+      agent: "scalpingGoals",
+      scalpingGoals: {
+        ...(scalpingPrev ?? {}),
+        phase,
+        lastTickAt: new Date().toISOString(),
+        lastSummary: { risk, profitSum, profitPct, totalGoals, profitTargetPct, stakePct, entryOffsetTicks, secondsToWaitMatch },
+      },
+    };
+    const nextBetfair = { ...(item?.betfair ?? {}), overUnder: { ...ouPrev, "1.5": ou15, "2.5": ou25, "3.5": ou35 } };
+    await kv.set(key, { ...item, betfair: nextBetfair, strategy: nextStrategy, updatedAt: new Date().toISOString() });
+
+    return c.json({ ok: true, matchId, phase, risk, profitSum, profitPct, profitByMarket, placed, repriced, cashouted });
+  } catch (error) {
+    return c.json({ ok: false, error: error.message || "Erro no robô Scalping Gol Acima" }, 500);
+  }
+};
+
+const betfairOverGoalsLimitTickHandler = async (c: any) => {
+  const authError = requireBearer(c);
+  if (authError) return authError;
+  const adminError = requireAutomationAdmin(c);
+  if (adminError) return adminError;
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const matchId = String(body?.matchId ?? "").trim();
+    if (!matchId) return c.json({ ok: false, error: "matchId obrigatório" }, 400);
+
+    const cfg = (body?.config && typeof body.config === "object") ? body.config : {};
+    const bankrollRaw = Number(cfg?.bankroll ?? 50);
+    const bankroll = Number.isFinite(bankrollRaw) ? clamp(bankrollRaw, 2, 10_000) : 50;
+    const bankrollTotalRaw = Number(cfg?.bankrollTotal ?? 0);
+    const bankrollTotal = Number.isFinite(bankrollTotalRaw) ? clamp(bankrollTotalRaw, 0, 10_000_000) : 0;
+    const minOddsRaw = Number(cfg?.minOdds ?? 1.3);
+    const minOdds = Number.isFinite(minOddsRaw) ? clamp(minOddsRaw, 1.01, 10) : 1.3;
+    const maxEntriesRaw = Number(cfg?.maxEntries ?? 3);
+    const maxEntries = Number.isFinite(maxEntriesRaw) ? clamp(Math.floor(maxEntriesRaw), 1, 10) : 3;
+    const profitTargetPctRaw = Number(cfg?.profitTargetPct ?? 0.02);
+    const profitTargetPct = Number.isFinite(profitTargetPctRaw) ? clamp(profitTargetPctRaw, 0.001, 0.5) : 0.02;
+    const minDeltaTradedRaw = Number(cfg?.minDeltaTraded ?? 200);
+    const minDeltaTraded = Number.isFinite(minDeltaTradedRaw) ? clamp(minDeltaTradedRaw, 10, 1_000_000) : 200;
+    const dominanceRatioRaw = Number(cfg?.dominanceRatio ?? 1.25);
+    const dominanceRatio = Number.isFinite(dominanceRatioRaw) ? clamp(dominanceRatioRaw, 1.01, 10) : 1.25;
+    const minSecondsBetweenEntriesRaw = Number(cfg?.minSecondsBetweenEntries ?? 30);
+    const minSecondsBetweenEntries = Number.isFinite(minSecondsBetweenEntriesRaw) ? clamp(minSecondsBetweenEntriesRaw, 0, 600) : 30;
+    const stakePctRaw = Number(cfg?.stakePct ?? 1);
+    const stakePct = Number.isFinite(stakePctRaw) ? clamp(stakePctRaw, 0.01, 1) : 1;
+    const stakeBankroll = round2(clamp(bankroll * stakePct, 2, bankroll));
+    const entryOffsetTicksRaw = Number(cfg?.entryOffsetTicks ?? 2);
+    const entryOffsetTicks = Number.isFinite(entryOffsetTicksRaw) ? clamp(Math.trunc(entryOffsetTicksRaw), -10, 10) : 2;
+
+    const stepsForPrice = (p: number) => {
+      if (p < 2) return 0.01;
+      if (p < 3) return 0.02;
+      if (p < 4) return 0.05;
+      if (p < 6) return 0.1;
+      if (p < 10) return 0.2;
+      if (p < 20) return 0.5;
+      if (p < 30) return 1;
+      if (p < 50) return 2;
+      if (p < 100) return 5;
+      return 10;
+    };
+    const roundPrice = (p: number) => round2(p);
+    const tickUpOnce = (p: number) => roundPrice(p + stepsForPrice(p));
+    const tickDownOnce = (p: number) => {
+      const s = stepsForPrice(p);
+      const next = p - s;
+      return roundPrice(next < 1.01 ? 1.01 : next);
+    };
+    const tickUp = (p: number, n: number) => {
+      let v = p;
+      for (let i = 0; i < n; i += 1) v = tickUpOnce(v);
+      return v;
+    };
+    const tickDown = (p: number, n: number) => {
+      let v = p;
+      for (let i = 0; i < n; i += 1) v = tickDownOnce(v);
+      return v;
+    };
+    const applyOffsetTicks = (p: number, ticks: number) => {
+      if (!Number.isFinite(p) || p <= 1.01) return null;
+      if (!Number.isFinite(ticks) || ticks === 0) return roundPrice(p);
+      const t = Math.trunc(ticks);
+      return t > 0 ? tickUp(p, t) : tickDown(p, Math.abs(t));
+    };
+
+    const key = `${BETFAIR_QUEUE_PREFIX}${matchId}`;
+    const item = (await kv.get(key)) ?? null;
+    if (!item) return c.json({ ok: false, error: "Item não encontrado na fila" }, 404);
+
+    const agentRaw = String(item?.strategy?.agent ?? "").trim().toLowerCase();
+    const agent =
+      agentRaw === "overgoalslimit" || agentRaw === "over_goals_limit" || agentRaw === "over_goals" ? "overGoalsLimit" : agentRaw === "scalpinggoals" || agentRaw === "scalping_goals" ? "scalpingGoals" : "correctScore";
+    if (agent !== "overGoalsLimit") return c.json({ ok: false, error: "Robô não é Over Gols Limite" }, 400);
+
+    const betfair = item?.betfair ?? null;
+    let eventId = String(betfair?.eventId ?? "").trim();
+    if (!eventId && String(item?.homeTeam ?? "").trim() && String(item?.awayTeam ?? "").trim()) {
+      try {
+        const mapped = await resolveBetfairMatchOdds({ homeTeam: String(item.homeTeam), awayTeam: String(item.awayTeam), utcDate: item?.utcDate });
+        eventId = String(mapped?.eventId ?? "").trim();
+        item.betfair = { ...(item?.betfair ?? {}), ...mapped };
+      } catch {}
+    }
+    if (!eventId) return c.json({ ok: false, error: "Betfair: eventId não resolvido" }, 400);
+
+    const scoreHome = Number.isFinite(Number(item?.scoreHome)) ? Number(item.scoreHome) : 0;
+    const scoreAway = Number.isFinite(Number(item?.scoreAway)) ? Number(item.scoreAway) : 0;
+    const totalGoals = Math.max(0, Math.floor(scoreHome)) + Math.max(0, Math.floor(scoreAway));
+    const line = totalGoals + 0.5;
+    if (line < 0.5 || line > 10.5) return c.json({ ok: true, matchId, phase: "skip_line", totalGoals, line, reason: "Linha fora do range" });
+
+    const ouPrev = (item?.betfair?.overUnder && typeof item.betfair.overUnder === "object") ? item.betfair.overUnder : {};
+    let ou = ouPrev?.[String(line)] ?? null;
+    try {
+      ou = await resolveBetfairOverUnderMarket({ eventId, line });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      return c.json({ ok: false, error: msg || "Falha ao resolver mercado Over/Under" }, 400);
+    }
+
+    const marketId = String(ou?.marketId ?? "").trim();
+    if (!marketId) return c.json({ ok: false, error: "Sem marketId para o próximo limite de gols" }, 400);
+
+    const sessionToken = await getBetfairSessionToken();
+
+    const calcRisk = (orders: any[]) => {
+      return round2(
+        orders.reduce((acc: number, o: any) => {
+          const side = String(o?.side ?? "").trim().toUpperCase();
+          const price = Number(o?.priceSize?.price);
+          const sizeRemaining = Number(o?.sizeRemaining);
+          const sizeMatched = Number(o?.sizeMatched);
+          const size = (Number.isFinite(sizeRemaining) ? sizeRemaining : 0) + (Number.isFinite(sizeMatched) ? sizeMatched : 0);
+          if (!Number.isFinite(size) || size <= 0) return acc;
+          if (side === "LAY") {
+            if (!Number.isFinite(price) || price <= 1.01) return acc;
+            return acc + size * (price - 1);
+          }
+          return acc + size;
+        }, 0),
+      );
+    };
+
+    const calcWorstProfit = async (mid: string) => {
+      const pnlRes = await betfairJsonRpcTrading({
+        method: "SportsAPING/v1.0/listMarketProfitAndLoss",
+        params: { marketIds: [mid], includeSettledBets: false, includeBspBets: false, netOfCommission: true },
+        sessionToken,
+      });
+      const mk = Array.isArray(pnlRes) ? pnlRes[0] : null;
+      const pnlList = Array.isArray(mk?.profitAndLosses)
+        ? mk.profitAndLosses
+        : Array.isArray(mk?.profitAndLoss)
+          ? mk.profitAndLoss
+          : [];
+      const values = pnlList.map((x: any) => Number(x?.ifWin)).filter((v: any) => typeof v === "number" && Number.isFinite(v));
+      return values.length > 0 ? round2(values.reduce((m: number, v: number) => (v < m ? v : m), values[0])) : null;
+    };
+
+    const cashoutMarket = async (mid: string) => {
+      const listRes = await betfairJsonRpcTrading({
+        method: "SportsAPING/v1.0/listCurrentOrders",
+        params: { marketIds: [mid] },
+        sessionToken,
+      });
+      const orders = Array.isArray(listRes?.currentOrders) ? listRes.currentOrders : [];
+      const toCancel = orders.filter((o: any) => Number(o?.sizeRemaining ?? 0) > 0 && String(o?.betId ?? "").trim()).map((o: any) => String(o.betId));
+      if (toCancel.length > 0) {
+        await betfairJsonRpcTrading({
+          method: "SportsAPING/v1.0/cancelOrders",
+          params: { marketId: mid, instructions: toCancel.map((betId: string) => ({ betId })) },
+          sessionToken,
+        });
+      }
+
+      const book = await betfairJsonRpc({
+        method: "SportsAPING/v1.0/listMarketBook",
+        params: { marketIds: [mid], priceProjection: { priceData: ["EX_BEST_OFFERS"], virtualise: true } },
+        sessionToken,
+      });
+      const book0 = Array.isArray(book) ? book[0] : book;
+      const runners = Array.isArray(book0?.runners) ? book0.runners : [];
+      const bySelection = new Map<number, any>();
+      for (const r of runners) {
+        const sid = Number(r?.selectionId);
+        if (!Number.isFinite(sid)) continue;
+        const ex = r?.ex ?? {};
+        const back0 = Array.isArray(ex?.availableToBack) ? ex.availableToBack[0] : null;
+        const lay0 = Array.isArray(ex?.availableToLay) ? ex.availableToLay[0] : null;
+        bySelection.set(sid, { bestBack: back0 ? Number(back0.price) : null, bestLay: lay0 ? Number(lay0.price) : null });
+      }
+
+      const hedgeInstructions: any[] = [];
+      for (const o of orders) {
+        const sizeMatched = Number(o?.sizeMatched ?? 0);
+        if (!Number.isFinite(sizeMatched) || sizeMatched <= 0) continue;
+        const selectionId = Number(o?.selectionId);
+        if (!Number.isFinite(selectionId)) continue;
+        const side = String(o?.side ?? "").toUpperCase();
+        const px = bySelection.get(selectionId) ?? {};
+        if (side === "BACK") {
+          const layPrice = Number(px?.bestLay);
+          if (!Number.isFinite(layPrice) || layPrice <= 1.01) continue;
+          hedgeInstructions.push({ selectionId, side: "LAY", orderType: "LIMIT", limitOrder: { size: round2(sizeMatched), price: layPrice, persistenceType: "LAPSE" } });
+        } else if (side === "LAY") {
+          const backPrice = Number(px?.bestBack);
+          if (!Number.isFinite(backPrice) || backPrice <= 1.01) continue;
+          hedgeInstructions.push({ selectionId, side: "BACK", orderType: "LIMIT", limitOrder: { size: round2(sizeMatched), price: backPrice, persistenceType: "LAPSE" } });
+        }
+      }
+
+      let hedgeResult: any = null;
+      if (hedgeInstructions.length > 0) {
+        hedgeResult = await betfairJsonRpcTrading({
+          method: "SportsAPING/v1.0/placeOrders",
+          params: { marketId: mid, instructions: hedgeInstructions.slice(0, 50), customerRef: `OG_CASH_${matchId}_${Date.now()}`.slice(0, 32), async: false },
+          sessionToken,
+        });
+      }
+      return { cancelledCount: toCancel.length, hedgedCount: hedgeInstructions.length, hedgeResult };
+    };
+
+    const prev = (item?.strategy?.overGoalsLimit && typeof item.strategy.overGoalsLimit === "object") ? item.strategy.overGoalsLimit : {};
+    const phasePrev = String(prev?.phase ?? "").trim() || "idle";
+    const closedAt = String(prev?.closedAt ?? "").trim() || null;
+    if (closedAt || phasePrev.startsWith("closed")) {
+      return c.json({ ok: true, matchId, phase: phasePrev || "closed", totalGoals, line });
+    }
+
+    const enteredPrevRaw = Array.isArray(prev?.enteredMarketIds) ? prev.enteredMarketIds : [];
+    const enteredPrev = enteredPrevRaw.map((x: any) => String(x ?? "").trim()).filter((x: any) => x);
+    const enteredSet = new Set<string>(enteredPrev);
+    if (marketId) enteredSet.add(marketId);
+    const marketIdsForRisk = Array.from(enteredSet).slice(0, 10);
+
+    const listAll = await betfairJsonRpcTrading({
+      method: "SportsAPING/v1.0/listCurrentOrders",
+      params: { marketIds: marketIdsForRisk },
+      sessionToken,
+    });
+    const ordersAll = Array.isArray(listAll?.currentOrders) ? listAll.currentOrders : [];
+    const risk = calcRisk(ordersAll);
+
+    const profitByMarket: any[] = [];
+    let profitSum = 0;
+    for (const mid of marketIdsForRisk) {
+      try {
+        const p = await calcWorstProfit(mid);
+        profitByMarket.push({ marketId: mid, profit: p });
+        if (typeof p === "number" && Number.isFinite(p)) profitSum += p;
+      } catch {
+        profitByMarket.push({ marketId: mid, profit: null });
+      }
+    }
+    profitSum = round2(profitSum);
+
+    const profitTargetAbs = bankrollTotal > 0 ? round2(bankrollTotal * profitTargetPct) : round2(bankroll * profitTargetPct);
+    const shouldCloseProfit = profitTargetAbs > 0 && profitSum >= profitTargetAbs;
+    let cashouted: any[] = [];
+    if (shouldCloseProfit && risk > 0) {
+      for (const mid of marketIdsForRisk) {
+        try {
+          const r = await cashoutMarket(mid);
+          cashouted.push({ marketId: mid, ...r });
+        } catch (e) {
+          cashouted.push({ marketId: mid, error: e instanceof Error ? e.message : String(e) });
+        }
+      }
+      const nextStrategy = {
+        ...(item?.strategy ?? {}),
+        agent: "overGoalsLimit",
+        overGoalsLimit: {
+          ...(prev ?? {}),
+          phase: "closed_profit_target",
+          closedAt: new Date().toISOString(),
+          lastTickAt: new Date().toISOString(),
+          lastSummary: { risk, profitSum, profitTargetAbs, totalGoals, line },
+        },
+      };
+      const nextBetfair = { ...(item?.betfair ?? {}), overUnder: { ...ouPrev, [String(line)]: ou } };
+      await kv.set(key, { ...item, status: "stopped", betfair: nextBetfair, strategy: nextStrategy, updatedAt: new Date().toISOString() });
+      return c.json({ ok: true, matchId, phase: "closed_profit_target", risk, profitSum, profitTargetAbs, cashouted });
+    }
+
+    const isInPlay = Boolean(item?.betfair?.inPlay ?? false);
+    if (!isInPlay) {
+      const nextStrategy = {
+        ...(item?.strategy ?? {}),
+        agent: "overGoalsLimit",
+        overGoalsLimit: {
+          ...(prev ?? {}),
+          phase: phasePrev,
+          lastTickAt: new Date().toISOString(),
+          lastSummary: { risk, profitSum, profitTargetAbs, totalGoals, line, inPlay: false },
+        },
+      };
+      const nextBetfair = { ...(item?.betfair ?? {}), overUnder: { ...ouPrev, [String(line)]: ou } };
+      await kv.set(key, { ...item, betfair: nextBetfair, strategy: nextStrategy, updatedAt: new Date().toISOString() });
+      return c.json({ ok: true, matchId, phase: "waiting_inplay", risk, profitSum, profitTargetAbs, totalGoals, line });
+    }
+
+    const lastEntryAt = String(prev?.lastEntryAt ?? "").trim();
+    const lastEntryMs = lastEntryAt ? new Date(lastEntryAt).getTime() : 0;
+    if (lastEntryMs && Number.isFinite(lastEntryMs) && minSecondsBetweenEntries > 0 && Date.now() - lastEntryMs < minSecondsBetweenEntries * 1000) {
+      const nextStrategy = {
+        ...(item?.strategy ?? {}),
+        agent: "overGoalsLimit",
+        overGoalsLimit: {
+          ...(prev ?? {}),
+          phase: "cooldown",
+          lastTickAt: new Date().toISOString(),
+          lastSummary: { risk, profitSum, profitTargetAbs, totalGoals, line },
+        },
+      };
+      const nextBetfair = { ...(item?.betfair ?? {}), overUnder: { ...ouPrev, [String(line)]: ou } };
+      await kv.set(key, { ...item, betfair: nextBetfair, strategy: nextStrategy, updatedAt: new Date().toISOString() });
+      return c.json({ ok: true, matchId, phase: "cooldown", risk, profitSum, profitTargetAbs, totalGoals, line });
+    }
+
+    const entriesRaw = Number(prev?.entriesCount ?? (Array.isArray(prev?.entries) ? prev.entries.length : 0));
+    const entriesCount = Number.isFinite(entriesRaw) ? Math.max(0, Math.floor(entriesRaw)) : 0;
+    if (entriesCount >= maxEntries) {
+      const nextStrategy = {
+        ...(item?.strategy ?? {}),
+        agent: "overGoalsLimit",
+        overGoalsLimit: {
+          ...(prev ?? {}),
+          phase: "max_entries",
+          lastTickAt: new Date().toISOString(),
+          lastSummary: { risk, profitSum, profitTargetAbs, totalGoals, line, entriesCount, maxEntries, stakePct, entryOffsetTicks, secondsToWaitMatch },
+        },
+      };
+      const nextBetfair = { ...(item?.betfair ?? {}), overUnder: { ...ouPrev, [String(line)]: ou } };
+      await kv.set(key, { ...item, betfair: nextBetfair, strategy: nextStrategy, updatedAt: new Date().toISOString() });
+      return c.json({ ok: true, matchId, phase: "max_entries", entriesCount, maxEntries, risk, profitSum, profitTargetAbs, totalGoals, line });
+    }
+
+    const over = ou?.odds?.over ?? null;
+    const under = ou?.odds?.under ?? null;
+    const overSelectionId = Number(over?.selectionId ?? ou?.runners?.overSelectionId);
+    const baseEntryPrice =
+      Number.isFinite(Number(over?.back)) && Number(over?.back) > 1.01
+        ? Number(over.back)
+        : Number.isFinite(Number(over?.lay)) && Number(over?.lay) > 1.01
+          ? Number(over.lay)
+          : Number(over?.back);
+    const entryPrice = applyOffsetTicks(Number(baseEntryPrice), entryOffsetTicks) ?? Number(baseEntryPrice);
+    const overBack = Number.isFinite(Number(over?.back)) ? Number(over.back) : null;
+    const overTraded = Number(over?.tradedVolume);
+    const underTraded = Number(under?.tradedVolume);
+
+    const lastMarket = (prev?.lastMarket && typeof prev.lastMarket === "object") ? prev.lastMarket : null;
+    const lastMarketId = String(lastMarket?.marketId ?? "").trim();
+    const lastOverTraded = Number(lastMarket?.overTraded);
+    const lastUnderTraded = Number(lastMarket?.underTraded);
+    const deltaOver = marketId && lastMarketId === marketId && Number.isFinite(overTraded) && Number.isFinite(lastOverTraded) ? round2(overTraded - lastOverTraded) : null;
+    const deltaUnder = marketId && lastMarketId === marketId && Number.isFinite(underTraded) && Number.isFinite(lastUnderTraded) ? round2(underTraded - lastUnderTraded) : null;
+
+    const volumeOk =
+      typeof deltaOver === "number" &&
+      Number.isFinite(deltaOver) &&
+      deltaOver >= minDeltaTraded &&
+      (typeof deltaUnder !== "number" || !Number.isFinite(deltaUnder) || deltaUnder <= 0 ? true : deltaOver >= deltaUnder * dominanceRatio);
+
+    const oddsOk = Number.isFinite(entryPrice) && entryPrice >= minOdds;
+
+    const listThis = await betfairJsonRpcTrading({
+      method: "SportsAPING/v1.0/listCurrentOrders",
+      params: { marketIds: [marketId] },
+      sessionToken,
+    });
+    const ordersThis = Array.isArray(listThis?.currentOrders) ? listThis.currentOrders : [];
+    const openOrdersCount = ordersThis.filter((o: any) => Number(o?.sizeRemaining ?? 0) > 0).length;
+    const matchedBetsCount = ordersThis.filter((o: any) => Number(o?.sizeMatched ?? 0) > 0).length;
+    const hasExistingPosition = openOrdersCount > 0 || matchedBetsCount > 0;
+
+    let placed: any = null;
+    let repriced: any = null;
+    let phase = phasePrev;
+
+    const cancelOrder = async (mid: string, betId: string) => {
+      const bid = String(betId ?? "").trim();
+      if (!bid) return null;
+      return await betfairJsonRpcTrading({
+        method: "SportsAPING/v1.0/cancelOrders",
+        params: { marketId: mid, instructions: [{ betId: bid }] },
+        sessionToken,
+      });
+    };
+
+    const openEntry = ordersThis.find((o: any) => {
+      const side = String(o?.side ?? "").toUpperCase();
+      const sizeMatched = Number(o?.sizeMatched ?? 0);
+      const sizeRemaining = Number(o?.sizeRemaining ?? 0);
+      return side === "BACK" && (!Number.isFinite(sizeMatched) || sizeMatched <= 0) && Number.isFinite(sizeRemaining) && sizeRemaining > 0 && String(o?.betId ?? "").trim();
+    }) ?? null;
+
+    if (openEntry) {
+      const waitMs = Math.max(1_000, Math.floor(secondsToWaitMatch * 1000));
+      const placedIso = String(openEntry?.placedDate ?? "").trim();
+      const placedMs = placedIso ? new Date(placedIso).getTime() : 0;
+      const shouldReprice = !placedMs || !Number.isFinite(placedMs) ? true : Date.now() - placedMs >= waitMs;
+      const betId = String(openEntry?.betId ?? "").trim();
+      const sizeRemaining = Number(openEntry?.sizeRemaining ?? 0);
+
+      if (shouldReprice && betId && Number.isFinite(sizeRemaining) && sizeRemaining >= 2) {
+        try {
+          await cancelOrder(marketId, betId);
+        } catch {}
+        if (volumeOk && oddsOk && Number.isFinite(overSelectionId)) {
+          const res = await betfairJsonRpcTrading({
+            method: "SportsAPING/v1.0/placeOrders",
+            params: {
+              marketId,
+              instructions: [{ selectionId: overSelectionId, side: "BACK", orderType: "LIMIT", limitOrder: { size: round2(sizeRemaining), price: entryPrice, persistenceType: "LAPSE" } }],
+              customerRef: `OG_RE_${String(Math.round(line * 10)).padStart(2, "0")}_${matchId}_${Date.now()}`.slice(0, 32),
+              async: false,
+            },
+            sessionToken,
+          });
+          repriced = { marketId, line, selectionId: overSelectionId, side: "BACK", stake: round2(sizeRemaining), price: entryPrice, result: res };
+          phase = "entry_repriced";
+        } else {
+          phase = volumeOk && !oddsOk ? "odds_below_min" : "waiting_signal";
+        }
+      } else {
+        phase = "waiting_match";
+      }
+    } else if (hasExistingPosition) {
+      phase = matchedBetsCount > 0 ? "adopted_existing" : "waiting_match";
+    } else if (volumeOk && oddsOk && Number.isFinite(overSelectionId)) {
+      const stake = round2(clamp(stakeBankroll / maxEntries, 2, stakeBankroll));
+      const res = await betfairJsonRpcTrading({
+        method: "SportsAPING/v1.0/placeOrders",
+        params: {
+          marketId,
+          instructions: [{ selectionId: overSelectionId, side: "BACK", orderType: "LIMIT", limitOrder: { size: stake, price: entryPrice, persistenceType: "LAPSE" } }],
+          customerRef: `OG_${String(Math.round(line * 10)).padStart(2, "0")}_${matchId}_${Date.now()}`.slice(0, 32),
+          async: false,
+        },
+        sessionToken,
+      });
+      placed = { marketId, line, selectionId: overSelectionId, side: "BACK", stake, price: entryPrice, result: res };
+      phase = "entered";
+      enteredSet.add(marketId);
+    } else {
+      phase = volumeOk && !oddsOk ? "odds_below_min" : "waiting_signal";
+    }
+
+    const nextEntries = Array.isArray(prev?.entries) ? prev.entries : [];
+    const didAddEntry = Boolean(placed);
+    const didReprice = Boolean(repriced);
+    const nextEntriesCount = didAddEntry ? entriesCount + 1 : entriesCount;
+    const entries = didAddEntry || didReprice
+      ? nextEntries.concat([
+          {
+            marketId,
+            line,
+            stake: didReprice ? repriced.stake : placed.stake,
+            price: didReprice ? repriced.price : placed.price,
+            placedAt: new Date().toISOString(),
+            deltaOver,
+            deltaUnder,
+            overTraded: Number.isFinite(overTraded) ? overTraded : null,
+            underTraded: Number.isFinite(underTraded) ? underTraded : null,
+            minOdds,
+            minDeltaTraded,
+            dominanceRatio,
+            stakePct,
+            entryOffsetTicks,
+            secondsToWaitMatch,
+          },
+        ])
+      : nextEntries;
+
+    const nextStrategy = {
+      ...(item?.strategy ?? {}),
+      agent: "overGoalsLimit",
+      overGoalsLimit: {
+        ...(prev ?? {}),
+        phase,
+        lastTickAt: new Date().toISOString(),
+        lastEntryAt: placed ? new Date().toISOString() : lastEntryAt || null,
+        entriesCount: nextEntriesCount,
+        enteredMarketIds: Array.from(enteredSet).slice(0, 10),
+        entries,
+        lastMarket: {
+          marketId,
+          line,
+          overBack: Number.isFinite(overBack) ? overBack : null,
+          overTraded: Number.isFinite(overTraded) ? round2(overTraded) : null,
+          underTraded: Number.isFinite(underTraded) ? round2(underTraded) : null,
+          fetchedAt: new Date().toISOString(),
+        },
+        lastSummary: {
+          risk,
+          profitSum,
+          profitTargetAbs,
+          totalGoals,
+          line,
+          marketId,
+          openOrdersCount,
+          matchedBetsCount,
+          volumeOk,
+          oddsOk,
+          deltaOver,
+          deltaUnder,
+          stakePct,
+          entryOffsetTicks,
+          secondsToWaitMatch,
+        },
+      },
+    };
+    const nextBetfair = { ...(item?.betfair ?? {}), overUnder: { ...ouPrev, [String(line)]: ou } };
+    await kv.set(key, { ...item, betfair: nextBetfair, strategy: nextStrategy, updatedAt: new Date().toISOString() });
+
+    return c.json({
+      ok: true,
+      matchId,
+      phase,
+      totalGoals,
+      line,
+      marketId,
+      volumeOk,
+      oddsOk,
+      deltaOver,
+      deltaUnder,
+      openOrdersCount,
+      matchedBetsCount,
+      entriesCount: nextEntriesCount,
+      maxEntries,
+      risk,
+      profitSum,
+      profitTargetAbs,
+      profitByMarket,
+      placed,
+      repriced,
+    });
+  } catch (error) {
+    return c.json({ ok: false, error: error.message || "Erro no robô Over Gols Limite" }, 500);
+  }
+};
+
+const betfairScalpingTicksTickHandler = async (c: any) => {
+  const authError = requireBearer(c);
+  if (authError) return authError;
+  const adminError = requireAutomationAdmin(c);
+  if (adminError) return adminError;
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const matchId = String(body?.matchId ?? "").trim();
+    if (!matchId) return c.json({ ok: false, error: "matchId obrigatório" }, 400);
+
+    const cfg = (body?.config && typeof body.config === "object") ? body.config : {};
+    const bankrollRaw = Number(cfg?.bankroll ?? 50);
+    const bankroll = Number.isFinite(bankrollRaw) ? clamp(bankrollRaw, 2, 10_000) : 50;
+    const targetTicksRaw = Number(cfg?.targetTicks ?? 10);
+    const targetTicks = Number.isFinite(targetTicksRaw) ? clamp(Math.floor(targetTicksRaw), 1, 50) : 10;
+    const entryOffsetTicksRaw = Number(cfg?.entryOffsetTicks ?? 2);
+    const entryOffsetTicks = Number.isFinite(entryOffsetTicksRaw) ? clamp(Math.trunc(entryOffsetTicksRaw), -10, 10) : 2;
+    const maxSpreadTicksRaw = Number(cfg?.maxSpreadTicks ?? 2);
+    const maxSpreadTicks = Number.isFinite(maxSpreadTicksRaw) ? clamp(Math.floor(maxSpreadTicksRaw), 0, 10) : 2;
+    const minSecondsBetweenCyclesRaw = Number(cfg?.minSecondsBetweenCycles ?? 8);
+    const minSecondsBetweenCycles = Number.isFinite(minSecondsBetweenCyclesRaw) ? clamp(Math.floor(minSecondsBetweenCyclesRaw), 0, 600) : 8;
+    const stakePctRaw = Number(cfg?.stakePct ?? 1);
+    const stakePct = Number.isFinite(stakePctRaw) ? clamp(stakePctRaw, 0.01, 1) : 1;
+    const secondsToWaitMatchRaw = Number(cfg?.secondsToWaitMatch ?? 10);
+    const secondsToWaitMatch = Number.isFinite(secondsToWaitMatchRaw) ? clamp(Math.floor(secondsToWaitMatchRaw), 1, 120) : 10;
+    const maxCyclesRaw = Number(cfg?.maxCycles ?? 50);
+    const maxCycles = Number.isFinite(maxCyclesRaw) ? clamp(Math.floor(maxCyclesRaw), 1, 500) : 50;
+    const maxLinesToScanRaw = Number(cfg?.maxLinesToScan ?? 4);
+    const maxLinesToScan = Number.isFinite(maxLinesToScanRaw) ? clamp(Math.floor(maxLinesToScanRaw), 1, 10) : 4;
+    const minDeltaTradedRaw = Number(cfg?.minDeltaTraded ?? 40);
+    const minDeltaTraded = Number.isFinite(minDeltaTradedRaw) ? clamp(minDeltaTradedRaw, 0, 1_000_000) : 40;
+    const dominanceRatioRaw = Number(cfg?.dominanceRatio ?? 1.15);
+    const dominanceRatio = Number.isFinite(dominanceRatioRaw) ? clamp(dominanceRatioRaw, 0.5, 10) : 1.15;
+    const dangerMinDeltaTradedRaw = Number(cfg?.dangerMinDeltaTraded ?? 120);
+    const dangerMinDeltaTraded = Number.isFinite(dangerMinDeltaTradedRaw) ? clamp(dangerMinDeltaTradedRaw, 0, 1_000_000) : 120;
+    const dangerDominanceRatioRaw = Number(cfg?.dangerDominanceRatio ?? 1.3);
+    const dangerDominanceRatio = Number.isFinite(dangerDominanceRatioRaw) ? clamp(dangerDominanceRatioRaw, 0.5, 10) : 1.3;
+    const stopLossTicksRaw = Number(cfg?.stopLossTicks ?? 8);
+    const stopLossTicks = Number.isFinite(stopLossTicksRaw) ? clamp(Math.floor(stopLossTicksRaw), 1, 50) : 8;
+
+    const key = `${BETFAIR_QUEUE_PREFIX}${matchId}`;
+    const item = (await kv.get(key)) ?? null;
+    if (!item) return c.json({ ok: false, error: "Item não encontrado na fila" }, 404);
+
+    const agentRaw = String(item?.strategy?.agent ?? "").trim().toLowerCase();
+    const agent =
+      agentRaw === "scalpingticks" || agentRaw === "scalping_ticks" ? "scalpingTicks" : agentRaw === "overgoalslimit" || agentRaw === "over_goals_limit" ? "overGoalsLimit" : agentRaw === "scalpinggoals" || agentRaw === "scalping_goals" ? "scalpingGoals" : "correctScore";
+    if (agent !== "scalpingTicks") return c.json({ ok: false, error: "Robô não é Scalping em Ticks" }, 400);
+
+    const betfair = item?.betfair ?? null;
+    let eventId = String(betfair?.eventId ?? "").trim();
+    if (!eventId && String(item?.homeTeam ?? "").trim() && String(item?.awayTeam ?? "").trim()) {
+      try {
+        const mapped = await resolveBetfairMatchOdds({ homeTeam: String(item.homeTeam), awayTeam: String(item.awayTeam), utcDate: item?.utcDate });
+        eventId = String(mapped?.eventId ?? "").trim();
+        item.betfair = { ...(item?.betfair ?? {}), ...mapped };
+      } catch {}
+    }
+    if (!eventId) return c.json({ ok: false, error: "Betfair: eventId não resolvido" }, 400);
+
+    const scoreHome = Number.isFinite(Number(item?.scoreHome)) ? Number(item.scoreHome) : 0;
+    const scoreAway = Number.isFinite(Number(item?.scoreAway)) ? Number(item.scoreAway) : 0;
+    const totalGoals = Math.max(0, Math.floor(scoreHome)) + Math.max(0, Math.floor(scoreAway));
+    const baseLine = totalGoals + 1.5;
+    if (baseLine < 1.5 || baseLine > 10.5) return c.json({ ok: true, matchId, phase: "skip_line", totalGoals, line: baseLine });
+    const candidateLines: number[] = [];
+    for (let i = 0; i < maxLinesToScan; i += 1) {
+      const ln = baseLine + i;
+      if (ln > 10.5) break;
+      candidateLines.push(ln);
+    }
+
+    const sessionToken = await getBetfairSessionToken();
+
+    const stepsForPrice = (p: number) => {
+      if (p < 2) return 0.01;
+      if (p < 3) return 0.02;
+      if (p < 4) return 0.05;
+      if (p < 6) return 0.1;
+      if (p < 10) return 0.2;
+      if (p < 20) return 0.5;
+      if (p < 30) return 1;
+      if (p < 50) return 2;
+      if (p < 100) return 5;
+      return 10;
+    };
+    const roundPrice = (p: number) => round2(p);
+    const tickUpOnce = (p: number) => roundPrice(p + stepsForPrice(p));
+    const tickDownOnce = (p: number) => {
+      const s = stepsForPrice(p);
+      const next = p - s;
+      return roundPrice(next < 1.01 ? 1.01 : next);
+    };
+    const tickUp = (p: number, n: number) => {
+      let v = p;
+      for (let i = 0; i < n; i += 1) v = tickUpOnce(v);
+      return v;
+    };
+    const tickDown = (p: number, n: number) => {
+      let v = p;
+      for (let i = 0; i < n; i += 1) v = tickDownOnce(v);
+      return v;
+    };
+    const tickDistance = (from: number, to: number) => {
+      if (!Number.isFinite(from) || !Number.isFinite(to) || from <= 1.01 || to <= 1.01) return null;
+      if (from === to) return 0;
+      let steps = 0;
+      if (to > from) {
+        let v = from;
+        while (v < to && steps < 2000) {
+          v = tickUpOnce(v);
+          steps += 1;
+        }
+        return steps;
+      }
+      let v = from;
+      while (v > to && steps < 2000) {
+        v = tickDownOnce(v);
+        steps += 1;
+      }
+      return steps;
+    };
+
+    const prev = (item?.strategy?.scalpingTicks && typeof item.strategy.scalpingTicks === "object") ? item.strategy.scalpingTicks : {};
+    const prevMarketId = String(prev?.marketId ?? "").trim() || null;
+    const prevLine = Number(prev?.line);
+    const carryLossAbsPrevRaw = Number(prev?.carryLossAbs ?? 0);
+    let carryLossAbsNext = Number.isFinite(carryLossAbsPrevRaw) ? Math.max(0, carryLossAbsPrevRaw) : 0;
+    let lastCarryLossAddedAbs: number | null = null;
+    const prevSnapshotsRaw = (prev?.lineSnapshots && typeof prev.lineSnapshots === "object") ? prev.lineSnapshots : {};
+    const prevSnapshots: Record<string, any> = { ...(prevSnapshotsRaw as any) };
+    if (prevMarketId && Number.isFinite(prevLine) && prevLine > 0 && (prevSnapshots[String(prevLine)] == null)) {
+      prevSnapshots[String(prevLine)] = {
+        marketId: prevMarketId,
+        totalMatched: Number(prev?.lastTotalMatched),
+        fetchedAt: String(prev?.lastTickAt ?? "").trim() || null,
+      };
+    }
+
+    const cashoutMarket = async (mid: string) => {
+      const listRes = await betfairJsonRpcTrading({
+        method: "SportsAPING/v1.0/listCurrentOrders",
+        params: { marketIds: [mid] },
+        sessionToken,
+      });
+      const orders = Array.isArray(listRes?.currentOrders) ? listRes.currentOrders : [];
+      const toCancel = orders.filter((o: any) => Number(o?.sizeRemaining ?? 0) > 0 && String(o?.betId ?? "").trim()).map((o: any) => String(o.betId));
+      if (toCancel.length > 0) {
+        await betfairJsonRpcTrading({
+          method: "SportsAPING/v1.0/cancelOrders",
+          params: { marketId: mid, instructions: toCancel.map((betId: string) => ({ betId })) },
+          sessionToken,
+        });
+      }
+
+      const book = await betfairJsonRpc({
+        method: "SportsAPING/v1.0/listMarketBook",
+        params: { marketIds: [mid], priceProjection: { priceData: ["EX_BEST_OFFERS"], virtualise: true } },
+        sessionToken,
+      });
+      const book0 = Array.isArray(book) ? book[0] : book;
+      const runners = Array.isArray(book0?.runners) ? book0.runners : [];
+      const bySelection = new Map<number, any>();
+      for (const r of runners) {
+        const sid = Number(r?.selectionId);
+        if (!Number.isFinite(sid)) continue;
+        const ex = r?.ex ?? {};
+        const back0 = Array.isArray(ex?.availableToBack) ? ex.availableToBack[0] : null;
+        const lay0 = Array.isArray(ex?.availableToLay) ? ex.availableToLay[0] : null;
+        bySelection.set(sid, { bestBack: back0 ? Number(back0.price) : null, bestLay: lay0 ? Number(lay0.price) : null });
+      }
+
+      const hedgeInstructions: any[] = [];
+      for (const o of orders) {
+        const sizeMatched = Number(o?.sizeMatched ?? 0);
+        if (!Number.isFinite(sizeMatched) || sizeMatched <= 0) continue;
+        const selectionId = Number(o?.selectionId);
+        if (!Number.isFinite(selectionId)) continue;
+        const side = String(o?.side ?? "").toUpperCase();
+        const px = bySelection.get(selectionId) ?? {};
+        if (side === "BACK") {
+          const layPrice = Number(px?.bestLay);
+          if (!Number.isFinite(layPrice) || layPrice <= 1.01) continue;
+          hedgeInstructions.push({ selectionId, side: "LAY", orderType: "LIMIT", limitOrder: { size: round2(sizeMatched), price: layPrice, persistenceType: "LAPSE" } });
+        } else if (side === "LAY") {
+          const backPrice = Number(px?.bestBack);
+          if (!Number.isFinite(backPrice) || backPrice <= 1.01) continue;
+          hedgeInstructions.push({ selectionId, side: "BACK", orderType: "LIMIT", limitOrder: { size: round2(sizeMatched), price: backPrice, persistenceType: "LAPSE" } });
+        }
+      }
+
+      let hedgeResult: any = null;
+      if (hedgeInstructions.length > 0) {
+        hedgeResult = await betfairJsonRpcTrading({
+          method: "SportsAPING/v1.0/placeOrders",
+          params: { marketId: mid, instructions: hedgeInstructions.slice(0, 50), customerRef: `ST_CASH_${matchId}_${Date.now()}`.slice(0, 32), async: false },
+          sessionToken,
+        });
+      }
+      return { cancelledCount: toCancel.length, hedgedCount: hedgeInstructions.length, hedgeResult };
+    };
+
+    const mustResetLine =
+      prevMarketId &&
+      Number.isFinite(prevLine) &&
+      (prevLine < baseLine || prevLine > 10.5 || Math.round(prevLine * 10) % 10 !== 5);
+    if (mustResetLine) {
+      try {
+        await cashoutMarket(prevMarketId);
+      } catch {}
+      try {
+        const pnlRes = await betfairJsonRpcTrading({
+          method: "SportsAPING/v1.0/listMarketProfitAndLoss",
+          params: { marketIds: [prevMarketId], includeSettledBets: false, netOfCommission: true },
+          sessionToken,
+        });
+        const pnl0 = Array.isArray(pnlRes) ? pnlRes[0] : pnlRes;
+        const pls = Array.isArray(pnl0?.profitAndLosses) ? pnl0.profitAndLosses : [];
+        const minIfWin = pls.reduce((acc: number | null, x: any) => {
+          const v = Number(x?.ifWin);
+          if (!Number.isFinite(v)) return acc;
+          if (acc == null) return v;
+          return Math.min(acc, v);
+        }, null);
+        const lossAbs = typeof minIfWin === "number" && Number.isFinite(minIfWin) && minIfWin < 0 ? round2(Math.abs(minIfWin)) : 0;
+        if (lossAbs > 0) {
+          carryLossAbsNext = round2(carryLossAbsNext + lossAbs);
+          lastCarryLossAddedAbs = lossAbs;
+        }
+      } catch {}
+    }
+
+    const ouPrev = (item?.betfair?.overUnder && typeof item.betfair.overUnder === "object") ? item.betfair.overUnder : {};
+    const resolvedCandidates: Array<{
+      line: number;
+      marketId: string;
+      underSelectionId: number;
+      overSelectionId: number | null;
+      bestBackPrice: number | null;
+      bestLayPrice: number | null;
+      bestBackSize: number | null;
+      bestLaySize: number | null;
+      totalMatched: number | null;
+      underTraded: number | null;
+      overTraded: number | null;
+      spreadTicks: number | null;
+      deltaMatched: number | null;
+      deltaUnderTraded: number | null;
+      deltaOverTraded: number | null;
+      volumeOk: boolean;
+      goalRisk: boolean;
+    }> = [];
+
+    for (const ln of candidateLines) {
+      try {
+        const ou = await resolveBetfairOverUnderMarket({ eventId, line: ln });
+        const marketId = String(ou?.marketId ?? "").trim();
+        const underSelectionId = Number(ou?.odds?.under?.selectionId ?? ou?.runners?.underSelectionId);
+        const overSelectionIdRaw = Number(ou?.odds?.over?.selectionId ?? ou?.runners?.overSelectionId);
+        const overSelectionId = Number.isFinite(overSelectionIdRaw) ? overSelectionIdRaw : null;
+
+        const bestBackPrice = Number.isFinite(Number(ou?.odds?.under?.back)) ? Number(ou.odds.under.back) : null;
+        const bestLayPrice = Number.isFinite(Number(ou?.odds?.under?.lay)) ? Number(ou.odds.under.lay) : null;
+        const bestBackSize = Number.isFinite(Number(ou?.odds?.under?.backSize)) ? Number(ou.odds.under.backSize) : null;
+        const bestLaySize = Number.isFinite(Number(ou?.odds?.under?.laySize)) ? Number(ou.odds.under.laySize) : null;
+        const totalMatchedNow = Number(ou?.matchedVolume);
+        const totalMatched = Number.isFinite(totalMatchedNow) ? totalMatchedNow : null;
+        const underTradedNow = Number(ou?.odds?.under?.tradedVolume);
+        const underTraded = Number.isFinite(underTradedNow) ? underTradedNow : null;
+        const overTradedNow = Number(ou?.odds?.over?.tradedVolume);
+        const overTraded = Number.isFinite(overTradedNow) ? overTradedNow : null;
+        const spreadTicks = Number.isFinite(bestBackPrice) && Number.isFinite(bestLayPrice) ? tickDistance(bestBackPrice, bestLayPrice) : null;
+
+        const prevSnap = prevSnapshots[String(ln)] ?? {};
+        const prevMatched = Number(prevSnap?.totalMatched);
+        const prevUnderTraded = Number(prevSnap?.underTraded);
+        const prevOverTraded = Number(prevSnap?.overTraded);
+        const deltaMatched = typeof totalMatched === "number" && Number.isFinite(prevMatched) ? round2(totalMatched - prevMatched) : null;
+        const deltaUnderTraded = typeof underTraded === "number" && Number.isFinite(prevUnderTraded) ? round2(underTraded - prevUnderTraded) : null;
+        const deltaOverTraded = typeof overTraded === "number" && Number.isFinite(prevOverTraded) ? round2(overTraded - prevOverTraded) : null;
+
+        const dU = typeof deltaUnderTraded === "number" && Number.isFinite(deltaUnderTraded) ? Math.max(0, deltaUnderTraded) : 0;
+        const dO = typeof deltaOverTraded === "number" && Number.isFinite(deltaOverTraded) ? Math.max(0, deltaOverTraded) : 0;
+        const hasPrices = Number.isFinite(bestBackPrice) && Number.isFinite(bestLayPrice) && Number(bestBackPrice) > 1.01 && Number(bestLayPrice) > 1.01;
+        const spreadOk = Number.isFinite(spreadTicks) ? Number(spreadTicks) <= maxSpreadTicks : false;
+        const tradedOk = dU >= minDeltaTraded && dU >= dO * dominanceRatio;
+        const volumeOk = hasPrices && spreadOk && tradedOk;
+        const goalRisk = dO >= dangerMinDeltaTraded && dO >= Math.max(1, dU) * dangerDominanceRatio;
+
+        if (marketId && Number.isFinite(underSelectionId)) {
+          resolvedCandidates.push({
+            line: ln,
+            marketId,
+            underSelectionId,
+            overSelectionId,
+            bestBackPrice,
+            bestLayPrice,
+            bestBackSize,
+            bestLaySize,
+            totalMatched,
+            underTraded,
+            overTraded,
+            spreadTicks,
+            deltaMatched,
+            deltaUnderTraded,
+            deltaOverTraded,
+            volumeOk,
+            goalRisk,
+          });
+        }
+      } catch {}
+    }
+
+    if (resolvedCandidates.length === 0) {
+      const nextStrategy = {
+        ...(item?.strategy ?? {}),
+        agent: "scalpingTicks",
+        scalpingTicks: {
+          ...(prev ?? {}),
+          phase: "waiting_market",
+          lastTickAt: new Date().toISOString(),
+          lastSummary: { totalGoals, baseLine, reason: "no_candidates" },
+        },
+      };
+      await kv.set(key, { ...item, strategy: nextStrategy, updatedAt: new Date().toISOString() });
+      return c.json({ ok: true, matchId, phase: "waiting_market", totalGoals, line: baseLine });
+    }
+
+    const byMarketId = new Map<string, any>();
+    for (const x of resolvedCandidates) byMarketId.set(String(x.marketId), x);
+
+    const marketIdsForOrders = Array.from(new Set([...(prevMarketId ? [prevMarketId] : []), ...resolvedCandidates.map((x) => x.marketId)])).slice(0, 40);
+    const ordersResAll = await betfairJsonRpcTrading({
+      method: "SportsAPING/v1.0/listCurrentOrders",
+      params: { marketIds: marketIdsForOrders },
+      sessionToken,
+    });
+    const ordersAll = Array.isArray(ordersResAll?.currentOrders) ? ordersResAll.currentOrders : [];
+
+    let selected = resolvedCandidates.find((x) => prevMarketId && x.marketId === prevMarketId) ?? null;
+    if (!selected) {
+      const activeFromOrders =
+        resolvedCandidates.find((x) => ordersAll.some((o: any) => String(o?.marketId ?? "").trim() === x.marketId && Number(o?.selectionId) === x.underSelectionId)) ?? null;
+      selected = activeFromOrders;
+    }
+    if (!selected) {
+      const best =
+        resolvedCandidates
+          .filter((x) => x.volumeOk)
+          .sort((a, b) => {
+            const aScore = (typeof a.deltaUnderTraded === "number" ? a.deltaUnderTraded : 0) - (typeof a.spreadTicks === "number" ? a.spreadTicks * 20 : 200);
+            const bScore = (typeof b.deltaUnderTraded === "number" ? b.deltaUnderTraded : 0) - (typeof b.spreadTicks === "number" ? b.spreadTicks * 20 : 200);
+            return bScore - aScore;
+          })[0] ?? null;
+      selected = best ?? resolvedCandidates[0];
+    }
+
+    const line = selected.line;
+    const marketId = selected.marketId;
+    const underSelectionId = selected.underSelectionId;
+    const bestBackPrice = selected.bestBackPrice;
+    const bestLayPrice = selected.bestLayPrice;
+    const bestBackSize = selected.bestBackSize;
+    const bestLaySize = selected.bestLaySize;
+    const spreadTicks = selected.spreadTicks;
+    const totalMatched = selected.totalMatched;
+    const deltaMatched = selected.deltaMatched;
+
+    const cyclesDone = Number(prev?.cyclesDone);
+    const cycles = Number.isFinite(cyclesDone) ? Math.max(0, Math.floor(cyclesDone)) : 0;
+    if (cycles >= maxCycles) {
+      const nextStrategy = {
+        ...(item?.strategy ?? {}),
+        agent: "scalpingTicks",
+        scalpingTicks: {
+          ...(prev ?? {}),
+          phase: "max_cycles",
+          marketId,
+          line,
+          lastTickAt: new Date().toISOString(),
+          cyclesDone: cycles,
+          lastSummary: { totalGoals, line, marketId, cycles, maxCycles },
+        },
+      };
+      const nextBetfair = { ...(item?.betfair ?? {}), overUnder: { ...ouPrev, [String(line)]: ou } };
+      await kv.set(key, { ...item, betfair: nextBetfair, strategy: nextStrategy, updatedAt: new Date().toISOString() });
+      return c.json({ ok: true, matchId, phase: "max_cycles", totalGoals, line, marketId, cycles, maxCycles });
+    }
+
+    const lastCycleAt = String(prev?.lastCycleAt ?? "").trim();
+    const lastCycleMs = lastCycleAt ? new Date(lastCycleAt).getTime() : 0;
+    if (lastCycleMs && Number.isFinite(lastCycleMs) && minSecondsBetweenCycles > 0 && Date.now() - lastCycleMs < minSecondsBetweenCycles * 1000) {
+      const nextStrategy = {
+        ...(item?.strategy ?? {}),
+        agent: "scalpingTicks",
+        scalpingTicks: {
+          ...(prev ?? {}),
+          phase: "cooldown",
+          marketId,
+          line,
+          lastTickAt: new Date().toISOString(),
+          cyclesDone: cycles,
+          lastSummary: { totalGoals, line, marketId, cycles, cooldown: minSecondsBetweenCycles },
+        },
+      };
+      const nextBetfair = { ...(item?.betfair ?? {}), overUnder: { ...ouPrev, [String(line)]: ou } };
+      await kv.set(key, { ...item, betfair: nextBetfair, strategy: nextStrategy, updatedAt: new Date().toISOString() });
+      return c.json({ ok: true, matchId, phase: "cooldown", totalGoals, line, marketId, cycles });
+    }
+
+    const orders = ordersAll.filter((o: any) => String(o?.marketId ?? "").trim() === marketId && Number(o?.selectionId) === underSelectionId);
+
+    const openOrdersCount = orders.filter((o: any) => Number(o?.sizeRemaining ?? 0) > 0).length;
+    const matchedBetsCount = orders.filter((o: any) => Number(o?.sizeMatched ?? 0) > 0).length;
+
+    const entryBack = orders.find((o: any) => String(o?.side ?? "").toUpperCase() === "BACK") ?? null;
+    const exitLay = orders.find((o: any) => String(o?.side ?? "").toUpperCase() === "LAY") ?? null;
+
+    let placed: any = null;
+    let phase = String(prev?.phase ?? "").trim() || "idle";
+    const nowIso = new Date().toISOString();
+    const nowMs = Date.now();
+    const repriceAfterMs = Math.max(1_000, Math.floor(secondsToWaitMatch * 1000));
+    let lastEntryPlacedAtNext = String(prev?.lastEntryPlacedAt ?? "").trim() || null;
+    let lastEntryRepriceAtNext = String(prev?.lastEntryRepriceAt ?? "").trim() || null;
+    let lastCycleProfitAbs: number | null = null;
+
+    const isInPlay = Boolean(item?.betfair?.inPlay ?? false);
+    const canEnter =
+      isInPlay &&
+      Number.isFinite(bestBackPrice) &&
+      Number.isFinite(bestLayPrice) &&
+      Number.isFinite(spreadTicks) &&
+      spreadTicks <= maxSpreadTicks &&
+      (Number.isFinite(bestBackSize) ? bestBackSize > 0 : true) &&
+      (Number.isFinite(bestLaySize) ? bestLaySize > 0 : true) &&
+      (deltaMatched == null ? true : deltaMatched > 0) &&
+      Boolean(selected.volumeOk);
+
+    const cancelOrder = async (mid: string, betId: string) => {
+      const bid = String(betId ?? "").trim();
+      if (!bid) return null;
+      return await betfairJsonRpcTrading({
+        method: "SportsAPING/v1.0/cancelOrders",
+        params: { marketId: mid, instructions: [{ betId: bid }] },
+        sessionToken,
+      });
+    };
+
+    const openEntry = orders.find((o: any) => {
+      const side = String(o?.side ?? "").toUpperCase();
+      const sizeMatched = Number(o?.sizeMatched ?? 0);
+      const sizeRemaining = Number(o?.sizeRemaining ?? 0);
+      return side === "BACK" && (!Number.isFinite(sizeMatched) || sizeMatched <= 0) && Number.isFinite(sizeRemaining) && sizeRemaining > 0 && String(o?.betId ?? "").trim();
+    }) ?? null;
+
+    if (isInPlay && (entryBack || openEntry) && (selected.goalRisk || (typeof bestLayPrice === "number" && Number.isFinite(bestLayPrice) && entryBack && Number(entryBack?.sizeMatched ?? 0) > 0))) {
+      const entryMatched = entryBack ? Number(entryBack?.sizeMatched ?? 0) : 0;
+      const avg = entryBack ? Number(entryBack?.averagePriceMatched) : NaN;
+      const entryPx = entryBack && Number.isFinite(avg) && avg > 1.01 ? avg : entryBack ? Number(entryBack?.priceSize?.price) : NaN;
+      const adverseTicks =
+        entryBack && entryMatched > 0 && Number.isFinite(entryPx) && entryPx > 1.01 && typeof bestLayPrice === "number" && bestLayPrice > entryPx
+          ? tickDistance(entryPx, bestLayPrice)
+          : null;
+      const stopLossHit = typeof adverseTicks === "number" && Number.isFinite(adverseTicks) ? adverseTicks >= stopLossTicks : false;
+      const mustExit = Boolean(selected.goalRisk) || stopLossHit;
+      if (mustExit) {
+        try {
+          await cashoutMarket(marketId);
+        } catch {}
+        const nextStrategy = {
+          ...(item?.strategy ?? {}),
+          agent: "scalpingTicks",
+          scalpingTicks: {
+            ...(prev ?? {}),
+            phase: "risk_exit",
+            marketId,
+            line,
+            lastTickAt: nowIso,
+            lastCycleAt: nowIso,
+            cyclesDone: cycles,
+            lastEntryPlacedAt: lastEntryPlacedAtNext,
+            lastEntryRepriceAt: lastEntryRepriceAtNext,
+            carryLossAbs: carryLossAbsNext,
+            lastCarryLossAddedAbs,
+            lastCycleProfitAbs,
+            lineSnapshots: (() => {
+              const next: any = {};
+              for (const x of resolvedCandidates) {
+                next[String(x.line)] = {
+                  marketId: x.marketId,
+                  totalMatched: x.totalMatched,
+                  underTraded: x.underTraded,
+                  overTraded: x.overTraded,
+                  fetchedAt: nowIso,
+                };
+              }
+              return next;
+            })(),
+            lastSummary: {
+              totalGoals,
+              line,
+              marketId,
+              reason: "risk_exit",
+              goalRisk: selected.goalRisk,
+              stopLossTicks,
+              adverseTicks,
+            },
+          },
+        };
+        const nextBetfair = { ...(item?.betfair ?? {}), overUnder: { ...ouPrev } };
+        await kv.set(key, { ...item, betfair: nextBetfair, strategy: nextStrategy, updatedAt: new Date().toISOString() });
+        return c.json({ ok: true, matchId, phase: "risk_exit", totalGoals, line, marketId, cyclesDone: cycles, openOrdersCount, matchedBetsCount, spreadTicks });
+      }
+    }
+
+    if (openEntry && canEnter) {
+      const placedIso = String(openEntry?.placedDate ?? "").trim();
+      const placedMs = placedIso ? new Date(placedIso).getTime() : (lastEntryPlacedAtNext ? new Date(lastEntryPlacedAtNext).getTime() : 0);
+      const lastReIso = String(lastEntryRepriceAtNext ?? "").trim();
+      const lastReMs = lastReIso ? new Date(lastReIso).getTime() : 0;
+      const ageOk = placedMs && Number.isFinite(placedMs) ? (nowMs - placedMs) >= repriceAfterMs : true;
+      const cooldownOk = !lastReMs || !Number.isFinite(lastReMs) ? true : (nowMs - lastReMs) >= repriceAfterMs;
+      if (ageOk && cooldownOk) {
+        const betId = String(openEntry?.betId ?? "").trim();
+        const stakeRemaining = Number(openEntry?.sizeRemaining ?? 0);
+        if (betId && Number.isFinite(stakeRemaining) && stakeRemaining >= 2) {
+          try {
+            await cancelOrder(marketId, betId);
+          } catch {}
+          const entryLimitPrice =
+            entryOffsetTicks >= 0 ? tickUp(Number(bestBackPrice), entryOffsetTicks) : tickDown(Number(bestBackPrice), Math.abs(entryOffsetTicks));
+          const res = await betfairJsonRpcTrading({
+            method: "SportsAPING/v1.0/placeOrders",
+            params: {
+              marketId,
+              instructions: [{ selectionId: underSelectionId, side: "BACK", orderType: "LIMIT", limitOrder: { size: round2(stakeRemaining), price: entryLimitPrice, persistenceType: "LAPSE" } }],
+              customerRef: `ST_RE_${matchId}_${Date.now()}`.slice(0, 32),
+              async: false,
+            },
+            sessionToken,
+          });
+          placed = { kind: "reprice_entry", marketId, line, selectionId: underSelectionId, side: "BACK", stake: round2(stakeRemaining), price: entryLimitPrice, result: res };
+          phase = "entry_repriced";
+          lastEntryPlacedAtNext = nowIso;
+          lastEntryRepriceAtNext = nowIso;
+        }
+      }
+    }
+
+    if (!entryBack && !exitLay && openOrdersCount === 0 && matchedBetsCount === 0) {
+      if (!isInPlay) {
+        phase = "waiting_inplay";
+      } else if (canEnter) {
+        const stakeBase = round2(clamp(bankroll * stakePct, 2, bankroll));
+        const entryLimitPrice =
+          entryOffsetTicks >= 0 ? tickUp(Number(bestBackPrice), entryOffsetTicks) : tickDown(Number(bestBackPrice), Math.abs(entryOffsetTicks));
+        const exitForCalc = Number.isFinite(entryLimitPrice) && entryLimitPrice > 1.01 ? tickDown(entryLimitPrice, targetTicks) : null;
+        const profitFactor =
+          Number.isFinite(entryLimitPrice) && Number.isFinite(exitForCalc) && exitForCalc && exitForCalc > 1.01 && entryLimitPrice > exitForCalc
+            ? (entryLimitPrice / exitForCalc) - 1
+            : null;
+        const desiredProfitAbs =
+          typeof profitFactor === "number" && Number.isFinite(profitFactor) && profitFactor > 0
+            ? round2(carryLossAbsNext + stakeBase * profitFactor)
+            : null;
+        const stake =
+          typeof desiredProfitAbs === "number" && typeof profitFactor === "number" && Number.isFinite(profitFactor) && profitFactor > 0
+            ? round2(clamp(desiredProfitAbs / profitFactor, 2, stakeBase))
+            : stakeBase;
+        const res = await betfairJsonRpcTrading({
+          method: "SportsAPING/v1.0/placeOrders",
+          params: {
+            marketId,
+            instructions: [{ selectionId: underSelectionId, side: "BACK", orderType: "LIMIT", limitOrder: { size: stake, price: entryLimitPrice, persistenceType: "LAPSE" } }],
+            customerRef: `ST_ENT_${matchId}_${Date.now()}`.slice(0, 32),
+            async: false,
+          },
+          sessionToken,
+        });
+        placed = { kind: "entry", marketId, line, selectionId: underSelectionId, side: "BACK", stake, price: entryLimitPrice, result: res };
+        phase = "entry_placed";
+        lastEntryPlacedAtNext = nowIso;
+      } else {
+        phase = "waiting_market";
+      }
+    } else if (entryBack && Number(entryBack?.sizeMatched ?? 0) > 0 && !exitLay) {
+      const sizeMatched = Number(entryBack.sizeMatched);
+      const avg = Number(entryBack?.averagePriceMatched);
+      const entryPx = Number.isFinite(avg) && avg > 1.01 ? avg : Number(entryBack?.priceSize?.price);
+      const exitPrice = Number.isFinite(entryPx) && entryPx > 1.01 ? tickDown(entryPx, targetTicks) : null;
+      if (Number.isFinite(exitPrice) && exitPrice && exitPrice > 1.01 && sizeMatched > 0) {
+        const laySizeRaw = Number.isFinite(entryPx) && entryPx > 1.01 ? (sizeMatched * entryPx) / exitPrice : sizeMatched;
+        const laySize = round2(clamp(laySizeRaw, 2, 10_000));
+        const res = await betfairJsonRpcTrading({
+          method: "SportsAPING/v1.0/placeOrders",
+          params: {
+            marketId,
+            instructions: [{ selectionId: underSelectionId, side: "LAY", orderType: "LIMIT", limitOrder: { size: laySize, price: exitPrice, persistenceType: "LAPSE" } }],
+            customerRef: `ST_EXT_${matchId}_${Date.now()}`.slice(0, 32),
+            async: false,
+          },
+          sessionToken,
+        });
+        placed = { kind: "exit", marketId, line, selectionId: underSelectionId, side: "LAY", size: laySize, price: exitPrice, result: res };
+        phase = "exit_placed";
+      } else {
+        phase = "exit_skipped";
+      }
+    } else if (entryBack && exitLay) {
+      const entryMatched = Number(entryBack?.sizeMatched ?? 0);
+      const exitMatched = Number(exitLay?.sizeMatched ?? 0);
+      const entryRemaining = Number(entryBack?.sizeRemaining ?? 0);
+      const exitRemaining = Number(exitLay?.sizeRemaining ?? 0);
+      if (entryMatched > 0 && exitMatched > 0 && entryRemaining <= 0 && exitRemaining <= 0) {
+        phase = "cycle_done";
+        const profitAbs = round2(Math.max(0, exitMatched - entryMatched));
+        if (profitAbs > 0) {
+          lastCycleProfitAbs = profitAbs;
+          carryLossAbsNext = round2(Math.max(0, carryLossAbsNext - profitAbs));
+        }
+      } else {
+        phase = "waiting_exit";
+      }
+    } else if (openOrdersCount > 0) {
+      phase = "waiting_orders";
+    }
+
+    const nextCyclesDone = phase === "cycle_done" ? cycles + 1 : cycles;
+    const nextLastCycleAt = phase === "cycle_done" ? new Date().toISOString() : (lastCycleAt || null);
+    const nextPhase = phase === "cycle_done" ? "idle" : phase;
+
+    const nextStrategy = {
+      ...(item?.strategy ?? {}),
+      agent: "scalpingTicks",
+      scalpingTicks: {
+        ...(prev ?? {}),
+        phase: nextPhase,
+        marketId,
+        line,
+        lastTickAt: nowIso,
+        lastCycleAt: nextLastCycleAt,
+        cyclesDone: nextCyclesDone,
+        lastEntryPlacedAt: lastEntryPlacedAtNext,
+        lastEntryRepriceAt: lastEntryRepriceAtNext,
+        carryLossAbs: carryLossAbsNext,
+        lastCarryLossAddedAbs,
+        lastCycleProfitAbs,
+        lineSnapshots: (() => {
+          const next: any = {};
+          for (const x of resolvedCandidates) {
+            next[String(x.line)] = {
+              marketId: x.marketId,
+              totalMatched: x.totalMatched,
+              underTraded: x.underTraded,
+              overTraded: x.overTraded,
+              fetchedAt: nowIso,
+            };
+          }
+          return next;
+        })(),
+        lastSummary: {
+          totalGoals,
+          line,
+          marketId,
+          targetTicks,
+          entryOffsetTicks,
+          maxSpreadTicks,
+          minSecondsBetweenCycles,
+          stakePct,
+          secondsToWaitMatch,
+          maxCycles,
+          maxLinesToScan,
+          minDeltaTraded,
+          dominanceRatio,
+          dangerMinDeltaTraded,
+          dangerDominanceRatio,
+          stopLossTicks,
+          spreadTicks,
+          bestBack: Number.isFinite(bestBackPrice) ? bestBackPrice : null,
+          bestLay: Number.isFinite(bestLayPrice) ? bestLayPrice : null,
+          totalMatched,
+          deltaMatched,
+          openOrdersCount,
+          matchedBetsCount,
+          volumeOk: selected.volumeOk,
+          goalRisk: selected.goalRisk,
+          deltaUnderTraded: selected.deltaUnderTraded,
+          deltaOverTraded: selected.deltaOverTraded,
+        },
+        lastTotalMatched: totalMatched,
+      },
+    };
+    const pickedOu = (() => {
+      const cached = ouPrev[String(line)];
+      if (cached && typeof cached === "object") return cached;
+      return { marketId, odds: { under: { selectionId: underSelectionId, back: bestBackPrice, lay: bestLayPrice } }, oddsFetchedAt: nowIso };
+    })();
+    const nextBetfair = { ...(item?.betfair ?? {}), overUnder: { ...ouPrev, [String(line)]: pickedOu } };
+    await kv.set(key, { ...item, betfair: nextBetfair, strategy: nextStrategy, updatedAt: new Date().toISOString() });
+
+    return c.json({ ok: true, matchId, phase: nextPhase, totalGoals, line, marketId, cyclesDone: nextCyclesDone, placed, openOrdersCount, matchedBetsCount, spreadTicks });
+  } catch (error) {
+    return c.json({ ok: false, error: error.message || "Erro no robô Scalping em Ticks" }, 500);
+  }
+};
 
 app.post("/betfair/match/resolve", async (c) => {
   const authError = requireBearer(c);
@@ -2110,7 +4425,7 @@ const buildAutomationMarkets = (prediction: any, homeTeam: string | null, awayTe
     markets.push({
       key: "winner",
       label,
-      enabled: true,
+      enabled: false,
       details: Number.isFinite(winnerConf) ? `${Math.round(winnerConf)}%` : null,
     });
   }
@@ -2123,7 +4438,7 @@ const buildAutomationMarkets = (prediction: any, homeTeam: string | null, awayTe
     markets.push({
       key: "overUnder",
       label: `${side} ${ouLine}`,
-      enabled: true,
+      enabled: false,
       details: Number.isFinite(ouConf) ? `${Math.round(ouConf)}%` : null,
     });
   }
@@ -2134,21 +4449,19 @@ const buildAutomationMarkets = (prediction: any, homeTeam: string | null, awayTe
     markets.push({
       key: "btts",
       label: `Ambas marcam: ${bttsPred === "yes" ? "Sim" : "Não"}`,
-      enabled: true,
+      enabled: false,
       details: Number.isFinite(bttsConf) ? `${Math.round(bttsConf)}%` : null,
     });
   }
 
   const cs = String(p?.correctScore?.score ?? "").trim();
   const csConf = Number(p?.correctScore?.confidence);
-  if (cs) {
-    markets.push({
-      key: "correctScore",
-      label: `Placar correto: ${cs}`,
-      enabled: true,
-      details: Number.isFinite(csConf) ? `${Math.round(csConf)}%` : null,
-    });
-  }
+  markets.push({
+    key: "correctScore",
+    label: cs ? `Placar correto: ${cs}` : "Placar correto",
+    enabled: true,
+    details: Number.isFinite(csConf) ? `${Math.round(csConf)}%` : null,
+  });
 
   const ahTeam = String(p?.asianHandicap?.team ?? "").trim();
   const ahLine = Number(p?.asianHandicap?.line);
@@ -2159,7 +4472,7 @@ const buildAutomationMarkets = (prediction: any, homeTeam: string | null, awayTe
     markets.push({
       key: "asianHandicap",
       label: `Handicap: ${teamLabel} (${lineLabel})`,
-      enabled: true,
+      enabled: false,
       details: Number.isFinite(ahConf) ? `${Math.round(ahConf)}%` : null,
     });
   }
@@ -2171,7 +4484,7 @@ const buildAutomationMarkets = (prediction: any, homeTeam: string | null, awayTe
     markets.push({
       key: "firstHalf",
       label: `1º tempo: ${label}`,
-      enabled: true,
+      enabled: false,
       details: Number.isFinite(fhConf) ? `${Math.round(fhConf)}%` : null,
     });
   }
@@ -2183,7 +4496,7 @@ const buildAutomationMarkets = (prediction: any, homeTeam: string | null, awayTe
     markets.push({
       key: "secondHalf",
       label: `2º tempo: ${label}`,
-      enabled: true,
+      enabled: false,
       details: Number.isFinite(shConf) ? `${Math.round(shConf)}%` : null,
     });
   }
@@ -2191,69 +4504,6 @@ const buildAutomationMarkets = (prediction: any, homeTeam: string | null, awayTe
   return markets;
 };
 
-app.post("/make-server-1119702f/automation/betfair/queue/add", async (c) => {
-  const authError = requireBearer(c);
-  if (authError) return authError;
-  try {
-    const body = await c.req.json();
-    const matchId = String(body?.matchId ?? "").trim();
-    if (!matchId) return c.json({ ok: false, error: "matchId obrigatório" }, 400);
-    const key = `${BETFAIR_QUEUE_PREFIX}${matchId}`;
-    const existing = (await kv.get(key)) ?? null;
-    const now = new Date().toISOString();
-    const payload: any = {
-      matchId,
-      source: String(body?.source ?? "").trim() || existing?.source || null,
-      utcDate: String(body?.utcDate ?? "").trim() || existing?.utcDate || null,
-      homeTeam: String(body?.homeTeam ?? "").trim() || existing?.homeTeam || null,
-      awayTeam: String(body?.awayTeam ?? "").trim() || existing?.awayTeam || null,
-      homeCrest: String(body?.homeCrest ?? "").trim() || existing?.homeCrest || null,
-      awayCrest: String(body?.awayCrest ?? "").trim() || existing?.awayCrest || null,
-      scoreHome: Number.isFinite(Number(body?.scoreHome)) ? Number(body.scoreHome) : (Number.isFinite(Number(existing?.scoreHome)) ? Number(existing.scoreHome) : null),
-      scoreAway: Number.isFinite(Number(body?.scoreAway)) ? Number(body.scoreAway) : (Number.isFinite(Number(existing?.scoreAway)) ? Number(existing.scoreAway) : null),
-      prediction: body?.prediction ?? existing?.prediction ?? null,
-      markets: Array.isArray(existing?.markets)
-        ? existing.markets
-        : buildAutomationMarkets(
-          body?.prediction ?? existing?.prediction ?? null,
-          String(body?.homeTeam ?? existing?.homeTeam ?? "").trim() || null,
-          String(body?.awayTeam ?? existing?.awayTeam ?? "").trim() || null,
-        ),
-      createdAt: String(existing?.createdAt ?? now),
-      updatedAt: now,
-      status: String(existing?.status ?? "queued"),
-      betfair: existing?.betfair ?? null,
-      mappingStatus: existing?.mappingStatus ?? "pending",
-      mappingError: existing?.mappingError ?? null,
-    };
-
-    const hasMarket = Boolean(payload?.betfair?.marketId);
-    if (!hasMarket && payload.homeTeam && payload.awayTeam) {
-      try {
-        const mapped = await resolveBetfairMatchOdds({
-          homeTeam: payload.homeTeam,
-          awayTeam: payload.awayTeam,
-          utcDate: payload.utcDate,
-        });
-        payload.betfair = mapped;
-        try {
-          const cs = await resolveBetfairCorrectScoreMarket({ eventId: String(mapped?.eventId ?? "") });
-          if (payload.betfair && cs) payload.betfair.correctScore = cs;
-        } catch {}
-        payload.mappingStatus = "mapped";
-        payload.mappingError = null;
-        payload.mappedAt = new Date().toISOString();
-      } catch (e) {
-        payload.mappingStatus = "unmapped";
-        payload.mappingError = e instanceof Error ? e.message : String(e);
-      }
-    }
-    await kv.set(key, payload);
-    return c.json({ ok: true, item: payload });
-  } catch (error) {
-    return c.json({ ok: false, error: error.message || "Erro ao enfileirar jogo" }, 500);
-  }
-});
 app.post("/automation/betfair/queue/add", async (c) => {
   const authError = requireBearer(c);
   if (authError) return authError;
@@ -2299,6 +4549,7 @@ app.post("/automation/betfair/queue/add", async (c) => {
           utcDate: payload.utcDate,
         });
         payload.betfair = mapped;
+        payload.utcDate = String(mapped?.marketStartTime ?? "").trim() || payload.utcDate || null;
         try {
           const cs = await resolveBetfairCorrectScoreMarket({ eventId: String(mapped?.eventId ?? "") });
           if (payload.betfair && cs) payload.betfair.correctScore = cs;
@@ -2318,16 +4569,6 @@ app.post("/automation/betfair/queue/add", async (c) => {
   }
 });
 
-app.post("/make-server-1119702f/automation/betfair/queue/list", async (c) => {
-  const authError = requireBearer(c);
-  if (authError) return authError;
-  try {
-    const items = await kv.getByPrefix(BETFAIR_QUEUE_PREFIX);
-    return c.json({ ok: true, items: Array.isArray(items) ? items : [] });
-  } catch (error) {
-    return c.json({ ok: false, error: error.message || "Erro ao listar fila" }, 500);
-  }
-});
 app.post("/automation/betfair/queue/list", async (c) => {
   const authError = requireBearer(c);
   if (authError) return authError;
@@ -2371,6 +4612,43 @@ const betfairQueueUpdateHandler = async (c: any) => {
   }
 };
 
+const betfairQueueBatchUpdateHandler = async (c: any) => {
+  const authError = requireBearer(c);
+  if (authError) return authError;
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const raw = Array.isArray(body?.updates) ? body.updates : [];
+    if (raw.length === 0) return c.json({ ok: true, updated: 0 });
+    const limited = raw.slice(0, 50);
+
+    const byId = new Map<string, any>();
+    for (const u of limited) {
+      const matchId = String(u?.matchId ?? "").trim();
+      const patch = (u?.patch && typeof u.patch === "object") ? u.patch : null;
+      if (!matchId || !patch) continue;
+      byId.set(matchId, patch);
+    }
+    if (byId.size === 0) return c.json({ ok: true, updated: 0 });
+
+    const matchIds = Array.from(byId.keys());
+    const keys = matchIds.map((id) => `${BETFAIR_QUEUE_PREFIX}${id}`);
+    const existing = await kv.mget(keys);
+    const nowIso = new Date().toISOString();
+
+    const nextValues = existing.map((current, i) => {
+      const matchId = matchIds[i];
+      const patch = byId.get(matchId) ?? {};
+      const base = (current && typeof current === "object") ? current : {};
+      return { ...base, ...patch, updatedAt: nowIso };
+    });
+
+    await kv.mset(keys, nextValues);
+    return c.json({ ok: true, updated: nextValues.length });
+  } catch (error) {
+    return c.json({ ok: false, error: error.message || "Erro ao atualizar itens" }, 500);
+  }
+};
+
 const betfairQueueRefreshOddsHandler = async (c: any) => {
   const authError = requireBearer(c);
   if (authError) return authError;
@@ -2381,6 +4659,8 @@ const betfairQueueRefreshOddsHandler = async (c: any) => {
     const minFreshSecondsRaw = Number(body?.minFreshSeconds ?? 10);
     const minFreshSeconds = Number.isFinite(minFreshSecondsRaw) ? Math.max(1, Math.min(120, Math.floor(minFreshSecondsRaw))) : 10;
     const includeCorrectScore = Boolean(body?.includeCorrectScore ?? false);
+    const runCorrectScorePlan = Boolean(body?.runCorrectScorePlan ?? false);
+    const planConfig = (body?.planConfig && typeof body.planConfig === "object") ? body.planConfig : {};
 
     const items = await kv.getByPrefix(BETFAIR_QUEUE_PREFIX);
     const list = Array.isArray(items) ? items : [];
@@ -2423,6 +4703,7 @@ const betfairQueueRefreshOddsHandler = async (c: any) => {
         const next = {
           ...x,
           betfair: nextBetfair,
+          utcDate: String(nextBetfair?.marketStartTime ?? "").trim() || x?.utcDate || null,
           mappingStatus: "mapped",
           mappingError: null,
           mappedAt: new Date().toISOString(),
@@ -2435,7 +4716,7 @@ const betfairQueueRefreshOddsHandler = async (c: any) => {
 
     const refreshable = candidates
       .filter((x: any) => String(x?.betfair?.marketId ?? "").trim())
-      .filter((x: any) => isStale(x?.betfair?.oddsFetchedAt ?? x?.betfair?.odds?.fetchedAt ?? null))
+      .filter((x: any) => Boolean(x?.betfair?.inPlay ?? false) || String(x?.live?.provider ?? "") === "betfair" || isStale(x?.betfair?.oddsFetchedAt ?? x?.betfair?.odds?.fetchedAt ?? null))
       .slice(0, max);
 
     if (refreshable.length === 0) return c.json({ ok: true, updated: 0, skipped: candidates.length, remapped });
@@ -2467,6 +4748,46 @@ const betfairQueueRefreshOddsHandler = async (c: any) => {
       if (Array.isArray(books)) for (const b of books) byMarketId.set(String(b?.marketId ?? ""), b);
     }
 
+    const byEventId = new Map<string, any>();
+    const eventIds = Array.from(
+      new Set(
+        refreshable
+          .map((x: any) => String(x?.betfair?.eventId ?? "").trim())
+          .filter((id: string) => id),
+      ),
+    );
+    for (let i = 0; i < eventIds.length; i += 50) {
+      try {
+        const chunk = eventIds.slice(i, i + 50);
+        const idsParam = encodeURIComponent(chunk.join(","));
+        const url = `https://ips.betfair.com/inplayservice/v1.1/eventTimelines?eventIds=${idsParam}&alt=json&regionCode=UK&locale=en_GB`;
+        const timelines = await withTimeout(async () => {
+          const res = await fetch(url, {
+            method: "GET",
+            redirect: "follow",
+            headers: {
+              accept: "application/json",
+              "cache-control": "no-cache",
+              "user-agent": "Mozilla/5.0",
+            },
+          });
+          if (!res.ok) throw new Error(`IPS HTTP ${res.status}`);
+          const text = await res.text();
+          try {
+            return JSON.parse(text);
+          } catch {
+            throw new Error("IPS JSON parse error");
+          }
+        }, 7000);
+        if (Array.isArray(timelines)) {
+          for (const t of timelines) {
+            const eventId = String(t?.eventId ?? "").trim();
+            if (eventId) byEventId.set(eventId, t);
+          }
+        }
+      } catch {}
+    }
+
     let updated = 0;
     let skipped = 0;
     for (const x of refreshable) {
@@ -2485,8 +4806,9 @@ const betfairQueueRefreshOddsHandler = async (c: any) => {
         const ex = rb?.ex ?? {};
         const back0 = Array.isArray(ex?.availableToBack) ? ex.availableToBack[0] : null;
         const lay0 = Array.isArray(ex?.availableToLay) ? ex.availableToLay[0] : null;
-        const back = back0 ? Number(back0.price) : null;
-        const lay = lay0 ? Number(lay0.price) : null;
+        const ltp = Number(rb?.lastPriceTraded);
+        const back = back0 ? Number(back0.price) : (Number.isFinite(ltp) ? ltp : null);
+        const lay = lay0 ? Number(lay0.price) : (Number.isFinite(ltp) ? ltp : null);
         const backSize = back0 ? Number(back0.size) : null;
         const laySize = lay0 ? Number(lay0.size) : null;
         return {
@@ -2507,12 +4829,89 @@ const betfairQueueRefreshOddsHandler = async (c: any) => {
       };
 
       const totalMatched = Number(book?.totalMatched);
+      const marketStatus = String(book?.status ?? "").trim() || null;
+      const isClosed = String(marketStatus ?? "").toUpperCase() === "CLOSED";
+      const prevInPlay = Boolean(x?.betfair?.inPlay ?? false);
+      const inPlay = isClosed ? false : (typeof book?.inplay === "boolean" ? Boolean(book.inplay) : prevInPlay);
+      const prevOdds = (x?.betfair?.odds && typeof x.betfair.odds === "object") ? x.betfair.odds : {};
+      const mergeSide = (prev: any, next: any) => {
+        const p = (prev && typeof prev === "object") ? prev : {};
+        const n = (next && typeof next === "object") ? next : {};
+        return {
+          back: n.back ?? p.back ?? null,
+          backSize: n.backSize ?? p.backSize ?? null,
+          lay: n.lay ?? p.lay ?? null,
+          laySize: n.laySize ?? p.laySize ?? null,
+        };
+      };
+      const mergedOdds = {
+        home: mergeSide(prevOdds?.home, odds.home),
+        draw: mergeSide(prevOdds?.draw, odds.draw),
+        away: mergeSide(prevOdds?.away, odds.away),
+      };
+      const publishTimeMs = Number(book?.publishTime);
+      const publishTime = Number.isFinite(publishTimeMs) ? new Date(publishTimeMs).toISOString() : (x?.betfair?.publishTime ?? null);
+      const prevSince = String(x?.betfair?.inPlaySince ?? "").trim() || null;
+      const inPlaySince = inPlay ? (prevSince ?? (!prevInPlay ? new Date().toISOString() : null) ?? new Date().toISOString()) : null;
+      const prevMatched = Number(x?.betfair?.matchedVolume);
+      const matchedVolume = Number.isFinite(totalMatched) && totalMatched > 0
+        ? totalMatched
+        : Number.isFinite(prevMatched) && prevMatched > 0
+        ? prevMatched
+        : Number.isFinite(totalMatched)
+        ? totalMatched
+        : null;
       const nextBetfair = {
         ...(x?.betfair ?? {}),
-        matchedVolume: Number.isFinite(totalMatched) ? totalMatched : x?.betfair?.matchedVolume ?? null,
-        odds,
+        matchedVolume,
+        inPlay,
+        inPlaySince,
+        marketStatus,
+        publishTime,
+        odds: mergedOdds,
         oddsFetchedAt: new Date().toISOString(),
       };
+
+      const eventId = String(x?.betfair?.eventId ?? "").trim();
+      const timeline = eventId ? (byEventId.get(eventId) ?? null) : null;
+      const elapsed = Number(timeline?.timeElapsed);
+      const statusRaw = String(timeline?.status ?? "").trim().toUpperCase();
+      const statusShort = statusRaw === "ENDED" ? "FINISHED" : statusRaw || null;
+      const scoreHomeRaw = String(timeline?.score?.home?.score ?? "").trim();
+      const scoreAwayRaw = String(timeline?.score?.away?.score ?? "").trim();
+      const scoreHome = scoreHomeRaw && /^\d+$/.test(scoreHomeRaw) ? Number(scoreHomeRaw) : null;
+      const scoreAway = scoreAwayRaw && /^\d+$/.test(scoreAwayRaw) ? Number(scoreAwayRaw) : null;
+      const nowIso = new Date().toISOString();
+      const fallbackElapsed = (() => {
+        if (!inPlay) return null;
+        const iso = String(nextBetfair?.marketStartTime ?? x?.utcDate ?? "").trim();
+        if (!iso) return null;
+        const ms = new Date(iso).getTime();
+        if (!Number.isFinite(ms)) return null;
+        const diffMin = Math.floor((Date.now() - ms) / 60000);
+        if (!Number.isFinite(diffMin) || diffMin < 0 || diffMin > 200) return null;
+        return diffMin;
+      })();
+
+      const fallbackStatusShort = isClosed ? "FINISHED" : inPlay ? "LIVE" : null;
+      const nextLive = timeline
+        ? {
+            provider: "betfair",
+            elapsed: Number.isFinite(elapsed) ? elapsed : fallbackElapsed,
+            extra: null,
+            statusShort: statusShort || fallbackStatusShort,
+            fetchedAt: nowIso,
+          }
+        : inPlay
+        ? {
+            provider: "betfair",
+            elapsed: fallbackElapsed,
+            extra: null,
+            statusShort: fallbackStatusShort,
+            fetchedAt: nowIso,
+          }
+        : (x?.live ?? null);
+
 
       let cs: any = null;
       if (includeCorrectScore) {
@@ -2526,7 +4925,29 @@ const betfairQueueRefreshOddsHandler = async (c: any) => {
       if (includeCorrectScore) nextBetfair.correctScore = cs;
 
       const key = `${BETFAIR_QUEUE_PREFIX}${String(x.matchId)}`;
-      const next = { ...x, betfair: nextBetfair, updatedAt: new Date().toISOString() };
+      const next: any = {
+        ...x,
+        utcDate: String(nextBetfair?.marketStartTime ?? "").trim() || x?.utcDate || null,
+        scoreHome: (Number.isFinite(scoreHome as number) ? scoreHome : x?.scoreHome ?? null),
+        scoreAway: (Number.isFinite(scoreAway as number) ? scoreAway : x?.scoreAway ?? null),
+        live: nextLive,
+        betfair: nextBetfair,
+        updatedAt: new Date().toISOString(),
+      };
+
+      if (runCorrectScorePlan) {
+        try {
+          const plan = planCorrectScoreForQueueItem(next, planConfig);
+          next.strategy = {
+            ...(next?.strategy ?? {}),
+            correctScore: {
+              ...(next?.strategy?.correctScore ?? {}),
+              lastPlan: plan,
+              lastPlannedAt: plan.createdAt,
+            },
+          };
+        } catch {}
+      }
       await kv.set(key, next);
       updated += 1;
     }
@@ -2537,16 +4958,20 @@ const betfairQueueRefreshOddsHandler = async (c: any) => {
   }
 };
 
-app.post("/make-server-1119702f/automation/betfair/queue/remove", betfairQueueRemoveHandler);
 app.post("/automation/betfair/queue/remove", betfairQueueRemoveHandler);
-app.post("/make-server-1119702f/automation/betfair/queue/update", betfairQueueUpdateHandler);
 app.post("/automation/betfair/queue/update", betfairQueueUpdateHandler);
-app.post("/make-server-1119702f/automation/betfair/queue/refreshOdds", betfairQueueRefreshOddsHandler);
+app.post("/automation/betfair/queue/batchUpdate", betfairQueueBatchUpdateHandler);
 app.post("/automation/betfair/queue/refreshOdds", betfairQueueRefreshOddsHandler);
 
-const KV_TABLE = "kv_store_1119702f";
-const supabaseClient = () =>
-  createClient(Deno.env.get("SUPABASE_URL") ?? "", Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "");
+app.post("/automation/betfair/strategy/correctScore/plan", betfairCorrectScorePlanHandler);
+app.post("/automation/betfair/strategy/correctScore/execute", betfairCorrectScoreExecuteHandler);
+app.post("/automation/betfair/strategy/correctScore/openOrdersSummary", betfairCorrectScoreOpenOrdersSummaryHandler);
+app.post("/automation/betfair/strategy/correctScore/cancelOpenOrders", betfairCorrectScoreCancelOpenOrdersHandler);
+app.post("/automation/betfair/strategy/correctScore/tradePreview", betfairCorrectScoreTradePreviewHandler);
+app.post("/automation/betfair/strategy/correctScore/cashout", betfairCorrectScoreCashoutHandler);
+app.post("/automation/betfair/strategy/scalpingGoals/tick", betfairScalpingGoalsTickHandler);
+app.post("/automation/betfair/strategy/scalpingTicks/tick", betfairScalpingTicksTickHandler);
+app.post("/automation/betfair/strategy/overGoalsLimit/tick", betfairOverGoalsLimitTickHandler);
 
 const TRAINING_META_KEY = "iafutebol/meta_model_v1";
 
@@ -2601,13 +5026,8 @@ const trainingSamplesCountHandler = async (c: any) => {
   const authError = requireBearer(c);
   if (authError) return authError;
   try {
-    const supabase = supabaseClient();
-    const { count, error } = await supabase
-      .from(KV_TABLE)
-      .select("key", { count: "exact", head: true })
-      .like("key", `${TRAINING_SAMPLES_PREFIX}%`);
-    if (error) throw new Error(error.message);
-    return c.json({ ok: true, count: Number.isFinite(Number(count)) ? Number(count) : 0 });
+    const count = await kv.countByPrefix(TRAINING_SAMPLES_PREFIX);
+    return c.json({ ok: true, count });
   } catch (error) {
     console.error("❌ Erro ao contar training samples:", error);
     return c.json({ ok: false, error: error.message || "Erro ao contar training samples" }, 500);
@@ -2624,15 +5044,8 @@ const trainingSamplesListHandler = async (c: any) => {
     const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(500, Math.floor(limitRaw))) : 200;
     const offset = Number.isFinite(offsetRaw) ? Math.max(0, Math.floor(offsetRaw)) : 0;
 
-    const supabase = supabaseClient();
-    const { data, error } = await supabase
-      .from(KV_TABLE)
-      .select("key,value")
-      .like("key", `${TRAINING_SAMPLES_PREFIX}%`)
-      .order("key", { ascending: true })
-      .range(offset, offset + limit - 1);
-    if (error) throw new Error(error.message);
-    const items = Array.isArray(data) ? data.map((r: any) => r?.value).filter((v: any) => v) : [];
+    const rows = await kv.listByPrefix(TRAINING_SAMPLES_PREFIX, { offset, limit });
+    const items = rows.map((r: any) => r?.value).filter((v: any) => v) as any[];
     const nextOffset = items.length === limit ? offset + limit : null;
     return c.json({ ok: true, items, nextOffset });
   } catch (error) {
@@ -2697,21 +5110,29 @@ const leaguesCacheSetHandler = async (c: any) => {
   }
 };
 
-app.post("/make-server-1119702f/cache/api-football/leagues/get", leaguesCacheGetHandler);
 app.post("/cache/api-football/leagues/get", leaguesCacheGetHandler);
-app.post("/make-server-1119702f/cache/api-football/leagues/set", leaguesCacheSetHandler);
 app.post("/cache/api-football/leagues/set", leaguesCacheSetHandler);
 
-app.post("/make-server-1119702f/training/meta/get", trainingMetaGetHandler);
 app.post("/training/meta/get", trainingMetaGetHandler);
-app.post("/make-server-1119702f/training/meta/set", trainingMetaSetHandler);
 app.post("/training/meta/set", trainingMetaSetHandler);
 
-app.post("/make-server-1119702f/training/samples/upsert", trainingSamplesUpsertHandler);
 app.post("/training/samples/upsert", trainingSamplesUpsertHandler);
-app.post("/make-server-1119702f/training/samples/count", trainingSamplesCountHandler);
 app.post("/training/samples/count", trainingSamplesCountHandler);
-app.post("/make-server-1119702f/training/samples/list", trainingSamplesListHandler);
 app.post("/training/samples/list", trainingSamplesListHandler);
 
 Deno.serve(app.fetch);
+} catch (error) {
+  __bootError = error;
+  const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+  const stack = error instanceof Error ? String(error.stack ?? "") : "";
+  const body = JSON.stringify({ ok: false, code: "BOOT_TRAP", message, stack });
+  Deno.serve((_req) => {
+    return new Response(body, {
+      status: 500,
+      headers: {
+        "Content-Type": "application/json; charset=utf-8",
+        "Access-Control-Allow-Origin": "*",
+      },
+    });
+  });
+}

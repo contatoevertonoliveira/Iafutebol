@@ -1,13 +1,12 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router';
 import { ArrowLeft, Zap } from 'lucide-react';
-import type { FootballMatch } from '../services/footballDataService';
 import type { Prediction } from '../data/mockData';
 import { TeamLogo } from '../components/TeamLogo';
-import { AgentEnsemble, getDynamicAgentProfiles } from '../services/aiAgents';
+import { AgentEnsemble, getDynamicAgentProfiles, type FootballMatch } from '../services/aiAgents';
 import { MobileBottomNav } from '../components/MobileBottomNav';
 
-type ApiSource = 'api-football' | 'football-data' | 'openligadb' | 'betfair' | 'mock';
+type ApiSource = 'api-football' | 'betfair' | 'mock';
 
 type MatchesCache = {
   version: number;

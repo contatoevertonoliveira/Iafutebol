@@ -3,16 +3,13 @@ import { mockMatches, mockPredictions, Match, Prediction } from '../data/mockDat
 import { MatchCard } from '../components/MatchCard';
 import { PredictionDetails } from '../components/PredictionDetails';
 import { FilterBar } from '../components/FilterBar';
-import { PremiumCarousel } from '../components/PremiumCarousel';
 import { AgentAnalysis } from '../components/AgentAnalysis';
 import { DraggableWindow } from '../components/DraggableWindow';
 import { BarChart3, Brain, Globe, Loader2, Plus, Search, ShieldCheck, Target, TrendingUp } from 'lucide-react';
 import { MobileMatchCard } from '../components/MobileMatchCard';
-import { getDynamicAgentProfiles, AgentEnsemble, AgentPrediction, learnFromMatchResult, recordTrainingSample } from '../services/aiAgents';
+import { getDynamicAgentProfiles, AgentEnsemble, AgentPrediction, learnFromMatchResult, recordTrainingSample, type FootballMatch } from '../services/aiAgents';
 import { loadApiConfig } from '../services/apiConfig';
-import { FootballDataService, FootballMatch } from '../services/footballDataService';
-import { ApiFootballService, ApiFootballMatch } from '../services/apiFootballService';
-import { OpenLigaDbService, OpenLigaMatch } from '../services/openLigaDbService';
+import { ApiFootballService, ApiFootballMatch, useApiFootballLiveUpdates } from '../services/apiFootballService';
 import { toast } from 'sonner';
 import { useLocation, useNavigate } from 'react-router';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../components/ui/dialog';
@@ -23,7 +20,7 @@ import { Badge } from '../components/ui/badge';
 type MatchStatus = 'scheduled' | 'live' | 'finished';
 type StatusFilter = 'all' | 'live' | 'upcoming' | 'finished';
 type GroupMode = 'leagues' | 'championships';
-type ApiSource = 'api-football' | 'football-data' | 'openligadb' | 'betfair' | 'mock';
+type ApiSource = 'api-football' | 'betfair' | 'mock';
 
 type DisplayMatch = Match & {
   homeCrest?: string;
@@ -44,9 +41,34 @@ type HomeEnhancedProps = {
   favoritesOnly?: boolean;
 };
 
+type RequestedFixturesStoreV1 = { version: 1; items: Record<string, { fixtureId: number }> };
+type RequestedFixturesStoreV2 = {
+  version: 2;
+  items: Record<
+    string,
+    | { source: 'api-football'; fixtureId: number }
+    | { source: 'betfair'; match: FootballMatch }
+  >;
+};
+
+type AddMatchCandidate =
+  | { source: 'api-football'; fixture: ApiFootballMatch }
+  | { source: 'betfair'; match: FootballMatch };
+
 export default function Home({ initialSelectedDate = 'today', favoritesOnly = false }: HomeEnhancedProps) {
   const location = useLocation();
   const navigate = useNavigate();
+  const warnedManyLeaguesRef = useRef(false);
+  const [quickSearch, setQuickSearch] = useState('');
+  const warnedQuotaRef = useRef(false);
+  const warnTooManyActiveLeagues = (count: number) => {
+    if (!Number.isFinite(count) || count <= 30) return;
+    if (warnedManyLeaguesRef.current) return;
+    warnedManyLeaguesRef.current = true;
+    toast.warning(`Muitas ligas ativas (${count}).`, {
+      description: 'Isso pode consumir a cota diária da API-Football. Se necessário, desative ligas em Configurações → Campeonatos.',
+    });
+  };
   const [selectedDate, setSelectedDate] = useState(initialSelectedDate);
   const [selectedCountry, setSelectedCountry] = useState('all');
   const [selectedLeague, setSelectedLeague] = useState('all');
@@ -68,6 +90,8 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
   const zCounterRef = useRef(70);
   const favoritesKey = 'favorite_matches_v1';
   const [favoriteMatchIds, setFavoriteMatchIds] = useState<string[]>([]);
+  const dismissedMatchesKey = 'dismissed_matches_v1';
+  const [dismissedMatchIds, setDismissedMatchIds] = useState<string[]>([]);
   const requestedFixturesKey = 'requested_fixtures_v1';
   const isSyncingRequestedRef = useRef(false);
   const isSyncingBetfairOddsRef = useRef(false);
@@ -75,8 +99,8 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
   const [addMatchQuery, setAddMatchQuery] = useState('');
   const [addMatchLoading, setAddMatchLoading] = useState(false);
   const [addMatchError, setAddMatchError] = useState('');
-  const [addMatchFixtures, setAddMatchFixtures] = useState<ApiFootballMatch[]>([]);
-  const [addMatchResults, setAddMatchResults] = useState<ApiFootballMatch[]>([]);
+  const [addMatchFixtures, setAddMatchFixtures] = useState<AddMatchCandidate[]>([]);
+  const [addMatchResults, setAddMatchResults] = useState<AddMatchCandidate[]>([]);
 
   useEffect(() => {
     realMatchesRef.current = realMatches;
@@ -112,6 +136,37 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
       window.removeEventListener('focus', refreshFavorites);
     };
   }, []);
+
+  useEffect(() => {
+    const refreshDismissed = () => {
+      try {
+        const raw = localStorage.getItem(dismissedMatchesKey) || '[]';
+        const parsed = JSON.parse(raw) as unknown;
+        if (Array.isArray(parsed)) {
+          setDismissedMatchIds(parsed.map(String).filter(Boolean));
+        } else {
+          setDismissedMatchIds([]);
+        }
+      } catch {
+        setDismissedMatchIds([]);
+      }
+    };
+    refreshDismissed();
+    const onStorage = (e: StorageEvent) => {
+      if (!e.key || e.key === dismissedMatchesKey) refreshDismissed();
+    };
+    const onDismissedChanged = () => refreshDismissed();
+    window.addEventListener('storage', onStorage);
+    window.addEventListener('dismissedMatchesChanged' as any, onDismissedChanged as any);
+    window.addEventListener('focus', refreshDismissed);
+    return () => {
+      window.removeEventListener('storage', onStorage);
+      window.removeEventListener('dismissedMatchesChanged' as any, onDismissedChanged as any);
+      window.removeEventListener('focus', refreshDismissed);
+    };
+  }, []);
+
+  const dismissedMatchIdSet = useMemo(() => new Set(dismissedMatchIds.map(String)), [dismissedMatchIds]);
 
   const toggleFavoriteMatch = (matchId: string) => {
     try {
@@ -181,8 +236,30 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
 
   const toMatchStatus = (status: string): MatchStatus => {
     const normalized = String(status || '').toUpperCase();
-    if (['FINISHED', 'FT', 'AET', 'PEN'].includes(normalized)) return 'finished';
-    if (['IN_PLAY', 'PAUSED', 'BREAK', 'LIVE', '1H', '2H', 'HT', 'ET', 'BT', 'P', 'SUSP', 'INT', 'SUSPENDED', 'INTERRUPTED'].includes(normalized)) return 'live';
+    if (['FINISHED', 'FT', 'AET', 'PEN', 'CLOSED', 'SETTLED', 'ENDED', 'END', 'RESULT', 'ABANDONED', 'CANCELLED', 'CANCELED'].includes(normalized)) {
+      return 'finished';
+    }
+    if (
+      [
+        'IN_PLAY',
+        'INPLAY',
+        'PAUSED',
+        'BREAK',
+        'LIVE',
+        '1H',
+        '2H',
+        'HT',
+        'ET',
+        'BT',
+        'P',
+        'SUSP',
+        'INT',
+        'SUSPENDED',
+        'INTERRUPTED',
+      ].includes(normalized)
+    ) {
+      return 'live';
+    }
     return 'scheduled';
   };
 
@@ -205,6 +282,26 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
 
   const cacheKey = 'matchesCache_v3';
   const cacheMaxAgeMs = 1000 * 60 * 15;
+
+  const readLeaguesCatalogCache = () => {
+    const keys = [
+      'apiFootball_leagues_cache_v2_all',
+      'apiFootball_leagues_cache_v2',
+      'apiFootball_leagues_cache_v1',
+    ];
+    for (const key of keys) {
+      try {
+        const raw = localStorage.getItem(key);
+        if (!raw) continue;
+        const parsed = JSON.parse(raw) as { fetchedAt?: string; items?: Array<{ id: number; name: string; country: string }> };
+        if (!parsed?.items || !Array.isArray(parsed.items)) continue;
+        return parsed.items;
+      } catch {
+        continue;
+      }
+    }
+    return [] as Array<{ id: number; name: string; country: string }>;
+  };
 
   const getConfigHash = (source: ApiSource, config: ReturnType<typeof loadApiConfig>) => {
     if (source !== 'api-football') return '';
@@ -323,19 +420,55 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
     isSyncingRequestedRef.current = true;
     try {
       const config = loadApiConfig();
-      const apiFootballKey = config?.apiFootballKey?.trim();
-      if (!apiFootballKey) return;
+      const apiFootballKey = config?.apiFootballKey?.trim() || '';
 
       const disabled = new Set((config?.apiFootballDisabledLeagueIds ?? []).map(Number).filter(Number.isFinite));
 
-      const fixtureIds = (() => {
+      const store = (() => {
         try {
           const raw = localStorage.getItem(requestedFixturesKey);
-          if (!raw) return [] as number[];
-          const parsed = JSON.parse(raw) as { version: number; items: Record<string, { fixtureId: number }> };
-          if (!parsed || parsed.version !== 1 || !parsed.items) return [] as number[];
-          return Object.keys(parsed.items)
-            .map((k) => Number(parsed.items[k]?.fixtureId ?? k))
+          const parsed = raw ? (JSON.parse(raw) as unknown) : null;
+          if (parsed && typeof parsed === 'object' && (parsed as any).version === 2 && (parsed as any).items) {
+            return { version: 2 as const, items: { ...(parsed as any).items } } as RequestedFixturesStoreV2;
+          }
+          if (parsed && typeof parsed === 'object' && (parsed as any).version === 1 && (parsed as any).items) {
+            const items = { ...(parsed as any).items } as Record<string, { fixtureId: number }>;
+            const migrated: RequestedFixturesStoreV2 = { version: 2, items: {} };
+            for (const k of Object.keys(items)) {
+              const fixtureId = Number(items[k]?.fixtureId ?? k);
+              if (!Number.isFinite(fixtureId)) continue;
+              migrated.items[String(fixtureId)] = { source: 'api-football', fixtureId };
+            }
+            return migrated;
+          }
+          return { version: 2 as const, items: {} } as RequestedFixturesStoreV2;
+        } catch {
+          return { version: 2 as const, items: {} } as RequestedFixturesStoreV2;
+        }
+      })();
+
+      const betfairItems = Object.values(store.items).filter((x): x is { source: 'betfair'; match: FootballMatch } => (x as any)?.source === 'betfair');
+      if (betfairItems.length > 0) {
+        const incoming = betfairItems.map((x) => x.match).filter(Boolean);
+        if (incoming.length > 0) {
+          const processed = processCrests(incoming);
+          setRealMatches((prev) => {
+            const map = new Map<number, FootballMatch>();
+            for (const m of prev) map.set(m.id, m);
+            for (const m of processed) map.set(m.id, m);
+            return Array.from(map.values());
+          });
+          if (apiSource === 'mock') setApiSource('betfair');
+          setLastUpdatedAt(new Date());
+        }
+      }
+
+      const fixtureIds = (() => {
+        try {
+          const values = Object.values(store.items);
+          return values
+            .filter((x): x is { source: 'api-football'; fixtureId: number } => (x as any)?.source === 'api-football')
+            .map((x) => Number(x.fixtureId))
             .filter(Number.isFinite);
         } catch {
           return [] as number[];
@@ -347,6 +480,9 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
       const existing = new Set(realMatchesRef.current.map((m) => String(m.id)));
       const needed = fixtureIds.filter((id) => !existing.has(String(id))).slice(0, 30);
       if (needed.length === 0) return;
+
+      if (!apiFootballKey) return;
+      if (readQuotaLock()) return;
 
       const service = new ApiFootballService(apiFootballKey);
       const fetched: FootballMatch[] = [];
@@ -385,12 +521,34 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
     void syncRequestedFixtures();
     const onRequested = () => void syncRequestedFixtures();
     window.addEventListener('requestedFixturesChanged' as any, onRequested as any);
-    window.addEventListener('focus', onRequested);
     return () => {
       window.removeEventListener('requestedFixturesChanged' as any, onRequested as any);
-      window.removeEventListener('focus', onRequested);
     };
   }, [apiSource]);
+
+  const liveCandidateIds = useMemo(() => {
+    if (apiSource !== 'api-football') return [] as number[];
+    const snapshot = realMatchesRef.current;
+    if (!snapshot || snapshot.length === 0) return [] as number[];
+
+    const now = Date.now();
+    const ids = snapshot
+      .filter((m) => {
+        const status = toMatchStatus(m.status);
+        if (status === 'live') return true;
+        if (status !== 'scheduled') return false;
+        const kickoff = new Date(m.utcDate).getTime();
+        if (!Number.isFinite(kickoff)) return false;
+        return now >= kickoff - 5 * 60_000 && now <= kickoff + 3 * 60 * 60_000;
+      })
+      .map((m) => Number(m.id))
+      .filter((id) => Number.isFinite(id) && id > 0)
+      .slice(0, 30);
+
+    return ids;
+  }, [apiSource, realMatches]);
+
+  const liveUpdates = useApiFootballLiveUpdates(liveCandidateIds, { enabled: apiSource === 'api-football' });
 
   const normalizeSearchText = (value: string) => {
     return String(value ?? '')
@@ -419,18 +577,97 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
     return hits * 10 - Math.abs(merged.length - q.length) * 0.02;
   };
 
-  const addRequestedFixture = async (fixtureId: number, opts?: { open?: boolean }) => {
+  function readQuotaLock() {
+    try {
+      const raw = localStorage.getItem('apiFootball_quota_exceeded_v1');
+      if (!raw) return null;
+      const parsed = JSON.parse(raw) as { until?: string; message?: string };
+      const until = String(parsed?.until ?? '').trim();
+      const ms = until ? new Date(until).getTime() : NaN;
+      if (!until || !Number.isFinite(ms)) return null;
+      if (Date.now() >= ms) {
+        try {
+          localStorage.removeItem('apiFootball_quota_exceeded_v1');
+        } catch {}
+        return null;
+      }
+      return { until, message: String(parsed?.message ?? '').trim() || 'requests: You have reached the request limit for the day' };
+    } catch {
+      return null;
+    }
+  }
+
+  const readRequestedStore = (): RequestedFixturesStoreV2 => {
     try {
       const raw = localStorage.getItem(requestedFixturesKey);
       const parsed = raw ? (JSON.parse(raw) as unknown) : null;
-      const next =
-        parsed && typeof parsed === 'object' && (parsed as any).version === 1 && (parsed as any).items
-          ? { version: 1 as const, items: { ...(parsed as any).items } as Record<string, { fixtureId: number }> }
-          : { version: 1 as const, items: {} as Record<string, { fixtureId: number }> };
+      if (parsed && typeof parsed === 'object' && (parsed as any).version === 2 && (parsed as any).items) {
+        return { version: 2, items: { ...(parsed as any).items } } as RequestedFixturesStoreV2;
+      }
+      if (parsed && typeof parsed === 'object' && (parsed as any).version === 1 && (parsed as any).items) {
+        const items = { ...(parsed as any).items } as Record<string, { fixtureId: number }>;
+        const migrated: RequestedFixturesStoreV2 = { version: 2, items: {} };
+        for (const k of Object.keys(items)) {
+          const fixtureId = Number(items[k]?.fixtureId ?? k);
+          if (!Number.isFinite(fixtureId)) continue;
+          migrated.items[String(fixtureId)] = { source: 'api-football', fixtureId };
+        }
+        return migrated;
+      }
+      return { version: 2, items: {} };
+    } catch {
+      return { version: 2, items: {} };
+    }
+  };
 
-      next.items[String(fixtureId)] = { fixtureId };
-      localStorage.setItem(requestedFixturesKey, JSON.stringify(next));
-      window.dispatchEvent(new Event('requestedFixturesChanged'));
+  const writeRequestedStore = (store: RequestedFixturesStoreV2) => {
+    localStorage.setItem(requestedFixturesKey, JSON.stringify(store));
+    window.dispatchEvent(new Event('requestedFixturesChanged'));
+  };
+
+  const dismissMatch = (matchId: string) => {
+    const id = String(matchId ?? '').trim();
+    if (!id) return;
+    try {
+      const current = new Set(dismissedMatchIds.map(String));
+      current.add(id);
+      const nextIds = Array.from(current);
+      localStorage.setItem(dismissedMatchesKey, JSON.stringify(nextIds));
+      setDismissedMatchIds(nextIds);
+      window.dispatchEvent(new Event('dismissedMatchesChanged'));
+    } catch {}
+
+    try {
+      const store = readRequestedStore();
+      let changed = false;
+      for (const k of Object.keys(store.items)) {
+        const v = store.items[k];
+        if (v?.source === 'api-football') {
+          if (String(v.fixtureId) === id) {
+            delete store.items[k];
+            changed = true;
+          }
+        } else if (v?.source === 'betfair') {
+          const ev = String(v.match?.betfair?.eventId ?? '').trim();
+          const mid = String(v.match?.id ?? '').trim();
+          if (ev === id || mid === id || k === id) {
+            delete store.items[k];
+            changed = true;
+          }
+        }
+      }
+      if (changed) writeRequestedStore(store);
+    } catch {}
+
+    if (selectedMatchId === id) setSelectedMatchId(null);
+    toast.success('Card removido do dashboard');
+  };
+
+  const addRequestedFixture = async (fixtureId: number, opts?: { open?: boolean }) => {
+    try {
+      const next = readRequestedStore();
+      next.items[String(fixtureId)] = { source: 'api-football', fixtureId };
+      writeRequestedStore(next);
       await syncRequestedFixtures();
       if (opts?.open) setSelectedMatchId(String(fixtureId));
       toast.success('Jogo adicionado');
@@ -440,6 +677,52 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
     }
   };
 
+  const addRequestedBetfairMatch = async (match: FootballMatch, opts?: { open?: boolean }) => {
+    try {
+      const next = readRequestedStore();
+      next.items[`betfair:${String(match.betfair?.eventId ?? match.id)}`] = { source: 'betfair', match };
+      writeRequestedStore(next);
+
+      const processed = processCrests([match]);
+      setRealMatches((prev) => {
+        const map = new Map<number, FootballMatch>();
+        for (const m of prev) map.set(m.id, m);
+        for (const m of processed) map.set(m.id, m);
+        return Array.from(map.values());
+      });
+      setApiSource((s) => (s === 'mock' ? 'betfair' : s));
+      setLastUpdatedAt(new Date());
+      if (opts?.open) setSelectedMatchId(String(match.id));
+      toast.success('Jogo adicionado');
+      setAddMatchOpen(false);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Erro ao adicionar jogo');
+    }
+  };
+
+  const fetchBetfairMatchesForDay = async (ymd: string) => {
+    const { projectId, publicAnonKey } = await import('/utils/supabase/info');
+    const res = await fetch(`https://${projectId}.supabase.co/functions/v1/betfair-server-1119702f/betfair/matches/list`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        apikey: publicAnonKey,
+        Authorization: `Bearer ${publicAnonKey}`,
+      },
+      body: JSON.stringify({ dateFrom: ymd, dateTo: ymd, maxResults: 400 }),
+    });
+    const raw = await res.text().catch(() => '');
+    let data: any = null;
+    try {
+      data = raw ? JSON.parse(raw) : null;
+    } catch {
+      data = null;
+    }
+    if (!res.ok || !data?.ok) throw new Error(String(data?.error ?? `HTTP ${res.status} ${res.statusText}`));
+    const matches = Array.isArray(data?.matches) ? (data.matches as FootballMatch[]) : [];
+    return matches;
+  };
+
   useEffect(() => {
     if (!addMatchOpen) return;
     setAddMatchError('');
@@ -447,38 +730,118 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
     setAddMatchResults([]);
     const cfg = loadApiConfig();
     const apiFootballKey = String(cfg?.apiFootballKey ?? '').trim();
-    if (!apiFootballKey) {
-      setAddMatchFixtures([]);
-      setAddMatchError('Configure a API-Football em Configurações para buscar jogos do dia.');
-      return;
-    }
+    const quotaLock = readQuotaLock();
 
     const disabled = new Set((cfg?.apiFootballDisabledLeagueIds ?? []).map(Number).filter(Number.isFinite));
+    const leaguesCatalog = readLeaguesCatalogCache();
+    const activeLeagueIds = leaguesCatalog
+      .map((l) => Number((l as any).id))
+      .filter(Number.isFinite)
+      .filter((id) => !disabled.has(id));
+    activeLeagueIds.sort((a, b) => a - b);
     const ymd = getDayKey(new Date());
 
     const run = async () => {
       setAddMatchLoading(true);
       try {
+        const preferBetfair = !apiFootballKey || Boolean(quotaLock);
+        if (preferBetfair) {
+          const matches = await fetchBetfairMatchesForDay(ymd);
+          const items: AddMatchCandidate[] = matches
+            .map((m) => ({ source: 'betfair' as const, match: m }))
+            .slice()
+            .sort((a, b) => new Date(a.match.utcDate).getTime() - new Date(b.match.utcDate).getTime());
+          setAddMatchFixtures(items);
+          setAddMatchResults(items.slice(0, 30));
+          if (!apiFootballKey) setAddMatchError('API-Football não configurada. Exibindo Betfair como fallback.');
+          else setAddMatchError('API-Football indisponível (cota diária). Exibindo Betfair como fallback.');
+          return;
+        }
+
         const service = new ApiFootballService(apiFootballKey);
-        const [dayFixtures, liveFixtures] = await Promise.all([
-          service.getFixtures({ date: ymd, timezone: TIME_ZONE, maxPages: 6 }),
-          service.getFixtures({ live: 'all', timezone: TIME_ZONE, maxPages: 4 }),
-        ]);
+        if (leaguesCatalog.length === 0) {
+          const matches = await fetchBetfairMatchesForDay(ymd);
+          const items: AddMatchCandidate[] = matches
+            .map((m) => ({ source: 'betfair' as const, match: m }))
+            .slice()
+            .sort((a, b) => new Date(a.match.utcDate).getTime() - new Date(b.match.utcDate).getTime());
+          setAddMatchFixtures(items);
+          setAddMatchResults(items.slice(0, 30));
+          setAddMatchError('Catálogo de ligas não carregado. Exibindo Betfair como fallback.');
+          return;
+        }
+        if (leaguesCatalog.length > 0 && activeLeagueIds.length === 0) {
+          const matches = await fetchBetfairMatchesForDay(ymd);
+          const items: AddMatchCandidate[] = matches
+            .map((m) => ({ source: 'betfair' as const, match: m }))
+            .slice()
+            .sort((a, b) => new Date(a.match.utcDate).getTime() - new Date(b.match.utcDate).getTime());
+          setAddMatchFixtures(items);
+          setAddMatchResults(items.slice(0, 30));
+          setAddMatchError('Todos os campeonatos estão desativados. Exibindo Betfair como fallback.');
+          return;
+        }
+        warnTooManyActiveLeagues(activeLeagueIds.length);
+
+        const mapWithConcurrency = async <TIn, TOut>(items: TIn[], limit: number, fn: (item: TIn, index: number) => Promise<TOut>) => {
+          const results: TOut[] = new Array(items.length);
+          let nextIndex = 0;
+          const workers = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
+            while (nextIndex < items.length) {
+              const i = nextIndex++;
+              results[i] = await fn(items[i], i);
+            }
+          });
+          await Promise.all(workers);
+          return results;
+        };
+
+        const tooManyLeagues = activeLeagueIds.length > 18;
+        const activeLeagueSet = new Set(activeLeagueIds);
+        const shouldSplitByLeague = activeLeagueIds.length > 0 && !tooManyLeagues;
+        const [dayFixtures, liveFixtures] = shouldSplitByLeague
+          ? await Promise.all([
+            mapWithConcurrency(activeLeagueIds, 3, async (leagueId) => await service.getFixtures({ date: ymd, league: leagueId, timezone: TIME_ZONE, maxPages: 2 })).then((r) => r.flat()),
+            mapWithConcurrency(activeLeagueIds, 3, async (leagueId) => await service.getFixtures({ live: 'all', league: leagueId, timezone: TIME_ZONE, maxPages: 2 })).then((r) => r.flat()),
+          ])
+          : await Promise.all([service.getFixtures({ date: ymd, timezone: TIME_ZONE, maxPages: 8 }), service.getFixtures({ live: 'all', timezone: TIME_ZONE, maxPages: 4 })]);
         const byId = new Map<number, ApiFootballMatch>();
         for (const f of [...(dayFixtures ?? []), ...(liveFixtures ?? [])]) {
           const id = Number(f?.fixture?.id);
           const leagueId = Number(f?.league?.id);
           if (!Number.isFinite(id)) continue;
           if (disabled.size > 0 && Number.isFinite(leagueId) && disabled.has(leagueId)) continue;
+          if (tooManyLeagues) {
+            if (!Number.isFinite(leagueId) || !activeLeagueSet.has(leagueId)) continue;
+          }
           byId.set(id, f);
         }
         const items = Array.from(byId.values());
         items.sort((a, b) => Number(a?.fixture?.timestamp ?? 0) - Number(b?.fixture?.timestamp ?? 0));
-        setAddMatchFixtures(items);
-        setAddMatchResults(items.slice(0, 30));
+        const candidates: AddMatchCandidate[] = items.map((f) => ({ source: 'api-football' as const, fixture: f }));
+        setAddMatchFixtures(candidates);
+        setAddMatchResults(candidates.slice(0, 30));
       } catch (e) {
-        setAddMatchFixtures([]);
-        setAddMatchError(e instanceof Error ? e.message : 'Erro ao buscar jogos do dia');
+        const msg = e instanceof Error ? e.message : 'Erro ao buscar jogos do dia';
+        const isQuota = /request limit for the day|reached the request limit|you have reached the request limit|\brequests\b\s*:/i.test(msg);
+        if (isQuota) {
+          try {
+            const matches = await fetchBetfairMatchesForDay(ymd);
+            const items: AddMatchCandidate[] = matches
+              .map((m) => ({ source: 'betfair' as const, match: m }))
+              .slice()
+              .sort((a, b) => new Date(a.match.utcDate).getTime() - new Date(b.match.utcDate).getTime());
+            setAddMatchFixtures(items);
+            setAddMatchResults(items.slice(0, 30));
+            setAddMatchError('API-Football indisponível (cota diária). Exibindo Betfair como fallback.');
+          } catch {
+            setAddMatchFixtures([]);
+            setAddMatchError(msg);
+          }
+        } else {
+          setAddMatchFixtures([]);
+          setAddMatchError(msg);
+        }
       } finally {
         setAddMatchLoading(false);
       }
@@ -493,23 +856,34 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
       const q = addMatchQuery;
       if (!q.trim()) {
         const sorted = [...fixtures].sort((a, b) => {
-          const as = toMatchStatus(a?.fixture?.status?.short ?? 'NS');
-          const bs = toMatchStatus(b?.fixture?.status?.short ?? 'NS');
+          const as = a.source === 'api-football' ? toMatchStatus(a.fixture?.fixture?.status?.short ?? 'NS') : toMatchStatus(a.match?.status ?? '');
+          const bs = b.source === 'api-football' ? toMatchStatus(b.fixture?.fixture?.status?.short ?? 'NS') : toMatchStatus(b.match?.status ?? '');
           const rank = (s: MatchStatus) => (s === 'live' ? 0 : s === 'scheduled' ? 1 : 2);
           const r = rank(as) - rank(bs);
           if (r !== 0) return r;
-          return Number(a?.fixture?.timestamp ?? 0) - Number(b?.fixture?.timestamp ?? 0);
+          const at = a.source === 'api-football' ? Number(a.fixture?.fixture?.timestamp ?? 0) : Math.floor(new Date(a.match?.utcDate ?? '').getTime() / 1000) || 0;
+          const bt = b.source === 'api-football' ? Number(b.fixture?.fixture?.timestamp ?? 0) : Math.floor(new Date(b.match?.utcDate ?? '').getTime() / 1000) || 0;
+          return at - bt;
         });
         setAddMatchResults(sorted.slice(0, 30));
         return;
       }
 
       const scored = fixtures
-        .map((f) => ({ f, score: scoreFixture(f, q) }))
+        .map((c) => {
+          if (c.source === 'api-football') return { c, score: scoreFixture(c.fixture, q) };
+          const merged = `${normalizeSearchText(c.match?.homeTeam?.name ?? '')} ${normalizeSearchText(c.match?.awayTeam?.name ?? '')} ${normalizeSearchText(c.match?.competition?.name ?? '')}`;
+          const qq = normalizeSearchText(q);
+          const tokens = qq.split(' ').filter(Boolean);
+          let hits = 0;
+          for (const t of tokens) if (merged.includes(t)) hits += 1;
+          const score = hits === 0 ? 0 : hits * 10 - Math.abs(merged.length - qq.length) * 0.02;
+          return { c, score };
+        })
         .filter((x) => x.score > 0)
         .sort((a, b) => b.score - a.score)
         .slice(0, 40)
-        .map((x) => x.f);
+        .map((x) => x.c);
       setAddMatchResults(scored);
     }, 140);
     return () => window.clearTimeout(id);
@@ -568,55 +942,6 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
           name: leagueCountry,
           code: '',
           flag: leagueFlag,
-        },
-      },
-    };
-  };
-
-  const convertOpenLigaMatchToFootballMatch = (m: OpenLigaMatch): FootballMatch => {
-    const endResult =
-      m.matchResults?.find((r) => r.resultTypeID === 2) ?? m.matchResults?.[m.matchResults.length - 1];
-
-    const homeGoals = endResult ? endResult.pointsTeam1 : null;
-    const awayGoals = endResult ? endResult.pointsTeam2 : null;
-
-    const leagueName = m.leagueName || 'Bundesliga';
-    const leagueShortcut = m.leagueShortcut || 'bl1';
-
-    return {
-      id: m.matchID,
-      utcDate: m.matchDateTimeUTC,
-      status: m.matchIsFinished ? 'FINISHED' : 'SCHEDULED',
-      matchday: m.group?.groupOrderID || 0,
-      homeTeam: {
-        id: m.team1.teamId,
-        name: m.team1.teamName,
-        shortName: m.team1.shortName || m.team1.teamName,
-        tla: (m.team1.shortName || m.team1.teamName).substring(0, 3).toUpperCase(),
-        crest: m.team1.teamIconUrl || '',
-      },
-      awayTeam: {
-        id: m.team2.teamId,
-        name: m.team2.teamName,
-        shortName: m.team2.shortName || m.team2.teamName,
-        tla: (m.team2.shortName || m.team2.teamName).substring(0, 3).toUpperCase(),
-        crest: m.team2.teamIconUrl || '',
-      },
-      score: {
-        fullTime: {
-          home: homeGoals,
-          away: awayGoals,
-        },
-      },
-      competition: {
-        id: 0,
-        name: leagueName,
-        code: leagueShortcut.toUpperCase(),
-        emblem: '',
-        area: {
-          name: 'Alemanha',
-          code: 'DE',
-          flag: '',
         },
       },
     };
@@ -685,10 +1010,13 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
   };
 
   const consensusToPrediction = (matchId: string, consensus: AgentPrediction): Prediction => {
-    const winnerConfidence = Math.round(consensus.winnerConfidence);
+    const winnerConfidenceRaw = Number(consensus.winnerConfidence);
+    const winnerConfidence = Number.isFinite(winnerConfidenceRaw) ? Math.round(winnerConfidenceRaw) : 0;
+    const aiConfidenceRaw = Number(consensus.confidence);
+    const aiConfidence = Number.isFinite(aiConfidenceRaw) ? Math.round(aiConfidenceRaw) : 0;
     return {
       matchId,
-      aiConfidence: Math.round(consensus.confidence),
+      aiConfidence,
       winner: {
         prediction: consensus.winner,
         confidence: winnerConfidence,
@@ -745,6 +1073,136 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
     const dynamicAgents = getDynamicAgentProfiles();
     const ensemble = new AgentEnsemble(dynamicAgents);
 
+    const readRequestedFixtureIds = () => {
+      try {
+        const raw = localStorage.getItem(requestedFixturesKey);
+        if (!raw) return [] as string[];
+        const parsed = JSON.parse(raw) as { version: number; items: Record<string, { fixtureId: number }> };
+        if (!parsed || parsed.version !== 1 || !parsed.items) return [] as string[];
+        return Object.keys(parsed.items).map(String);
+      } catch {
+        return [] as string[];
+      }
+    };
+
+    const selectedDashboardIds = new Set<string>([...favoriteMatchIds.map(String), ...readRequestedFixtureIds()]);
+
+    const buildPreLiveSummary = (arr: ApiFootballMatch[], teamId: number) => {
+      const items = Array.isArray(arr) ? arr : [];
+      let played = 0;
+      let gf = 0;
+      let ga = 0;
+      let w = 0;
+      let d = 0;
+      let l = 0;
+      for (const f of items) {
+        const homeId = Number((f as any)?.teams?.home?.id);
+        const awayId = Number((f as any)?.teams?.away?.id);
+        const gHome = typeof (f as any)?.goals?.home === 'number' ? (f as any).goals.home : null;
+        const gAway = typeof (f as any)?.goals?.away === 'number' ? (f as any).goals.away : null;
+        if (!Number.isFinite(homeId) || !Number.isFinite(awayId)) continue;
+        if (gHome == null || gAway == null) continue;
+        const isHome = homeId === teamId;
+        const isAway = awayId === teamId;
+        if (!isHome && !isAway) continue;
+        const goalsFor = isHome ? gHome : gAway;
+        const goalsAgainst = isHome ? gAway : gHome;
+        played += 1;
+        gf += goalsFor;
+        ga += goalsAgainst;
+        if (goalsFor > goalsAgainst) w += 1;
+        else if (goalsFor < goalsAgainst) l += 1;
+        else d += 1;
+      }
+      return {
+        played,
+        gfAvg: played > 0 ? Math.round((gf / played) * 100) / 100 : null,
+        gaAvg: played > 0 ? Math.round((ga / played) * 100) / 100 : null,
+        w,
+        d,
+        l,
+      };
+    };
+
+    const buildH2HSummary = (arr: ApiFootballMatch[], homeId: number, awayId: number) => {
+      const items = Array.isArray(arr) ? arr : [];
+      let played = 0;
+      let homeW = 0;
+      let awayW = 0;
+      let draw = 0;
+      let goals = 0;
+      for (const f of items) {
+        const hId = Number((f as any)?.teams?.home?.id);
+        const aId = Number((f as any)?.teams?.away?.id);
+        const gHome = typeof (f as any)?.goals?.home === 'number' ? (f as any).goals.home : null;
+        const gAway = typeof (f as any)?.goals?.away === 'number' ? (f as any).goals.away : null;
+        if (!Number.isFinite(hId) || !Number.isFinite(aId)) continue;
+        if (gHome == null || gAway == null) continue;
+        const isSamePair = (hId === homeId && aId === awayId) || (hId === awayId && aId === homeId);
+        if (!isSamePair) continue;
+        played += 1;
+        goals += gHome + gAway;
+        const homeGoalsForHomeTeam = hId === homeId ? gHome : gAway;
+        const awayGoalsForAwayTeam = aId === awayId ? gAway : gHome;
+        if (homeGoalsForHomeTeam > awayGoalsForAwayTeam) homeW += 1;
+        else if (homeGoalsForHomeTeam < awayGoalsForAwayTeam) awayW += 1;
+        else draw += 1;
+      }
+      return { played, homeW, awayW, draw, goalsAvg: played > 0 ? Math.round((goals / played) * 100) / 100 : null };
+    };
+
+    const ensurePreLiveStats = async (m: FootballMatch) => {
+      if (source !== 'api-football') return;
+      const id = String(m.id);
+      if (!selectedDashboardIds.has(id)) return;
+
+      const status = toMatchStatus(m.status);
+      if (status !== 'scheduled') return;
+      const kickoffMs = new Date(m.utcDate).getTime();
+      if (!Number.isFinite(kickoffMs)) return;
+      if (kickoffMs - Date.now() > 24 * 60 * 60_000) return;
+
+      const cacheKey = `prelive_summary_v1:${id}`;
+      try {
+        const raw = localStorage.getItem(cacheKey);
+        if (raw) {
+          const parsed = JSON.parse(raw) as { fetchedAt: string; preLive: FootballMatch['preLive'] };
+          const age = parsed?.fetchedAt ? Date.now() - new Date(parsed.fetchedAt).getTime() : Infinity;
+          if (Number.isFinite(age) && age >= 0 && age < 6 * 60 * 60_000 && parsed?.preLive) {
+            (m as any).preLive = parsed.preLive;
+            return;
+          }
+        }
+      } catch {}
+
+      const cfg = loadApiConfig();
+      const apiFootballKey = String(cfg?.apiFootballKey ?? '').trim();
+      if (!apiFootballKey) return;
+      const homeId = Number(m.homeTeam?.id);
+      const awayId = Number(m.awayTeam?.id);
+      if (!Number.isFinite(homeId) || !Number.isFinite(awayId)) return;
+
+      try {
+        const service = new ApiFootballService(apiFootballKey);
+        const last = 10;
+        const [homeLast, awayLast, h2h] = await Promise.all([
+          service.getFixturesOnce({ team: homeId, last, timezone: TIME_ZONE }).catch(() => [] as ApiFootballMatch[]),
+          service.getFixturesOnce({ team: awayId, last, timezone: TIME_ZONE }).catch(() => [] as ApiFootballMatch[]),
+          service.getH2H({ h2h: `${homeId}-${awayId}` }).catch(() => [] as ApiFootballMatch[]),
+        ]);
+        const preLive: FootballMatch['preLive'] = {
+          fetchedAt: new Date().toISOString(),
+          homeLast: buildPreLiveSummary(homeLast, homeId),
+          awayLast: buildPreLiveSummary(awayLast, awayId),
+          h2h: buildH2HSummary(h2h.slice(0, 10), homeId, awayId),
+        };
+        (m as any).preLive = preLive;
+        try {
+          localStorage.setItem(cacheKey, JSON.stringify({ fetchedAt: preLive.fetchedAt, preLive }));
+        } catch {}
+      } catch {}
+    };
+
     for (const m of matches) {
       const id = m.id.toString();
       const key = `${source}:${id}`;
@@ -753,7 +1211,13 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
       } else if (store.items[key]?.prediction) {
         continue;
       }
-      const consensus = await ensemble.getConsensusPrediction(m);
+      let consensus: AgentPrediction | null = null;
+      try {
+        await ensurePreLiveStats(m);
+        consensus = await ensemble.getConsensusPrediction(m);
+      } catch {
+        continue;
+      }
       store.items[key] = {
         createdAt: new Date().toISOString(),
         prediction: consensusToPrediction(id, consensus),
@@ -764,26 +1228,22 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
       localStorage.setItem(storeKey, JSON.stringify(store));
     } catch {}
 
-    return Object.fromEntries(
-      matches.map((m) => {
+    const entries = matches
+      .map((m) => {
         const id = m.id.toString();
         const key = `${source}:${id}`;
-        return [id, store.items[key]!.prediction] as const;
-      }),
-    );
+        const pred = store.items[key]?.prediction ?? null;
+        return pred ? ([id, pred] as const) : null;
+      })
+      .filter((x): x is NonNullable<typeof x> => Boolean(x));
+
+    return Object.fromEntries(entries);
   };
 
   const processCrests = (matches: FootballMatch[]) => {
     return matches.map((match) => {
-      const homeCrest =
-        match.homeTeam.crest ||
-        `https://crests.football-data.org/${match.homeTeam.id}.png` ||
-        `https://via.placeholder.com/40/cccccc/000000?text=${match.homeTeam.shortName}`;
-
-      const awayCrest =
-        match.awayTeam.crest ||
-        `https://crests.football-data.org/${match.awayTeam.id}.png` ||
-        `https://via.placeholder.com/40/cccccc/000000?text=${match.awayTeam.shortName}`;
+      const homeCrest = match.homeTeam.crest || '';
+      const awayCrest = match.awayTeam.crest || '';
 
       return {
         ...match,
@@ -810,21 +1270,143 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
       let successfulSource: ApiSource | null = null;
 
       const apiFootballKey = config?.apiFootballKey?.trim();
-      const footballDataApiKey = config?.footballDataApiKey?.trim();
-      const openLigaDbEnabled = config?.openLigaDbEnabled ?? true;
 
       if (apiFootballKey) {
         try {
           const service = new ApiFootballService(apiFootballKey);
-          const maxPages = selectedDate === 'today' ? 3 : selectedDate === 'week' ? 5 : 10;
-          const fixtures = await service.getFixtures({ from: dateFrom, to: dateTo, timezone: TIME_ZONE, maxPages });
+          const horizonDays = selectedDate === 'today' ? 1 : selectedDate === 'week' ? 7 : 30;
+          const days = Array.from({ length: horizonDays }, (_, i) => getDayKey(new Date(Date.now() + i * 24 * 60 * 60 * 1000)));
+          const allowedKeys = new Set(days);
+
+          const fixtureLocalDayKey = (m: ApiFootballMatch) => {
+            const raw = String(m?.fixture?.date ?? '');
+            if (!raw) return '';
+            return getDayKey(parseApiDate(raw));
+          };
+
+          const mapWithConcurrency = async <TIn, TOut>(
+            items: TIn[],
+            limit: number,
+            fn: (item: TIn, index: number) => Promise<TOut>,
+          ) => {
+            const results: TOut[] = new Array(items.length);
+            let nextIndex = 0;
+            const workers = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
+              while (nextIndex < items.length) {
+                const i = nextIndex++;
+                results[i] = await fn(items[i], i);
+              }
+            });
+            await Promise.all(workers);
+            return results;
+          };
+
+          const disabledLeagueIds = new Set((config?.apiFootballDisabledLeagueIds ?? []).map(Number).filter(Number.isFinite));
+          const leaguesCatalog = readLeaguesCatalogCache();
+          const activeLeagueIds = leaguesCatalog
+            .map((l) => Number((l as any).id))
+            .filter(Number.isFinite)
+            .filter((id) => !disabledLeagueIds.has(id));
+          activeLeagueIds.sort((a, b) => a - b);
+
+          if (leaguesCatalog.length === 0) {
+            throw new Error('Catálogo de ligas não carregado. Abra Configurações → Campeonatos e clique em “Atualizar lista”.');
+          }
+
+          if (leaguesCatalog.length > 0 && activeLeagueIds.length === 0) {
+            successfulSource = successfulSource ?? 'api-football';
+            setApiSource('api-football');
+            setRealMatches([]);
+            setRealPredictions({});
+            setLastUpdatedAt(new Date());
+            writeCache({
+              dateFrom,
+              dateTo,
+              apiSource: 'api-football',
+              matches: [],
+              predictions: {},
+              configHash: getConfigHash('api-football', config),
+            });
+            toast.warning('Todos os campeonatos estão desativados. Ative pelo menos um em Configurações → Campeonatos.');
+            return;
+          }
+
+          warnTooManyActiveLeagues(activeLeagueIds.length);
+
+          const tooManyLeagues = activeLeagueIds.length > 18;
+          const activeLeagueSet = new Set(activeLeagueIds);
+          const shouldSplitByLeague = activeLeagueIds.length > 0 && !tooManyLeagues;
+          const perLeaguePages = selectedDate === 'today' ? 5 : selectedDate === 'week' ? 4 : 3;
+          const perDayLimit = selectedDate === 'today' ? 6 : selectedDate === 'week' ? 5 : 4;
+          const perDayPages = selectedDate === 'today' ? 8 : selectedDate === 'week' ? 6 : 5;
+
+          const rangeFixtures = shouldSplitByLeague
+            ? (
+              await mapWithConcurrency(
+                activeLeagueIds,
+                3,
+                async (leagueId) =>
+                  await service.getFixtures({ from: dateFrom, to: dateTo, league: leagueId, timezone: TIME_ZONE, maxPages: perLeaguePages }),
+              )
+            ).flat()
+            : (
+              await mapWithConcurrency(
+                days,
+                perDayLimit,
+                async (date) => {
+                  const items = await service.getFixtures({ date, timezone: TIME_ZONE, maxPages: perDayPages });
+                  return items.filter((m) => fixtureLocalDayKey(m) === date);
+                },
+              )
+            ).flat();
+
+          const includeLive = days.includes(getDayKey(new Date()));
+          const liveItems = includeLive
+            ? shouldSplitByLeague
+              ? (
+                await mapWithConcurrency(
+                  activeLeagueIds,
+                  3,
+                  async (leagueId) => await service.getFixtures({ live: 'all', league: leagueId, timezone: TIME_ZONE, maxPages: 2 }),
+                )
+              ).flat()
+              : await service.getFixtures({ live: 'all', timezone: TIME_ZONE, maxPages: 5 }).catch(() => [])
+            : [];
+
+          const filteredRange = tooManyLeagues
+            ? (Array.isArray(rangeFixtures) ? rangeFixtures : []).filter((m) => {
+              const leagueId = Number((m as any)?.league?.id);
+              return Number.isFinite(leagueId) && activeLeagueSet.has(leagueId);
+            })
+            : rangeFixtures;
+
+          const filteredLive = tooManyLeagues
+            ? (Array.isArray(liveItems) ? liveItems : []).filter((m) => {
+              const leagueId = Number((m as any)?.league?.id);
+              return Number.isFinite(leagueId) && activeLeagueSet.has(leagueId);
+            })
+            : liveItems;
+
+          const unique = new Map<number, ApiFootballMatch>();
+          for (const m of filteredRange) {
+            const id = Number(m?.fixture?.id);
+            if (!Number.isFinite(id)) continue;
+            if (!allowedKeys.has(fixtureLocalDayKey(m))) continue;
+            unique.set(id, m);
+          }
+          for (const m of filteredLive) {
+            const id = Number(m?.fixture?.id);
+            if (!Number.isFinite(id)) continue;
+            if (!unique.has(id)) unique.set(id, m);
+          }
+
+          const fixtures = Array.from(unique.values());
           const matches = fixtures.map(convertApiFootballMatchToFootballMatch);
-          successfulSource = successfulSource ?? 'api-football';
           if (matches.length > 0) {
+            successfulSource = successfulSource ?? 'api-football';
             const processedMatches = processCrests(matches);
             const disabled = config?.apiFootballDisabledLeagueIds ?? [];
-            const visibleMatches =
-              disabled.length > 0 ? processedMatches.filter((m) => !disabled.includes(m.competition.id)) : processedMatches;
+            const visibleMatches = disabled.length > 0 ? processedMatches.filter((m) => !disabled.includes(m.competition.id)) : processedMatches;
             setApiSource('api-football');
             setRealMatches(visibleMatches);
             if (visibleMatches.length === 0 && processedMatches.length > 0 && disabled.length > 0) {
@@ -857,120 +1439,66 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
           }
           toast.info(`API-Football não retornou partidas para o período ${dateFrom} → ${dateTo}`);
         } catch (error) {
+          const msg = error instanceof Error ? error.message : String(error ?? '');
+          if (!warnedQuotaRef.current && /request limit for the day|reached the request limit|you have reached the request limit|\\brequests\\b\\s*:/i.test(msg)) {
+            warnedQuotaRef.current = true;
+            toast.warning('Cota diária da API-Football atingida. Usando Betfair para manter o sistema ativo.');
+          }
           console.warn('⚠️ API-Football falhou, tentando próxima opção...', error);
         }
       }
 
-      if (footballDataApiKey) {
-        try {
-          const service = new FootballDataService(footballDataApiKey);
-          const matches = await service.getMatches(undefined, dateFrom, dateTo);
-          successfulSource = successfulSource ?? 'football-data';
-          if (matches.length > 0) {
-            const processedMatches = processCrests(matches);
-            setApiSource('football-data');
-            setRealMatches(processedMatches);
-            const predictionsById = await generatePredictionsForMatches('football-data', processedMatches);
-            setRealPredictions(predictionsById);
-            setLastUpdatedAt(new Date());
-            writeCache({
-              dateFrom,
-              dateTo,
-              apiSource: 'football-data',
-              matches: processedMatches,
-              predictions: predictionsById,
-              configHash: '',
-            });
-            toast.success(`${matches.length} partidas carregadas (Football-Data)`);
-            return;
-          }
-        } catch (error) {
-          console.warn('⚠️ Football-Data falhou, tentando próxima opção...', error);
-        }
-      }
-
-      if (openLigaDbEnabled) {
-        try {
-          const service = new OpenLigaDbService();
-          const openLigaMatches = await service.getMatchesByDateRange({ dateFrom, dateTo });
-          const matches = openLigaMatches.map(convertOpenLigaMatchToFootballMatch);
-          successfulSource = successfulSource ?? 'openligadb';
-          if (matches.length > 0) {
-            const processedMatches = processCrests(matches);
-            setApiSource('openligadb');
-            setRealMatches(processedMatches);
-            const predictionsById = await generatePredictionsForMatches('openligadb', processedMatches);
-            setRealPredictions(predictionsById);
-            setLastUpdatedAt(new Date());
-            writeCache({
-              dateFrom,
-              dateTo,
-              apiSource: 'openligadb',
-              matches: processedMatches,
-              predictions: predictionsById,
-              configHash: '',
-            });
-            toast.success(`${matches.length} partidas carregadas (OpenLigaDB)`);
-            return;
-          }
-        } catch (error) {
-          console.warn('⚠️ OpenLigaDB falhou, usando fallback...', error);
-        }
-      }
-
-      if (!successfulSource) {
-        try {
-          const { projectId, publicAnonKey } = await import('/utils/supabase/info');
-          const res = await fetch(
-            `https://${projectId}.supabase.co/functions/v1/make-server-1119702f/betfair/matches/list`,
-            {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                Authorization: `Bearer ${publicAnonKey}`,
-                apikey: publicAnonKey,
-              },
-              body: JSON.stringify({
-                dateFrom,
-                dateTo,
-                maxResults: selectedDate === 'today' ? 120 : selectedDate === 'week' ? 220 : 300,
-              }),
+      try {
+        const { projectId, publicAnonKey } = await import('/utils/supabase/info');
+        const res = await fetch(
+          `https://${projectId}.supabase.co/functions/v1/betfair-server-1119702f/betfair/matches/list`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              apikey: publicAnonKey,
+              Authorization: `Bearer ${publicAnonKey}`,
             },
-          );
-
-          const raw = await res.text().catch(() => '');
-          let data: any = null;
-          try {
-            data = raw ? JSON.parse(raw) : null;
-          } catch {
-            data = null;
-          }
-
-          if (!res.ok || !data?.ok) throw new Error(String(data?.error ?? `HTTP ${res.status} ${res.statusText}`));
-
-          const matches = Array.isArray(data?.matches) ? (data.matches as FootballMatch[]) : [];
-          successfulSource = successfulSource ?? 'betfair';
-          if (matches.length > 0) {
-            const processedMatches = processCrests(matches);
-            setApiSource('betfair');
-            setRealMatches(processedMatches);
-            const predictionsById = await generatePredictionsForMatches('betfair', processedMatches);
-            setRealPredictions(predictionsById);
-            setLastUpdatedAt(new Date());
-            writeCache({
+            body: JSON.stringify({
               dateFrom,
               dateTo,
-              apiSource: 'betfair',
-              matches: processedMatches,
-              predictions: predictionsById,
-              configHash: '',
-            });
-            toast.success(`${matches.length} partidas carregadas (Betfair)`);
-            return;
-          }
-        } catch (error) {
-          console.warn('⚠️ Betfair falhou, usando fallback...', error);
+              maxResults: selectedDate === 'today' ? 120 : selectedDate === 'week' ? 220 : 300,
+            }),
+          },
+        );
+
+        const raw = await res.text().catch(() => '');
+        let data: any = null;
+        try {
+          data = raw ? JSON.parse(raw) : null;
+        } catch {
+          data = null;
         }
+
+        if (!res.ok || !data?.ok) throw new Error(String(data?.error ?? `HTTP ${res.status} ${res.statusText}`));
+
+        const matches = Array.isArray(data?.matches) ? (data.matches as FootballMatch[]) : [];
+        successfulSource = successfulSource ?? 'betfair';
+        if (matches.length > 0) {
+          const processedMatches = processCrests(matches);
+          setApiSource('betfair');
+          setRealMatches(processedMatches);
+          const predictionsById = await generatePredictionsForMatches('betfair', processedMatches);
+          setRealPredictions(predictionsById);
+          setLastUpdatedAt(new Date());
+          writeCache({
+            dateFrom,
+            dateTo,
+            apiSource: 'betfair',
+            matches: processedMatches,
+            predictions: predictionsById,
+            configHash: '',
+          });
+          toast.success(`${matches.length} partidas carregadas (Betfair)`);
+          return;
+        }
+      } catch (error) {
+        console.warn('⚠️ Betfair falhou, usando fallback...', error);
       }
 
       if (successfulSource) {
@@ -997,17 +1525,17 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
   // Função para gerar dados mock quando a API falha
   const getMockMatches = () => {
     const teams = [
-      { id: 1765, name: 'Flamengo', crest: 'https://crests.football-data.org/1765.png', shortName: 'FLA' },
-      { id: 1770, name: 'Palmeiras', crest: 'https://crests.football-data.org/1770.png', shortName: 'PAL' },
-      { id: 1766, name: 'São Paulo', crest: 'https://crests.football-data.org/1766.png', shortName: 'SAO' },
-      { id: 1769, name: 'Grêmio', crest: 'https://crests.football-data.org/1769.png', shortName: 'GRE' },
-      { id: 66, name: 'Manchester United', crest: 'https://crests.football-data.org/66.png', shortName: 'MUN' },
-      { id: 57, name: 'Arsenal', crest: 'https://crests.football-data.org/57.png', shortName: 'ARS' },
+      { id: 1765, name: 'Flamengo', crest: '', shortName: 'FLA' },
+      { id: 1770, name: 'Palmeiras', crest: '', shortName: 'PAL' },
+      { id: 1766, name: 'São Paulo', crest: '', shortName: 'SAO' },
+      { id: 1769, name: 'Grêmio', crest: '', shortName: 'GRE' },
+      { id: 66, name: 'Manchester United', crest: '', shortName: 'MUN' },
+      { id: 57, name: 'Arsenal', crest: '', shortName: 'ARS' },
     ];
 
     const competitions = [
-      { id: 2013, name: 'Campeonato Brasileiro Série A', emblem: 'https://crests.football-data.org/764.svg' },
-      { id: 2021, name: 'Premier League', emblem: 'https://crests.football-data.org/PL.png' },
+      { id: 2013, name: 'Campeonato Brasileiro Série A', emblem: '' },
+      { id: 2021, name: 'Premier League', emblem: '' },
     ];
 
     const today = new Date();
@@ -1062,7 +1590,8 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
     return realMatches.map((footballMatch) => {
       const matchDate = parseApiDate(footballMatch.utcDate);
       const fullTime = footballMatch.score?.fullTime;
-        const status = toMatchStatus(footballMatch.status);
+      const live = liveUpdates[String(footballMatch.id)] ?? null;
+      const status = toMatchStatus(String(live?.statusShort ?? footballMatch.status));
       return {
         id: footballMatch.id.toString(),
         homeTeam: footballMatch.homeTeam.name,
@@ -1079,17 +1608,17 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
           hour: '2-digit',
           minute: '2-digit',
         }),
-          status,
+        status,
         result: {
-          home: typeof fullTime?.home === 'number' ? fullTime.home : null,
-          away: typeof fullTime?.away === 'number' ? fullTime.away : null,
+          home: typeof live?.goalsHome === 'number' ? live.goalsHome : typeof fullTime?.home === 'number' ? fullTime.home : null,
+          away: typeof live?.goalsAway === 'number' ? live.goalsAway : typeof fullTime?.away === 'number' ? fullTime.away : null,
         },
-        liveElapsed: footballMatch.live?.elapsed ?? null,
-        liveStatusShort: footballMatch.live?.statusShort ?? undefined,
-        liveExtra: footballMatch.live?.extra ?? null,
+        liveElapsed: typeof live?.elapsed === 'number' ? live.elapsed : (footballMatch.live?.elapsed ?? null),
+        liveStatusShort: (live?.statusShort ?? footballMatch.live?.statusShort) ?? undefined,
+        liveExtra: typeof live?.extra === 'number' ? live.extra : (footballMatch.live?.extra ?? null),
       };
     }) as DisplayMatch[];
-  }, [TIME_ZONE, apiSource, parseApiDate, realMatches]);
+  }, [TIME_ZONE, apiSource, liveUpdates, parseApiDate, realMatches]);
 
   const baseFilteredMatches = useMemo(() => {
     const now = new Date();
@@ -1146,9 +1675,13 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
         return false;
       }
 
+      if (dismissedMatchIdSet.has(match.id)) {
+        return false;
+      }
+
       return true;
     });
-  }, [favoritesOnly, favoriteMatchIds, getDayKey, matchesToUse, selectedDate, selectedStatus]);
+  }, [dismissedMatchIdSet, favoritesOnly, favoriteMatchIds, getDayKey, matchesToUse, selectedDate, selectedStatus]);
 
   const filteredMatches = useMemo(() => {
     return baseFilteredMatches.filter((match) => {
@@ -1162,9 +1695,29 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
         return false;
       }
 
+      const query = String(quickSearch ?? '').trim();
+      if (query) {
+        const normalize = (v: string) =>
+          String(v ?? '')
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .toLowerCase()
+            .replace(/['’]/g, '')
+            .replace(/[^0-9a-z\s]+/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+        const tokens = normalize(query).split(' ').filter(Boolean);
+        if (tokens.length > 0) {
+          const hay = normalize(`${match.homeTeam} ${match.awayTeam}`);
+          for (const t of tokens) {
+            if (!hay.includes(t)) return false;
+          }
+        }
+      }
+
       return true;
     });
-  }, [baseFilteredMatches, selectedCountry, selectedLeague]);
+  }, [baseFilteredMatches, quickSearch, selectedCountry, selectedLeague]);
 
   const optionMatches = useMemo(() => {
     if (!favoritesOnly) return matchesToUse;
@@ -1278,95 +1831,6 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
 
     return entries;
   }, [filteredMatches, groupMode]);
-
-  // Jogos premium (alta confiança + melhor retorno)
-  const premiumMatches = useMemo(() => {
-    const pickPrediction = (matchId: string) => {
-      return apiSource !== 'mock' ? realPredictions[matchId] : mockPredictions.find((p) => p.matchId === matchId);
-    };
-
-    const matchById = apiSource !== 'mock' ? new Map(realMatches.map((m) => [m.id.toString(), m] as const)) : null;
-    const sourceMatches = filteredMatches;
-
-    const mapped = sourceMatches
-      .map((match) => {
-        const prediction = pickPrediction(match.id);
-        if (!prediction) return null;
-
-        const footballMatch = matchById ? matchById.get(match.id) : undefined;
-        const marketOdd = getBetfairBackOdd(footballMatch, prediction.winner.prediction);
-        const fairOdds = fairOddsFromConfidence(prediction.winner.confidence);
-        const ev =
-          marketOdd != null && fairOdds != null ? expectedValueFromProbAndOdd(fairProbFromConfidence(prediction.winner.confidence), marketOdd) : null;
-
-        const scoreKey = normalizeScoreKey(prediction.correctScore.score);
-        const csBack = getBetfairCorrectScoreBackOdd(footballMatch, scoreKey);
-        const csProb = getBetfairCorrectScoreProb(footballMatch, scoreKey);
-        const csWinner = footballMatch?.betfair?.correctScore?.summary?.winner ?? null;
-        const csAlign = csWinner ? csWinner === prediction.winner.prediction : null;
-
-        const showOdd = marketOdd ?? prediction.winner.odds;
-        const rankScore =
-          (typeof csProb === 'number' ? csProb * 100 : 0) +
-          (typeof ev === 'number' ? ev * 35 : 0) +
-          prediction.aiConfidence * 0.12 +
-          (csAlign === true ? 2 : csAlign === false ? -2 : 0);
-        return {
-          id: match.id,
-          homeTeam: match.homeTeam,
-          awayTeam: match.awayTeam,
-          homeCrest: match.homeCrest || '',
-          awayCrest: match.awayCrest || '',
-          league: match.league,
-          time: `${new Date(match.date).toLocaleDateString('pt-BR')} - ${match.time}`,
-          aiConfidence: prediction.aiConfidence,
-          prediction:
-            prediction.winner.prediction === 'home'
-              ? `Vitória ${match.homeTeam}`
-              : prediction.winner.prediction === 'away'
-              ? `Vitória ${match.awayTeam}`
-              : 'Empate',
-          odds: showOdd,
-          potentialReturn: Math.round((showOdd - 1) * 100),
-          isPremium: true,
-          marketOdd,
-          fairOdds,
-          ev,
-          csScore: scoreKey,
-          csBack,
-          csProb,
-          csAlign,
-          rankScore,
-          tags: [
-            'Alta Confiança',
-            `${prediction.aiConfidence}% IA`,
-            marketOdd != null ? `Odd Betfair ${marketOdd.toFixed(2)}` : 'Odd estimada',
-            scoreKey && csBack != null ? `CS ${scoreKey} @ ${csBack.toFixed(2)}` : scoreKey ? `CS ${scoreKey}` : 'Placar',
-            typeof csProb === 'number' ? `CS ${(csProb * 100).toFixed(1)}%` : csAlign === true ? 'CS alinhado' : csAlign === false ? 'CS diverge' : 'Recomendado',
-            typeof ev === 'number' ? `Valor ${(ev * 100).toFixed(1)}%` : 'Recomendado',
-          ],
-        };
-      })
-      .filter((m): m is NonNullable<typeof m> => !!m)
-      .filter((m) => m.aiConfidence >= 80);
-
-    const withMarket = mapped.filter((m) => m.marketOdd != null);
-    const preferMarket = withMarket.length >= 3;
-
-    return mapped
-      .filter((m) => (!preferMarket ? true : m.marketOdd != null))
-      .sort((a, b) => {
-        const ar = typeof (a as any).rankScore === 'number' ? (a as any).rankScore : -999;
-        const br = typeof (b as any).rankScore === 'number' ? (b as any).rankScore : -999;
-        if (br !== ar) return br - ar;
-        const ae = typeof a.ev === 'number' ? a.ev : -999;
-        const be = typeof b.ev === 'number' ? b.ev : -999;
-        if (be !== ae) return be - ae;
-        if (b.aiConfidence !== a.aiConfidence) return b.aiConfidence - a.aiConfidence;
-        return b.potentialReturn - a.potentialReturn;
-      })
-      .slice(0, 5);
-  }, [apiSource, filteredMatches, realMatches, realPredictions]);
 
   const predictionByMatchId = useMemo(() => {
     if (apiSource !== 'mock') return realPredictions;
@@ -1687,7 +2151,7 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
     isSyncingBetfairOddsRef.current = true;
     try {
       const { projectId, publicAnonKey } = await import('/utils/supabase/info');
-      const url = `https://${projectId}.supabase.co/functions/v1/make-server-1119702f/betfair/match/resolve`;
+      const url = `https://${projectId}.supabase.co/functions/v1/betfair-server-1119702f/betfair/match/resolve`;
       const concurrency = 4;
 
       for (let i = 0; i < items.length; i += concurrency) {
@@ -1698,8 +2162,8 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
               method: 'POST',
               headers: {
                 'Content-Type': 'application/json',
-                Authorization: `Bearer ${publicAnonKey}`,
                 apikey: publicAnonKey,
+                Authorization: `Bearer ${publicAnonKey}`,
               },
               body: JSON.stringify({
                 homeTeam: it.match.homeTeam?.name ?? '',
@@ -1735,72 +2199,6 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
     void syncBetfairOddsForTopMatches();
   }, [apiSource, realMatches, realPredictions]);
 
-  const refreshLiveMatches = async () => {
-    if (apiSource !== 'api-football') return;
-    const snapshot = realMatchesRef.current;
-    if (snapshot.length === 0) return;
-    const candidates = snapshot.filter((m) => {
-      const status = toMatchStatus(m.status);
-      if (status === 'live') return true;
-      if (status !== 'scheduled') return false;
-      const kickoff = new Date(m.utcDate).getTime();
-      if (!Number.isFinite(kickoff)) return false;
-      const now = Date.now();
-      return now >= kickoff + 60_000 && now <= kickoff + 3 * 60 * 60_000;
-    });
-    if (candidates.length === 0) return;
-
-    const config = loadApiConfig();
-    const apiFootballKey = config?.apiFootballKey?.trim();
-    if (!apiFootballKey) return;
-
-    try {
-      const service = new ApiFootballService(apiFootballKey);
-      const disabled = new Set((config?.apiFootballDisabledLeagueIds ?? []).map(Number).filter(Number.isFinite));
-      const updates: FootballMatch[] = [];
-      const ids = candidates.slice(0, 20).map((m) => m.id);
-      const concurrency = 5;
-
-      for (let i = 0; i < ids.length; i += concurrency) {
-        const chunk = ids.slice(i, i + concurrency);
-        const fixturesChunks = await Promise.all(
-          chunk.map(async (id) => {
-            const res = await service.getFixtures({ fixtureId: id, timezone: TIME_ZONE });
-            return res[0] ?? null;
-          }),
-        );
-
-        for (const fixture of fixturesChunks) {
-          if (!fixture) continue;
-          const updated = processCrests([convertApiFootballMatchToFootballMatch(fixture)])[0];
-          if (disabled.has(updated.competition.id)) continue;
-          updates.push(updated);
-        }
-      }
-      if (updates.length === 0) return;
-
-      setRealMatches((prev) => {
-        const byId = new Map<number, FootballMatch>();
-        for (const u of updates) byId.set(u.id, u);
-        return prev.map((m) => byId.get(m.id) ?? m);
-      });
-
-      for (const u of updates) updateCacheMatch(u.id.toString(), u);
-      setLastUpdatedAt(new Date());
-    } catch {
-      return;
-    }
-  };
-
-  useEffect(() => {
-    if (apiSource !== 'api-football') return;
-    void refreshLiveMatches();
-    const id = window.setInterval(() => {
-      void refreshLiveMatches();
-    }, 20_000);
-    return () => window.clearInterval(id);
-  }, [apiSource]);
-
   const handleRefreshMatch = async (matchId: string) => {
     if (apiSource === 'mock') return;
     if (refreshingMatchIds.has(matchId)) return;
@@ -1822,14 +2220,9 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
         if (!fixture) throw new Error('Partida não encontrada na API-Football');
 
         const updated = processCrests([convertApiFootballMatchToFootballMatch(fixture)])[0];
-        const disabled = config?.apiFootballDisabledLeagueIds ?? [];
-
-        if (disabled.includes(updated.competition.id)) {
-          setRealMatches((prev) => prev.filter((m) => m.id.toString() !== matchId));
-          updateCacheMatch(matchId, null);
-          toast.success('Partida removida (campeonato desativado)');
-          return;
-        }
+        const disabledSet = new Set((config?.apiFootballDisabledLeagueIds ?? []).map(Number).filter(Number.isFinite));
+        const leagueId = Number(updated.competition.id);
+        const isDisabledLeague = Number.isFinite(leagueId) && disabledSet.has(leagueId);
 
         setRealMatches((prev) => prev.map((m) => (m.id.toString() === matchId ? updated : m)));
         updateCacheMatch(matchId, updated);
@@ -1838,20 +2231,11 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
           const preds = await generatePredictionsForMatches('api-football', [updated], { force: true });
           setRealPredictions((prev) => ({ ...prev, ...preds }));
         } catch {}
-        toast.success('Partida e previsão atualizadas');
-        return;
-      }
-
-      if (apiSource === 'football-data') {
-        const apiKey = config?.footballDataApiKey?.trim();
-        if (!apiKey) throw new Error('Football-data.org não configurada');
-        const service = new FootballDataService(apiKey);
-        const updated = processCrests([await service.getMatchById(Number(matchId))])[0];
-
-        setRealMatches((prev) => prev.map((m) => (m.id.toString() === matchId ? updated : m)));
-        updateCacheMatch(matchId, updated);
-        setLastUpdatedAt(new Date());
-        toast.success('Partida atualizada');
+        if (isDisabledLeague) {
+          toast.warning('Partida atualizada, mas o campeonato está desativado em Configurações → Campeonatos.');
+        } else {
+          toast.success('Partida e previsão atualizadas');
+        }
         return;
       }
 
@@ -1886,20 +2270,12 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
           onRefresh={handleManualRefreshMatches}
           isRefreshing={isLoadingMatches}
           onAddMatch={() => setAddMatchOpen(true)}
+          quickSearch={quickSearch}
+          onQuickSearchChange={setQuickSearch}
         />
       </div>
 
       <div className="p-4 md:p-6">
-        {/* Carrossel Premium */}
-        <div className="hidden md:block">
-          {premiumMatches.length > 0 && (
-            <PremiumCarousel
-              matches={premiumMatches}
-              onMatchClick={handleViewDetails}
-            />
-          )}
-        </div>
-
         {/* Estatísticas */}
         <div className="md:hidden mb-5">
           <div className="bg-white border border-gray-200 rounded-2xl shadow-sm px-3 py-3">
@@ -1914,7 +2290,7 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
                 <div className="text-xs text-gray-600">Alta</div>
                 <div className="text-sm font-bold text-gray-900 tabular-nums">
                   {Object.values(predictionByMatchId).filter(
-                    (p) => p.aiConfidence >= 80 && filteredMatches.some((m) => m.id === p.matchId),
+                    (p) => p.aiConfidence >= 50 && filteredMatches.some((m) => m.id === p.matchId),
                   ).length}
                 </div>
               </div>
@@ -1958,7 +2334,7 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
             <div className="text-sm text-gray-600 mb-1">Alta Confiança</div>
             <div className="text-2xl font-bold text-green-600">
               {Object.values(predictionByMatchId).filter(
-                (p) => p.aiConfidence >= 80 && filteredMatches.some((m) => m.id === p.matchId),
+                (p) => p.aiConfidence >= 50 && filteredMatches.some((m) => m.id === p.matchId),
               ).length}
             </div>
           </div>
@@ -2006,6 +2382,7 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
                     prediction={prediction}
                     apiSource={apiSource}
                     onViewDetails={handleViewDetailsMobile}
+                    onRemoveMatch={dismissMatch}
                     homeCrest={match.homeCrest}
                     awayCrest={match.awayCrest}
                     footballMatch={apiSource !== 'mock' ? realMatchById[match.id] : undefined}
@@ -2034,6 +2411,7 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
                           prediction={prediction}
                           apiSource={apiSource}
                           onViewDetails={handleViewDetails}
+                          onRemoveMatch={dismissMatch}
                           homeCrest={match.homeCrest}
                           awayCrest={match.awayCrest}
                           footballMatch={apiSource !== 'mock' ? realMatchById[match.id] : undefined}
@@ -2058,7 +2436,7 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
           <DialogHeader>
             <DialogTitle>Adicionar jogo do dia</DialogTitle>
             <DialogDescription>
-              Digite o nome de um time para localizar fixtures do dia na API-Football e adicionar à lista do Início.
+              Digite o nome de um time para localizar jogos do dia (API-Football ou Betfair quando necessário) e adicionar à lista do Início.
             </DialogDescription>
           </DialogHeader>
 
@@ -2076,7 +2454,15 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
           </div>
 
           {addMatchError ? (
-            <div className="p-3 rounded-xl border border-red-200 bg-red-50 text-red-900 text-sm">{addMatchError}</div>
+            <div
+              className={
+                addMatchError.toLowerCase().includes('betfair')
+                  ? 'p-3 rounded-xl border border-yellow-200 bg-yellow-50 text-yellow-900 text-sm'
+                  : 'p-3 rounded-xl border border-red-200 bg-red-50 text-red-900 text-sm'
+              }
+            >
+              {addMatchError}
+            </div>
           ) : null}
 
           <div className="border rounded-xl overflow-hidden">
@@ -2090,11 +2476,17 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
                 <div className="p-6 text-sm text-gray-600">Nenhum jogo encontrado para esse texto.</div>
               ) : (
                 <div className="divide-y bg-white">
-                  {addMatchResults.map((f) => {
-                    const id = String(f.fixture.id);
-                    const kickoff = Number.isFinite(Number(f.fixture.timestamp))
-                      ? new Date(f.fixture.timestamp * 1000)
-                      : new Date(f.fixture.date);
+                  {addMatchResults.map((row) => {
+                    const isApi = row.source === 'api-football';
+                    const f = isApi ? row.fixture : null;
+                    const bm = !isApi ? row.match : null;
+
+                    const id = isApi ? String(f!.fixture.id) : String(bm!.id);
+                    const kickoff = isApi
+                      ? Number.isFinite(Number(f!.fixture.timestamp))
+                        ? new Date(f!.fixture.timestamp * 1000)
+                        : new Date(f!.fixture.date)
+                      : new Date(bm!.utcDate);
                     const time = Number.isFinite(kickoff.getTime())
                       ? kickoff.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
                       : '--:--';
@@ -2105,19 +2497,25 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
                     const kickoffKey = Number.isFinite(kickoff.getTime()) ? getDayKey(kickoff) : '';
                     const yesterdayKey = getDayKey(new Date(Date.now() - 24 * 60 * 60 * 1000));
                     const dayWord = kickoffKey === todayKey ? 'Hoje' : kickoffKey === yesterdayKey ? 'Ontem' : '';
-                    const statusShort = String(f.fixture.status.short ?? 'NS');
+                    const statusShort = isApi ? String(f!.fixture.status.short ?? 'NS') : String(bm!.status ?? 'SCHEDULED');
                     const status = toMatchStatus(statusShort);
                     const statusLabel = status === 'live' ? 'AO VIVO' : status === 'finished' ? 'FINALIZADO' : 'EM BREVE';
                     const statusVariant = status === 'live' ? 'default' : status === 'finished' ? 'secondary' : 'outline';
-                    const venue = String(f.fixture?.venue?.name ?? '').trim();
+                    const venue = isApi ? String(f!.fixture?.venue?.name ?? '').trim() : '';
                     const scoreText =
-                      typeof f.goals?.home === 'number' && typeof f.goals?.away === 'number'
-                        ? `${f.goals.home} × ${f.goals.away}`
-                        : '×';
+                      isApi
+                        ? typeof f!.goals?.home === 'number' && typeof f!.goals?.away === 'number'
+                          ? `${f!.goals.home} × ${f!.goals.away}`
+                          : '×'
+                        : typeof bm?.score?.fullTime?.home === 'number' && typeof bm?.score?.fullTime?.away === 'number'
+                          ? `${bm.score.fullTime.home} × ${bm.score.fullTime.away}`
+                          : '×';
                     return (
                       <div key={id} className="px-4 py-3 hover:bg-gray-50 transition-colors">
                         <div className="flex items-center justify-between gap-3">
-                          <div className="text-[11px] text-gray-500 truncate">{venue || '—'}</div>
+                          <div className="text-[11px] text-gray-500 truncate">
+                            {venue || (isApi ? String(f?.league?.name ?? '—') : String(bm?.competition?.name ?? '—'))}
+                          </div>
                           <div className="flex items-center gap-2">
                             <Badge variant={statusVariant as any}>{statusLabel}</Badge>
                             <div className="text-[11px] text-gray-500 tabular-nums">
@@ -2131,16 +2529,20 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
 
                         <button
                           className="w-full text-left"
-                          onClick={() => addRequestedFixture(f.fixture.id, { open: true })}
+                          onClick={() =>
+                            isApi ? addRequestedFixture(f!.fixture.id, { open: true }) : addRequestedBetfairMatch(bm!, { open: true })
+                          }
                         >
                           <div className="mt-3 mx-auto w-full max-w-[980px]">
                             <div className="grid grid-cols-[1fr_120px_1fr] items-center gap-3">
                               <div className="flex items-center justify-end gap-2 min-w-0">
                                 <div className="text-sm font-medium text-gray-900 leading-tight text-right">
-                                  {f.teams.home.name}
+                                  {isApi ? f!.teams.home.name : bm!.homeTeam.name}
                                 </div>
-                                {f.teams.home.logo ? (
-                                  <img src={f.teams.home.logo} alt="" className="w-9 h-9 shrink-0" />
+                                {(isApi ? f!.teams.home.logo : '') ? (
+                                  <img src={f!.teams.home.logo} alt="" className="w-9 h-9 shrink-0" />
+                                ) : !isApi && bm!.homeTeam.crest ? (
+                                  <img src={bm!.homeTeam.crest} alt="" className="w-9 h-9 shrink-0" />
                                 ) : null}
                               </div>
 
@@ -2151,11 +2553,13 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
                               </div>
 
                               <div className="flex items-center justify-start gap-2 min-w-0">
-                                {f.teams.away.logo ? (
-                                  <img src={f.teams.away.logo} alt="" className="w-9 h-9 shrink-0" />
+                                {(isApi ? f!.teams.away.logo : '') ? (
+                                  <img src={f!.teams.away.logo} alt="" className="w-9 h-9 shrink-0" />
+                                ) : !isApi && bm!.awayTeam.crest ? (
+                                  <img src={bm!.awayTeam.crest} alt="" className="w-9 h-9 shrink-0" />
                                 ) : null}
                                 <div className="text-sm font-medium text-gray-900 leading-tight">
-                                  {f.teams.away.name}
+                                  {isApi ? f!.teams.away.name : bm!.awayTeam.name}
                                 </div>
                               </div>
                             </div>

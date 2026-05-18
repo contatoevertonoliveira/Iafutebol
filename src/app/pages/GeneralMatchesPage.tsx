@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
-import { Clock, Dices, Globe, Loader2, RefreshCcw, Search, Trophy } from 'lucide-react';
+import { Clock, Dices, Eye, Globe, Loader2, RefreshCcw, Search, Star, Trophy } from 'lucide-react';
 import { toast } from 'sonner';
 import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
@@ -24,7 +24,7 @@ type FixtureStatsResponseItem = {
 
 const TIME_ZONE = 'America/Sao_Paulo';
 
-type ApiSource = 'api-football' | 'football-data' | 'openligadb' | 'betfair' | 'mock';
+type ApiSource = 'api-football' | 'betfair' | 'mock';
 
 type MatchesCache = {
   version: number;
@@ -158,9 +158,95 @@ const readLeaguesCatalogCache = (): ApiFootballLeague[] => {
 
 const toBucket = (m: ApiFootballMatch): MatchBucket => {
   const short = String(m?.fixture?.status?.short ?? '').toUpperCase();
-  if (['FT', 'AET', 'PEN'].includes(short)) return 'finished';
-  if (['1H', '2H', 'HT', 'ET', 'BT', 'P', 'LIVE', 'INT', 'SUSP'].includes(short)) return 'live';
+  if (['FT', 'AET', 'PEN', 'FINISHED', 'CLOSED', 'SETTLED', 'ENDED', 'END', 'RESULT', 'ABANDONED', 'CANCELLED', 'CANCELED'].includes(short)) {
+    return 'finished';
+  }
+  if (
+    [
+      '1H',
+      '2H',
+      'HT',
+      'ET',
+      'BT',
+      'P',
+      'LIVE',
+      'IN_PLAY',
+      'INPLAY',
+      'PAUSED',
+      'BREAK',
+      'INT',
+      'SUSP',
+      'SUSPENDED',
+      'INTERRUPTED',
+    ].includes(short)
+  ) {
+    return 'live';
+  }
   return 'scheduled';
+};
+
+const betfairToApiFootballMatch = (m: any): ApiFootballMatch => {
+  const utcDate = String(m?.utcDate ?? '').trim() || new Date().toISOString();
+  const date = new Date(utcDate);
+  const ts = Number.isFinite(date.getTime()) ? Math.floor(date.getTime() / 1000) : 0;
+
+  const statusShort = String(m?.status ?? '').trim() || 'NS';
+  const elapsedRaw = m?.live?.elapsed;
+  const elapsed = Number(elapsedRaw);
+  const goalsHome = m?.score?.fullTime?.home;
+  const goalsAway = m?.score?.fullTime?.away;
+
+  const leagueName = String(m?.competition?.name ?? '').trim() || 'Soccer';
+  const leagueCountry = String(m?.competition?.area?.name ?? '').trim() || '';
+
+  const homeName = String(m?.homeTeam?.name ?? '').trim() || 'Home';
+  const awayName = String(m?.awayTeam?.name ?? '').trim() || 'Away';
+  const homeLogo = String(m?.homeTeam?.crest ?? '').trim() || '';
+  const awayLogo = String(m?.awayTeam?.crest ?? '').trim() || '';
+
+  const fixtureId = Number(m?.id);
+  const id = Number.isFinite(fixtureId) ? fixtureId : Math.floor(9_000_000_000 + Math.random() * 900_000_000);
+  const season = Number.isFinite(date.getTime()) ? date.getFullYear() : new Date().getFullYear();
+
+  return {
+    fixture: {
+      id,
+      referee: null,
+      timezone: 'UTC',
+      date: utcDate,
+      timestamp: ts,
+      venue: { id: null, name: null, city: null },
+      status: {
+        long: statusShort,
+        short: statusShort,
+        elapsed: Number.isFinite(elapsed) ? elapsed : null,
+        extra: null,
+      },
+    },
+    league: {
+      id: 0,
+      name: leagueName,
+      type: 'League',
+      logo: '',
+      country: leagueCountry,
+      flag: '',
+      season,
+    },
+    teams: {
+      home: { id: 0, name: homeName, code: '', country: '', founded: 0, national: false, logo: homeLogo },
+      away: { id: 0, name: awayName, code: '', country: '', founded: 0, national: false, logo: awayLogo },
+    },
+    goals: {
+      home: typeof goalsHome === 'number' ? goalsHome : null,
+      away: typeof goalsAway === 'number' ? goalsAway : null,
+    },
+    score: {
+      halftime: { home: null, away: null },
+      fulltime: { home: typeof goalsHome === 'number' ? goalsHome : null, away: typeof goalsAway === 'number' ? goalsAway : null },
+      extratime: { home: null, away: null },
+      penalty: { home: null, away: null },
+    },
+  };
 };
 
 const isFamousLeague = (m: ApiFootballMatch): boolean => {
@@ -207,11 +293,77 @@ const statusLabel = (m: ApiFootballMatch) => {
   return '—';
 };
 
+const normalizeName = (input: unknown) => {
+  const s = String(input ?? '').trim().toLowerCase();
+  if (!s) return '';
+  return s
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+};
+
+const stripTeamNoise = (value: string) => {
+  const n = normalizeName(value);
+  if (!n) return '';
+  const stop = new Set(['fc', 'cf', 'sc', 'ac', 'cd', 'ud', 'sv', 'de', 'da', 'do', 'the', 'club', 'clube']);
+  return n
+    .split(' ')
+    .filter((t) => t && t.length >= 3 && !stop.has(t) && !/^\d+$/.test(t))
+    .join(' ')
+    .trim();
+};
+
+const scoreTeams = (homeA: string, awayA: string, homeB: string, awayB: string) => {
+  const ha = stripTeamNoise(homeA);
+  const aa = stripTeamNoise(awayA);
+  const hb = stripTeamNoise(homeB);
+  const ab = stripTeamNoise(awayB);
+  if (!ha || !aa || !hb || !ab) return 0;
+
+  const tok = (s: string) => new Set(s.split(' ').filter(Boolean));
+  const haT = tok(ha);
+  const aaT = tok(aa);
+  const hbT = tok(hb);
+  const abT = tok(ab);
+
+  const inter = (a: Set<string>, b: Set<string>) => {
+    let n = 0;
+    for (const t of a) if (b.has(t)) n += 1;
+    return n;
+  };
+
+  const exactBonus = (x: string, y: string) => (x === y ? 6 : 0);
+  const firstTokBonus = (x: string, y: string) => {
+    const a0 = x.split(' ')[0] ?? '';
+    const b0 = y.split(' ')[0] ?? '';
+    return a0 && b0 && a0 === b0 ? 2 : 0;
+  };
+
+  const direct =
+    inter(haT, hbT) * 2 + inter(aaT, abT) * 2 + exactBonus(ha, hb) + exactBonus(aa, ab) + firstTokBonus(ha, hb) + firstTokBonus(aa, ab);
+
+  const swapped =
+    inter(haT, abT) * 2 + inter(aaT, hbT) * 2 + exactBonus(ha, ab) + exactBonus(aa, hb) + firstTokBonus(ha, ab) + firstTokBonus(aa, hb);
+
+  return Math.max(direct, swapped - 2);
+};
+
 export default function GeneralMatchesPage() {
   const navigate = useNavigate();
   const [config, setConfig] = useState(() => loadApiConfig());
+  const warnedManyLeaguesRef = useRef(false);
+  const warnTooManyActiveLeagues = (count: number) => {
+    if (!Number.isFinite(count) || count <= 30) return;
+    if (warnedManyLeaguesRef.current) return;
+    warnedManyLeaguesRef.current = true;
+    toast.warning(`Muitas ligas ativas (${count}).`, {
+      description: 'Isso pode consumir a cota diária da API-Football. Se necessário, desative ligas em Configurações → Campeonatos.',
+    });
+  };
   const [date, setDate] = useState(() => getDayKey(new Date()));
-  const [bucket, setBucket] = useState<MatchBucket>('all');
+  const [bucket, setBucket] = useState<MatchBucket>('live');
   const [country, setCountry] = useState<string>('all');
   const [leagueKey, setLeagueKey] = useState<string>('all');
   const [search, setSearch] = useState('');
@@ -221,6 +373,18 @@ export default function GeneralMatchesPage() {
   const [error, setError] = useState<string>('');
   const [fixtures, setFixtures] = useState<ApiFootballMatch[]>([]);
   const [lastUpdatedAt, setLastUpdatedAt] = useState<Date | null>(null);
+  const [betfairMatches, setBetfairMatches] = useState<any[]>([]);
+  const [dataSource, setDataSource] = useState<ApiSource>('api-football');
+
+  const betfairById = useMemo(() => {
+    const map = new Map<string, any>();
+    for (const row of Array.isArray(betfairMatches) ? betfairMatches : []) {
+      const id = String((row as any)?.id ?? '').trim();
+      if (!id) continue;
+      if (!map.has(id)) map.set(id, row);
+    }
+    return map;
+  }, [betfairMatches]);
 
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [selected, setSelected] = useState<ApiFootballMatch | null>(null);
@@ -228,6 +392,15 @@ export default function GeneralMatchesPage() {
   const [loadingStatsId, setLoadingStatsId] = useState<string | null>(null);
   const [predictionsByMatchId, setPredictionsByMatchId] = useState<Record<string, Prediction>>(() => readPredictionsCache());
   const [requestedFixtureIds, setRequestedFixtureIds] = useState<Set<string>>(() => readRequestedFixtureIds());
+  const [automationIds, setAutomationIds] = useState<Set<string>>(() => new Set());
+  const [automationTarget, setAutomationTarget] = useState<ApiFootballMatch | null>(null);
+  const [automationActionOpen, setAutomationActionOpen] = useState(false);
+  const [automationIsBusy, setAutomationIsBusy] = useState(false);
+  const [guardOpen, setGuardOpen] = useState(false);
+  const [guardMatchId, setGuardMatchId] = useState<string | null>(null);
+  const [guardOrdersCount, setGuardOrdersCount] = useState(0);
+  const [guardMatchedCount, setGuardMatchedCount] = useState(0);
+  const [guardIsBusy, setGuardIsBusy] = useState(false);
 
   useEffect(() => {
     const refresh = () => {
@@ -255,6 +428,208 @@ export default function GeneralMatchesPage() {
     navigate(`/favorites?open=${encodeURIComponent(id)}`);
   };
 
+  const loadAutomationQueueIds = async () => {
+    try {
+      const { projectId } = await import('/utils/supabase/info');
+      const res = await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/queue/list`, {
+        method: 'POST',
+        body: '{}',
+      });
+      const raw = await res.text().catch(() => '');
+      const data = raw ? JSON.parse(raw) : null;
+      if (!res.ok || !data?.ok) return;
+      const items = Array.isArray(data?.items) ? data.items : [];
+      const ids = new Set<string>(items.map((x: any) => String(x?.matchId ?? '').trim()).filter(Boolean));
+      setAutomationIds(ids);
+    } catch {}
+  };
+
+  useEffect(() => {
+    void loadAutomationQueueIds();
+    const onFocus = () => void loadAutomationQueueIds();
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
+  }, []);
+
+  const getAdminTokenOrToast = () => {
+    const cfg = loadApiConfig();
+    const adminToken = String(cfg?.automationAdminToken ?? '').trim();
+    if (!adminToken) {
+      toast.error('Informe o Automation Admin Token em Configurações → Betfair.');
+      return null;
+    }
+    return adminToken;
+  };
+
+  const fetchOrdersSummary = async (matchId: string) => {
+    const adminToken = getAdminTokenOrToast();
+    if (!adminToken) return null;
+    const { projectId } = await import('/utils/supabase/info');
+    const res = await fetch(
+      `https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/strategy/correctScore/openOrdersSummary`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ matchId, adminToken }),
+      },
+    );
+    const raw = await res.text().catch(() => '');
+    const data = raw ? JSON.parse(raw) : null;
+    if (!res.ok || !data?.ok) throw new Error(String(data?.error ?? `HTTP ${res.status} ${res.statusText}`));
+    const openCount = Number(data?.openOrdersCount);
+    const matchedCount = Number(data?.matchedBetsCount);
+    const open = Number.isFinite(openCount) ? openCount : 0;
+    const matched = Number.isFinite(matchedCount) ? matchedCount : 0;
+    return { open, matched };
+  };
+
+  const cancelOpenOrdersCorrectScore = async (matchId: string) => {
+    const adminToken = getAdminTokenOrToast();
+    if (!adminToken) return false;
+    const { projectId } = await import('/utils/supabase/info');
+    const res = await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/strategy/correctScore/cancelOpenOrders`, {
+      method: 'POST',
+      body: JSON.stringify({ matchId, adminToken }),
+    });
+    const raw = await res.text().catch(() => '');
+    const data = raw ? JSON.parse(raw) : null;
+    if (!res.ok || !data?.ok) throw new Error(String(data?.error ?? `HTTP ${res.status} ${res.statusText}`));
+    return true;
+  };
+
+  const cashoutCorrectScore = async (matchId: string) => {
+    const adminToken = getAdminTokenOrToast();
+    if (!adminToken) return false;
+    const { projectId } = await import('/utils/supabase/info');
+    const res = await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/strategy/correctScore/cashout`, {
+      method: 'POST',
+      body: JSON.stringify({ matchId, adminToken }),
+    });
+    const raw = await res.text().catch(() => '');
+    const data = raw ? JSON.parse(raw) : null;
+    if (!res.ok || !data?.ok) throw new Error(String(data?.error ?? `HTTP ${res.status} ${res.statusText}`));
+    return true;
+  };
+
+  const broadcastAutomationQueueChanged = (payload?: { action?: 'add' | 'remove'; matchId?: string }) => {
+    try {
+      localStorage.setItem(
+        'automation_queue_changed_v1',
+        JSON.stringify({ at: new Date().toISOString(), action: payload?.action ?? null, matchId: payload?.matchId ?? null }),
+      );
+    } catch {}
+    window.dispatchEvent(new Event('automationQueueChanged'));
+  };
+
+  const removeFromAutomation = async (matchId: string) => {
+    try {
+      const { projectId } = await import('/utils/supabase/info');
+      const res = await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/queue/remove`, {
+        method: 'POST',
+        body: JSON.stringify({ matchId }),
+      });
+      const raw = await res.text().catch(() => '');
+      const data = raw ? JSON.parse(raw) : null;
+      if (!res.ok || !data?.ok) throw new Error(String(data?.error ?? `HTTP ${res.status} ${res.statusText}`));
+      setAutomationIds((prev) => {
+        const next = new Set(prev);
+        next.delete(matchId);
+        return next;
+      });
+      broadcastAutomationQueueChanged({ action: 'remove', matchId });
+      toast.success('Item removido da automação');
+      return true;
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      toast.error('Falha ao remover item', { description: msg.slice(0, 220) });
+      return false;
+    }
+  };
+
+  const handleRemoveWithChecks = async (matchId: string) => {
+    try {
+      const summary = await fetchOrdersSummary(matchId);
+      if (summary && (summary.open > 0 || summary.matched > 0)) {
+        setGuardMatchId(matchId);
+        setGuardOrdersCount(summary.open);
+        setGuardMatchedCount(summary.matched);
+        setGuardOpen(true);
+        return;
+      }
+      await removeFromAutomation(matchId);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      toast.error('Falha ao checar ordens', { description: msg.slice(0, 220) });
+    }
+  };
+
+  const enqueueAutomation = async (m: ApiFootballMatch, prediction: Prediction | null) => {
+    const fixtureId = String(m?.fixture?.id ?? '').trim();
+    if (!fixtureId) return false;
+    const utcDate = String(m?.fixture?.date ?? '').trim();
+    const homeTeam = String(m?.teams?.home?.name ?? '').trim();
+    const awayTeam = String(m?.teams?.away?.name ?? '').trim();
+    const homeCrest = String((m as any)?.teams?.home?.logo ?? '').trim();
+    const awayCrest = String((m as any)?.teams?.away?.logo ?? '').trim();
+    const scoreHome = typeof m?.goals?.home === 'number' ? m.goals.home : null;
+    const scoreAway = typeof m?.goals?.away === 'number' ? m.goals.away : null;
+
+    try {
+      const { projectId } = await import('/utils/supabase/info');
+      const res = await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/queue/add`, {
+        method: 'POST',
+        body: JSON.stringify({
+          matchId: fixtureId,
+          source: 'api-football',
+          utcDate: utcDate || null,
+          homeTeam: homeTeam || null,
+          awayTeam: awayTeam || null,
+          homeCrest: homeCrest || null,
+          awayCrest: awayCrest || null,
+          scoreHome,
+          scoreAway,
+          prediction: prediction ?? null,
+        }),
+      });
+      const raw = await res.text().catch(() => '');
+      const data = raw ? JSON.parse(raw) : null;
+      if (!res.ok || !data?.ok) throw new Error(String(data?.error ?? `HTTP ${res.status} ${res.statusText}`));
+
+      setAutomationIds((prev) => new Set([...prev, fixtureId]));
+      const mapped = Boolean(data?.item?.betfair?.marketId);
+      const msg = mapped ? 'Jogo adicionado e mapeado na Betfair' : 'Jogo adicionado. Mapeamento Betfair pendente';
+      const desc = !mapped && data?.item?.mappingError ? String(data.item.mappingError).slice(0, 220) : undefined;
+      toast.success(msg, desc ? { description: desc } : undefined);
+      broadcastAutomationQueueChanged({ action: 'add', matchId: fixtureId });
+      return true;
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      toast.error('Falha ao adicionar à automação', { description: msg.slice(0, 220) });
+      return false;
+    }
+  };
+
+  const ensurePredictionForFixture = async (fixtureId: string) => {
+    const id = String(fixtureId ?? '').trim();
+    if (!id) return null;
+    const existing = predictionsByMatchId[id] ?? null;
+    if (existing) return existing;
+
+    requestFixturePrediction(id);
+    const startedAt = Date.now();
+    const timeoutMs = 45_000;
+    const intervalMs = 1_500;
+    while (Date.now() - startedAt < timeoutMs) {
+      await new Promise((r) => setTimeout(r, intervalMs));
+      const cache = readPredictionsCache();
+      const p = cache[id] ?? null;
+      if (p) {
+        setPredictionsByMatchId(cache);
+        return p;
+      }
+    }
+    return null;
+  };
+
   useEffect(() => {
     const onConfig = () => {
       setConfig(loadApiConfig());
@@ -279,6 +654,35 @@ export default function GeneralMatchesPage() {
   }, [config?.apiFootballDisabledLeagueIds]);
 
   const apiFootballKey = useMemo(() => String(config?.apiFootballKey ?? '').trim(), [config?.apiFootballKey]);
+  const warnedQuotaRef = useRef(false);
+
+  useEffect(() => {
+    const run = async () => {
+      try {
+        const { projectId, publicAnonKey } = await import('/utils/supabase/info');
+        const res = await fetch(`https://${projectId}.supabase.co/functions/v1/betfair-server-1119702f/betfair/matches/list`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            apikey: publicAnonKey,
+            Authorization: `Bearer ${publicAnonKey}`,
+          },
+          body: JSON.stringify({ dateFrom: date, dateTo: date, maxResults: 400 }),
+        });
+        const raw = await res.text().catch(() => '');
+        const data = raw ? JSON.parse(raw) : null;
+        if (!res.ok || !data?.ok) {
+          setBetfairMatches([]);
+          return;
+        }
+        const matches = Array.isArray(data?.matches) ? data.matches : [];
+        setBetfairMatches(matches);
+      } catch {
+        setBetfairMatches([]);
+      }
+    };
+    void run();
+  }, [date]);
 
   const cachedLeagues = useMemo(() => {
     try {
@@ -303,9 +707,35 @@ export default function GeneralMatchesPage() {
   }, [activeLeagues]);
 
   const loadFixtures = async (opts?: { force?: boolean }) => {
+    const betfairFallback = Array.isArray(betfairMatches) ? betfairMatches.map(betfairToApiFootballMatch) : [];
+
     if (!apiFootballKey) {
+      if (betfairFallback.length > 0) {
+        setFixtures(betfairFallback);
+        setError('');
+        setLastUpdatedAt(new Date());
+        setDataSource('betfair');
+        return;
+      }
       setFixtures([]);
       setError('API-Football não configurada');
+      setDataSource('api-football');
+      return;
+    }
+
+    if (cachedLeagues.length === 0) {
+      if (betfairFallback.length > 0) {
+        setFixtures(betfairFallback);
+        setError('');
+        setLastUpdatedAt(new Date());
+        setDataSource('betfair');
+        toast.info('Catálogo de ligas não carregado. Exibindo Betfair como fallback.');
+        return;
+      }
+      setFixtures([]);
+      setError('Catálogo de ligas não carregado. Abra Configurações → Campeonatos para atualizar a lista.');
+      setDataSource('api-football');
+      toast.info('Abra Configurações → Campeonatos e clique em “Atualizar lista” para carregar o catálogo de ligas.');
       return;
     }
 
@@ -339,19 +769,90 @@ export default function GeneralMatchesPage() {
     setError('');
     try {
       const service = new ApiFootballService(apiFootballKey);
-      const dateItems = await service.getFixtures({ date, timezone: TIME_ZONE, maxPages: 5 });
-      const dayItems = dateItems.filter((m) => fixtureLocalDayKey(m) === date);
+      const leagueIds = activeLeagues
+        .map((l) => Number(l.id))
+        .filter(Number.isFinite)
+        .slice();
+
+      leagueIds.sort((a, b) => a - b);
+
+      if (cachedLeagues.length > 0 && leagueIds.length === 0) {
+        setFixtures([]);
+        const fetchedAt = new Date().toISOString();
+        setLastUpdatedAt(new Date(fetchedAt));
+        try {
+          localStorage.setItem(cacheKey, JSON.stringify({ fetchedAt, items: [] }));
+        } catch {}
+        toast.warning('Todos os campeonatos estão desativados. Ative pelo menos um em Configurações → Campeonatos.');
+        return;
+      }
+
+      warnTooManyActiveLeagues(leagueIds.length);
+
+      const mapWithConcurrency = async <TIn, TOut>(
+        items: TIn[],
+        limit: number,
+        fn: (item: TIn, index: number) => Promise<TOut>,
+      ) => {
+        const results: TOut[] = new Array(items.length);
+        let nextIndex = 0;
+        const workers = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
+          while (nextIndex < items.length) {
+            const i = nextIndex++;
+            results[i] = await fn(items[i], i);
+          }
+        });
+        await Promise.all(workers);
+        return results;
+      };
+
+      const tooManyLeagues = leagueIds.length > 18;
+      const activeLeagueSet = new Set(leagueIds);
+      const shouldSplitByLeague = leagueIds.length > 0 && !tooManyLeagues;
+
+      const dateItems = shouldSplitByLeague
+        ? (
+          await mapWithConcurrency(
+            leagueIds,
+            3,
+            async (leagueId) =>
+              await service.getFixtures({ date, league: leagueId, timezone: TIME_ZONE, maxPages: 2 }),
+          )
+        ).flat()
+        : await service.getFixtures({ date, timezone: TIME_ZONE, maxPages: 10 });
+
+      const dayItems = (Array.isArray(dateItems) ? dateItems : [])
+        .filter((m) => fixtureLocalDayKey(m) === date)
+        .filter((m) => {
+          if (!tooManyLeagues) return true;
+          const leagueId = Number((m as any)?.league?.id);
+          return Number.isFinite(leagueId) && activeLeagueSet.has(leagueId);
+        });
 
       let merged = dayItems;
       if (includeLive) {
-        const liveItems = await service.getFixtures({ live: 'all', timezone: TIME_ZONE, maxPages: 5 });
+        const liveItems = shouldSplitByLeague
+          ? (
+            await mapWithConcurrency(
+              leagueIds,
+              3,
+              async (leagueId) =>
+                await service.getFixtures({ live: 'all', league: leagueId, timezone: TIME_ZONE, maxPages: 2 }),
+            )
+          ).flat()
+          : await service.getFixtures({ live: 'all', timezone: TIME_ZONE, maxPages: 5 }).catch(() => []);
+        const liveFiltered = (Array.isArray(liveItems) ? liveItems : []).filter((m) => {
+          if (!tooManyLeagues) return true;
+          const leagueId = Number((m as any)?.league?.id);
+          return Number.isFinite(leagueId) && activeLeagueSet.has(leagueId);
+        });
         const unique = new Map<number, ApiFootballMatch>();
         for (const m of dayItems) {
           const id = Number(m?.fixture?.id);
           if (!Number.isFinite(id)) continue;
           unique.set(id, m);
         }
-        for (const m of liveItems) {
+        for (const m of liveFiltered) {
           const id = Number(m?.fixture?.id);
           if (!Number.isFinite(id)) continue;
           if (!unique.has(id)) unique.set(id, m);
@@ -362,13 +863,26 @@ export default function GeneralMatchesPage() {
       setFixtures(merged);
       const fetchedAt = new Date().toISOString();
       setLastUpdatedAt(new Date(fetchedAt));
+      setDataSource('api-football');
       try {
         localStorage.setItem(cacheKey, JSON.stringify({ fetchedAt, items: merged }));
       } catch {}
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Erro ao carregar jogos da API-Football';
-      setError(msg);
-      toast.error(msg);
+      const isQuota = /request limit for the day|reached the request limit|you have reached the request limit|\brequests\b\s*:/i.test(msg);
+      if (isQuota) {
+        if (!warnedQuotaRef.current) {
+          warnedQuotaRef.current = true;
+          toast.warning('Cota diária da API-Football atingida. Exibindo Betfair como fallback.');
+        }
+        setFixtures(betfairFallback);
+        setError('');
+        setDataSource('betfair');
+      } else {
+        setError(msg);
+        setDataSource('api-football');
+        toast.error(msg);
+      }
     } finally {
       setIsLoading(false);
     }
@@ -376,7 +890,7 @@ export default function GeneralMatchesPage() {
 
   useEffect(() => {
     void loadFixtures();
-  }, [date, apiFootballKey, activeLeagueKey, bucket]);
+  }, [date, apiFootballKey, activeLeagueKey, bucket, betfairMatches]);
 
   const allowedFixtures = useMemo(() => {
     let items = fixtures;
@@ -534,6 +1048,16 @@ export default function GeneralMatchesPage() {
             </div>
             <div className="text-sm text-gray-600 mt-1">
               Panorama global de jogos (filtrado pelas ligas ativas em Configurações).
+            </div>
+            <div className="mt-2 flex items-center gap-2">
+              <Badge variant={dataSource === 'betfair' ? 'secondary' : 'outline'}>
+                Fonte: {dataSource === 'betfair' ? 'Betfair (fallback)' : 'API-Football'}
+              </Badge>
+              {lastUpdatedAt ? (
+                <div className="text-[11px] text-gray-500 tabular-nums">
+                  Atualizado: {lastUpdatedAt.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}
+                </div>
+              ) : null}
             </div>
           </div>
           <div className="flex items-center gap-2">
@@ -737,116 +1261,276 @@ export default function GeneralMatchesPage() {
                         {l.matches.length}
                       </Badge>
                     </div>
-                    <div className="divide-y">
-                      {l.matches.map((m) => {
-                        const fixtureId = String(m?.fixture?.id ?? '');
-                        const home = m?.teams?.home;
-                        const away = m?.teams?.away;
-                        const goalsHome = m?.goals?.home;
-                        const goalsAway = m?.goals?.away;
-                        const b = toBucket(m);
-                        const status = statusLabel(m);
-                        const prediction = fixtureId ? predictionsByMatchId[fixtureId] ?? null : null;
-                        const hasPrediction = Boolean(prediction);
-                        const wasRequested = fixtureId ? requestedFixtureIds.has(fixtureId) : false;
-                        const venue = String(m?.fixture?.venue?.name ?? '').trim();
-                        const elapsed = m?.fixture?.status?.elapsed;
-                        const extra = m?.fixture?.status?.extra;
-                        const minute =
-                          typeof elapsed === 'number' && Number.isFinite(elapsed)
-                            ? typeof extra === 'number' && Number.isFinite(extra) && extra > 0
-                              ? `${Math.floor(elapsed)}+${Math.floor(extra)}'`
-                              : `${Math.floor(elapsed)}'`
-                            : null;
-                        const short = String(m?.fixture?.status?.short ?? '').toUpperCase();
-                        const phase =
-                          short === 'HT'
-                            ? 'Intervalo'
-                            : short === '1H'
-                              ? '1º Tempo'
-                              : short === '2H'
-                                ? '2º Tempo'
-                                : short === 'ET'
-                                  ? 'Prorrogação'
-                                  : '';
-                        const score =
-                          goalsHome !== null && goalsHome !== undefined && goalsAway !== null && goalsAway !== undefined
-                            ? `${goalsHome} × ${goalsAway}`
-                            : '×';
+                    <div className="overflow-x-auto bg-white">
+                      <div className="min-w-[980px]">
+                        <div className="grid grid-cols-[44px_72px_1fr_repeat(6,72px)_220px] text-xs font-semibold text-gray-700 bg-gray-100 border-b border-gray-200">
+                          <div className="px-2 py-2 text-center"></div>
+                          <div className="px-2 py-2 text-center">Tempo</div>
+                          <div className="px-3 py-2">Jogo</div>
+                          <div className="px-2 py-2 text-center" style={{ gridColumn: 'span 2' }}>
+                            1
+                          </div>
+                          <div className="px-2 py-2 text-center" style={{ gridColumn: 'span 2' }}>
+                            X
+                          </div>
+                          <div className="px-2 py-2 text-center" style={{ gridColumn: 'span 2' }}>
+                            2
+                          </div>
+                          <div className="px-3 py-2 text-right">Ações</div>
+                        </div>
 
-                        return (
-                          <div
-                            key={fixtureId || `${home?.id}-${away?.id}-${m.fixture?.timestamp}`}
-                            className="w-full"
-                          >
-                            <div className="bg-white hover:bg-gray-50 transition-colors">
-                              <button className="w-full text-left px-4 py-3" onClick={() => void openDetails(m)}>
-                                <div className="flex items-center justify-between gap-3">
-                                  <div className="text-[11px] text-gray-500 truncate">{venue || '—'}</div>
-                                  <div className="text-[11px] text-gray-500 tabular-nums flex items-center gap-1">
-                                    <Clock className="w-3.5 h-3.5" />
-                                    {formatFixtureLabel(m)}
+                        {(() => {
+                          const formatMoneyBR = (value: number | null | undefined) => {
+                            if (typeof value !== 'number' || !Number.isFinite(value)) return '—';
+                            return value.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+                          };
+
+                          const formatOdd = (value: number | null | undefined) => {
+                            if (typeof value !== 'number' || !Number.isFinite(value)) return '—';
+                            const v = Math.round(value * 100) / 100;
+                            return v.toLocaleString('pt-BR', { minimumFractionDigits: v % 1 === 0 ? 0 : 2, maximumFractionDigits: 2 });
+                          };
+
+                          const formatSize = (value: number | null | undefined) => {
+                            if (typeof value !== 'number' || !Number.isFinite(value)) return '—';
+                            return formatMoneyBR(Math.round(value));
+                          };
+
+                          const pickBetfair = (m: ApiFootballMatch) => {
+                            const fixtureId = String(m?.fixture?.id ?? '').trim();
+                            if (fixtureId) {
+                              const direct = betfairById.get(fixtureId) ?? null;
+                              if (direct) return direct;
+                            }
+                            const homeName = String(m?.teams?.home?.name ?? '').trim();
+                            const awayName = String(m?.teams?.away?.name ?? '').trim();
+                            const fixtureDate = String(m?.fixture?.date ?? '').trim();
+                            const fixtureMs = fixtureDate ? new Date(fixtureDate).getTime() : NaN;
+                            let best: { row: any; score: number } | null = null;
+                            for (const row of betfairMatches) {
+                              const bh = String(row?.homeTeam?.name ?? '').trim();
+                              const ba = String(row?.awayTeam?.name ?? '').trim();
+                              if (!bh || !ba) continue;
+                              const teamScore = scoreTeams(homeName, awayName, bh, ba);
+                              if (teamScore <= 0) continue;
+                              const startIso = String(row?.betfair?.marketStartTime ?? row?.utcDate ?? '').trim();
+                              const startMs = startIso ? new Date(startIso).getTime() : NaN;
+                              let timeBonus = 0;
+                              if (Number.isFinite(fixtureMs) && Number.isFinite(startMs)) {
+                                const diffMin = Math.abs(fixtureMs - startMs) / 60000;
+                                timeBonus = Math.max(0, 6 - diffMin / 30);
+                              }
+                              const s = teamScore + timeBonus;
+                              if (!best || s > best.score) best = { row, score: s };
+                            }
+                            return best?.row ?? null;
+                          };
+
+                          return l.matches.map((m) => {
+                            const fixtureId = String(m?.fixture?.id ?? '');
+                            const home = m?.teams?.home;
+                            const away = m?.teams?.away;
+                            const b = toBucket(m);
+
+                            const bf = pickBetfair(m);
+                            const bfElapsed = bf?.live?.elapsed;
+                            const bfScoreHome = bf?.score?.fullTime?.home;
+                            const bfScoreAway = bf?.score?.fullTime?.away;
+
+                            const elapsed =
+                              typeof bfElapsed === 'number' && Number.isFinite(bfElapsed) ? bfElapsed : m?.fixture?.status?.elapsed;
+                            const extra = m?.fixture?.status?.extra;
+                            const minute =
+                              typeof elapsed === 'number' && Number.isFinite(elapsed)
+                                ? typeof extra === 'number' && Number.isFinite(extra) && extra > 0
+                                  ? `${Math.floor(elapsed)}+${Math.floor(extra)}’`
+                                  : `${Math.floor(elapsed)}’`
+                                : null;
+
+                            const kickoff = formatKickoff(m);
+                            const timeLabel = b === 'finished' ? 'FT' : b === 'live' ? minute || 'AO VIVO' : kickoff;
+                            const renderTimeLabel = (label: string) => {
+                              const raw = String(label ?? '').trim();
+                              const mm = raw.match(/^(\d+)\s*\+\s*(\d+)\s*[’'′]?\s*$/);
+                              if (!mm) return <span>{raw || '—'}</span>;
+                              const base = mm[1];
+                              const extraPart = mm[2];
+                              return (
+                                <div className="flex flex-col items-center justify-center leading-none">
+                                  <div className="leading-none">{base}’</div>
+                                  <div className="mt-0.5 text-[11px] leading-none font-bold text-sky-800 tabular-nums">
+                                    +{extraPart}
                                   </div>
                                 </div>
+                              );
+                            };
 
-                                <div className="mt-3 mx-auto w-full max-w-[980px]">
-                                  <div className="grid grid-cols-[1fr_140px_1fr] items-center gap-3">
-                                    <div className="flex items-center justify-end gap-2 min-w-0">
-                                      <div className="text-sm md:text-base font-medium text-gray-900 leading-tight text-right">
-                                        {home?.name ?? '—'}
-                                      </div>
-                                      <TeamLogo teamName={home?.name ?? '—'} logoUrl={home?.logo ?? ''} size="sm" showName={false} />
-                                    </div>
+                            const goalsHome = typeof bfScoreHome === 'number' ? bfScoreHome : m?.goals?.home;
+                            const goalsAway = typeof bfScoreAway === 'number' ? bfScoreAway : m?.goals?.away;
+                            const scoreHome = typeof goalsHome === 'number' ? goalsHome : null;
+                            const scoreAway = typeof goalsAway === 'number' ? goalsAway : null;
 
-                                    <div className="flex flex-col items-center justify-center">
-                                      <div className="text-[11px] text-gray-500 font-semibold tabular-nums">
-                                        {phase ? `${phase}${minute ? ` • ${minute}` : ''}` : minute ? minute : status}
-                                      </div>
-                                      <div className="mt-0.5 text-2xl font-bold text-gray-900 tabular-nums tracking-tight">
-                                        {score}
-                                      </div>
-                                    </div>
+                            const prediction = fixtureId ? predictionsByMatchId[fixtureId] ?? null : null;
+                            const hasPrediction = Boolean(prediction);
+                            const wasRequested = fixtureId ? requestedFixtureIds.has(fixtureId) : false;
+                            const isInAutomation = Boolean(fixtureId) && automationIds.has(fixtureId);
 
-                                    <div className="flex items-center justify-start gap-2 min-w-0">
-                                      <TeamLogo teamName={away?.name ?? '—'} logoUrl={away?.logo ?? ''} size="sm" showName={false} />
-                                      <div className="text-sm md:text-base font-medium text-gray-900 leading-tight">
-                                        {away?.name ?? '—'}
-                                      </div>
-                                    </div>
-                                  </div>
+                            const marketStatus = String(bf?.betfair?.marketStatus ?? '').toUpperCase();
+                            const isSuspended = marketStatus === 'SUSPENDED';
+                            const odds = bf?.betfair?.odds ?? null;
+
+                            const pickOdds = (sideKey: 'home' | 'draw' | 'away', kind: 'back' | 'lay') => {
+                              const o = odds?.[sideKey] ?? null;
+                              if (!o) return { price: null as number | null, size: null as number | null };
+                              if (kind === 'back') return { price: o.back ?? null, size: o.backSize ?? null };
+                              return { price: o.lay ?? null, size: o.laySize ?? null };
+                            };
+
+                            const OddCell = ({ kind, sideKey }: { kind: 'back' | 'lay'; sideKey: 'home' | 'draw' | 'away' }) => {
+                              const v = pickOdds(sideKey, kind);
+                              return (
+                                <div
+                                  className={cn(
+                                    'h-full px-2 py-2 text-center text-xs tabular-nums border-l border-gray-200',
+                                    b === 'finished' ? 'bg-gray-100 text-gray-600' : kind === 'back' ? 'bg-sky-50 text-sky-900' : 'bg-rose-50 text-rose-900',
+                                  )}
+                                >
+                                  <div className={cn('font-semibold', b === 'finished' ? 'opacity-70' : '')}>{formatOdd(v.price)}</div>
+                                  <div className={cn('text-[10px] opacity-80', b === 'finished' ? 'opacity-60' : '')}>{formatSize(v.size)}</div>
                                 </div>
-                              </button>
+                              );
+                            };
 
-                              <div className="px-4 pb-3">
-                                <div className="flex items-center justify-between gap-3">
-                                  <div className="flex items-center gap-2">
-                                    <Badge
+                            return (
+                              <div
+                                key={fixtureId || `${home?.id}-${away?.id}-${m.fixture?.timestamp}`}
+                                className={cn(
+                                  'grid grid-cols-[44px_72px_1fr_repeat(6,72px)_220px] border-b border-gray-100',
+                                  b === 'finished' ? 'bg-gray-50 text-gray-600 grayscale' : 'bg-white',
+                                  isInAutomation && b !== 'finished' ? 'bg-amber-100' : '',
+                                )}
+                              >
+                                <div className="px-2 py-2 flex items-center justify-center bg-gray-50">
+                                  <button
+                                    className="h-8 w-8 inline-flex items-center justify-center rounded-md border border-gray-200 bg-white text-gray-700 hover:bg-gray-100"
+                                    type="button"
+                                    aria-label="Favoritar"
+                                    onClick={(e) => {
+                                      e.preventDefault();
+                                      e.stopPropagation();
+                                    }}
+                                  >
+                                    <Star className="w-4 h-4" />
+                                  </button>
+                                </div>
+
+                                <div className="px-2 py-2 flex items-stretch justify-center bg-gray-50">
+                                  <div className="w-full h-[72px] overflow-hidden rounded-md flex">
+                                    <div
                                       className={cn(
-                                        b === 'live'
-                                          ? 'bg-green-100 text-green-800 border-green-300'
-                                          : b === 'finished'
-                                            ? 'bg-gray-100 text-gray-800 border-gray-300'
-                                            : 'bg-blue-100 text-blue-800 border-blue-300',
+                                        'w-1/2 h-full flex items-center justify-center tabular-nums font-semibold',
+                                        b === 'live' ? 'bg-emerald-200 text-emerald-950' : b === 'finished' ? 'bg-gray-200 text-gray-700' : 'bg-gray-200 text-gray-700',
                                       )}
                                     >
-                                      {b === 'live' ? 'AO VIVO' : b === 'finished' ? 'FINALIZADO' : 'EM BREVE'}
-                                    </Badge>
-                                    {wasRequested && !hasPrediction ? (
-                                      <Badge variant="outline" className="text-[11px]">
-                                        Gerando…
-                                      </Badge>
-                                    ) : null}
-                                    {hasPrediction ? (
-                                      <Badge variant="outline" className="text-[11px]">
-                                        IA pronta
-                                      </Badge>
-                                    ) : null}
+                                  {renderTimeLabel(timeLabel)}
+                                    </div>
+                                    <div
+                                      className={cn(
+                                        'w-1/2 h-full flex flex-col items-center justify-center tabular-nums font-semibold',
+                                        b === 'finished' ? 'bg-gray-200 text-gray-700' : 'bg-emerald-900 text-white',
+                                      )}
+                                    >
+                                      <div className="leading-none">{scoreHome ?? '—'}</div>
+                                      <div className="text-[10px] opacity-70 leading-none my-0.5">x</div>
+                                      <div className="leading-none">{scoreAway ?? '—'}</div>
+                                    </div>
                                   </div>
+                                </div>
+
+                                <div className="px-3 py-2 min-w-0">
+                                  <div className="flex items-center justify-between gap-3 min-w-0">
+                                    <div className="min-w-0">
+                                      <div className="flex items-center gap-2 min-w-0">
+                                        <TeamLogo teamName={home?.name ?? '—'} logoUrl={home?.logo ?? ''} size="sm" showName={false} />
+                                        <div className={cn('font-semibold truncate', b === 'finished' ? 'text-gray-700' : 'text-gray-900')}>
+                                          {home?.name ?? '—'}
+                                        </div>
+                                      </div>
+                                      <div className="mt-1 flex items-center gap-2 min-w-0">
+                                        <TeamLogo teamName={away?.name ?? '—'} logoUrl={away?.logo ?? ''} size="sm" showName={false} />
+                                        <div className={cn('font-semibold truncate', b === 'finished' ? 'text-gray-700' : 'text-gray-900')}>
+                                          {away?.name ?? '—'}
+                                        </div>
+                                      </div>
+                                    </div>
+                                    <div className="flex items-center gap-2 shrink-0">
+                                      {wasRequested && !hasPrediction ? (
+                                        <Badge variant="outline" className="text-[11px]">
+                                          Gerando…
+                                        </Badge>
+                                      ) : null}
+                                      {hasPrediction ? (
+                                        <Badge variant="outline" className="text-[11px]">
+                                          IA pronta
+                                        </Badge>
+                                      ) : null}
+                                    </div>
+                                  </div>
+                                </div>
+
+                                {isSuspended ? (
+                                  <div className="col-span-6 px-3 py-2 flex items-center justify-center bg-gray-100 text-gray-700 font-semibold border-l border-gray-200">
+                                    SUSPENSO
+                                  </div>
+                                ) : (
+                                  <>
+                                    <OddCell kind="back" sideKey="home" />
+                                    <OddCell kind="lay" sideKey="home" />
+                                    <OddCell kind="back" sideKey="draw" />
+                                    <OddCell kind="lay" sideKey="draw" />
+                                    <OddCell kind="back" sideKey="away" />
+                                    <OddCell kind="lay" sideKey="away" />
+                                  </>
+                                )}
+
+                                <div className="px-3 py-2 flex items-center justify-end gap-1.5">
+                                  <Button
+                                    aria-label={isInAutomation ? 'Remover da automação (Betfair)' : 'Adicionar à automação (Betfair)'}
+                                    variant="outline"
+                                    size="icon"
+                                    className={cn(
+                                      isInAutomation
+                                        ? 'border-red-300 bg-red-50 hover:bg-red-100'
+                                        : 'border-emerald-300 bg-emerald-50 hover:bg-emerald-100',
+                                    )}
+                                    onClick={(e) => {
+                                      e.preventDefault();
+                                      e.stopPropagation();
+                                      if (!fixtureId) return;
+                                      setAutomationTarget(m);
+                                      setAutomationActionOpen(true);
+                                    }}
+                                  >
+                                    <img src="/utils/betfair.png" alt="Betfair" className="w-4 h-4" />
+                                  </Button>
 
                                   <Button
-                                    size="sm"
-                                    variant="ghost"
-                                    className="h-8 px-2 text-xs font-semibold text-green-700 hover:bg-green-50"
+                                    aria-label="Ver detalhes"
+                                    variant="outline"
+                                    size="icon"
+                                    onClick={(e) => {
+                                      e.preventDefault();
+                                      e.stopPropagation();
+                                      void openDetails(m);
+                                    }}
+                                  >
+                                    <Eye className="w-4 h-4" />
+                                  </Button>
+
+                                  <Button
+                                    aria-label="Previsão"
+                                    variant="outline"
+                                    size="icon"
                                     onClick={(e) => {
                                       e.preventDefault();
                                       e.stopPropagation();
@@ -860,18 +1544,14 @@ export default function GeneralMatchesPage() {
                                       openPredictionShortcut(fixtureId);
                                     }}
                                   >
-                                    {b === 'finished'
-                                      ? 'SAIBA COMO FOI'
-                                      : hasPrediction || wasRequested
-                                        ? 'ABRIR PREVISÃO'
-                                        : 'GERAR PREVISÃO'}
+                                    <Dices className="w-4 h-4" />
                                   </Button>
                                 </div>
                               </div>
-                            </div>
-                          </div>
-                        );
-                      })}
+                            );
+                          });
+                        })()}
+                      </div>
                     </div>
                   </div>
                 ))}
@@ -944,6 +1624,170 @@ export default function GeneralMatchesPage() {
           ) : (
             <div className="text-sm text-gray-600">Selecione uma partida.</div>
           )}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={automationActionOpen} onOpenChange={(v) => (automationIsBusy ? null : setAutomationActionOpen(v))}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Automação (Betfair)</DialogTitle>
+            <DialogDescription>
+              {automationTarget
+                ? `${automationTarget.teams?.home?.name ?? '—'} x ${automationTarget.teams?.away?.name ?? '—'}`
+                : '—'}
+            </DialogDescription>
+          </DialogHeader>
+
+          {automationTarget ? (
+            <div className="mt-2 text-sm text-gray-700">
+              <div className="text-xs text-gray-600 tabular-nums">
+                {formatFixtureLabel(automationTarget)}
+              </div>
+              <div className="mt-2 text-xs text-gray-600">
+                Se não houver análise pronta, ela será solicitada e o jogo será incluído na automação (mapeamento Betfair pode ficar pendente).
+              </div>
+            </div>
+          ) : null}
+
+          <div className="mt-4 flex items-center justify-end gap-2">
+            <Button
+              variant="outline"
+              disabled={automationIsBusy}
+              onClick={() => {
+                setAutomationActionOpen(false);
+                setAutomationTarget(null);
+              }}
+            >
+              Cancelar
+            </Button>
+
+            {(() => {
+              const fixtureId = String(automationTarget?.fixture?.id ?? '').trim();
+              const isInAutomation = Boolean(fixtureId) && automationIds.has(fixtureId);
+              if (isInAutomation) {
+                return (
+                  <Button
+                    variant="destructive"
+                    disabled={automationIsBusy || !fixtureId}
+                    onClick={async () => {
+                      if (!fixtureId) return;
+                      setAutomationIsBusy(true);
+                      try {
+                        setAutomationActionOpen(false);
+                        await handleRemoveWithChecks(fixtureId);
+                      } finally {
+                        setAutomationIsBusy(false);
+                        setAutomationTarget(null);
+                      }
+                    }}
+                  >
+                    Remover da automação
+                  </Button>
+                );
+              }
+
+              return (
+                <Button
+                  disabled={automationIsBusy || !fixtureId}
+                  onClick={async () => {
+                    if (!automationTarget || !fixtureId) return;
+                    setAutomationIsBusy(true);
+                    try {
+                      const p = predictionsByMatchId[fixtureId] ?? (await ensurePredictionForFixture(fixtureId));
+                      setAutomationActionOpen(false);
+                      const ok = await enqueueAutomation(automationTarget, p);
+                      if (!ok) return;
+                      if (!p) toast.message('Análise solicitada', { description: 'A previsão está em geração; o jogo já foi adicionado à automação.' });
+                    } finally {
+                      setAutomationIsBusy(false);
+                      setAutomationTarget(null);
+                    }
+                  }}
+                >
+                  Adicionar à automação
+                </Button>
+              );
+            })()}
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={guardOpen}
+        onOpenChange={(v) => {
+          if (guardIsBusy) return;
+          setGuardOpen(v);
+        }}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Ordens abertas detectadas</DialogTitle>
+            <DialogDescription>
+              Há {guardOrdersCount} ordem(ns) aberta(s) e {guardMatchedCount} ordem(ns) executada(s) no mercado de Placar Correto. Confirme a ação.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="flex items-center justify-end gap-2 mt-2">
+            <Button
+              variant="outline"
+              disabled={guardIsBusy}
+              onClick={() => {
+                setGuardOpen(false);
+                setGuardMatchId(null);
+                setGuardOrdersCount(0);
+                setGuardMatchedCount(0);
+              }}
+            >
+              Cancelar
+            </Button>
+
+            <Button
+              variant="outline"
+              disabled={guardIsBusy || !guardMatchId || guardMatchedCount > 0}
+              onClick={async () => {
+                if (!guardMatchId) return;
+                setGuardIsBusy(true);
+                try {
+                  await cancelOpenOrdersCorrectScore(guardMatchId);
+                  await removeFromAutomation(guardMatchId);
+                  setGuardOpen(false);
+                  toast.success('Ordens canceladas e item removido');
+                } finally {
+                  setGuardIsBusy(false);
+                  setGuardMatchId(null);
+                  setGuardOrdersCount(0);
+                  setGuardMatchedCount(0);
+                }
+              }}
+            >
+              Cancelar ordens e remover
+            </Button>
+
+            <Button
+              variant="destructive"
+              disabled={guardIsBusy || !guardMatchId}
+              onClick={async () => {
+                if (!guardMatchId) return;
+                setGuardIsBusy(true);
+                try {
+                  await cashoutCorrectScore(guardMatchId);
+                  await removeFromAutomation(guardMatchId);
+                  setGuardOpen(false);
+                  toast.success('Cashout enviado e item removido');
+                } catch (e) {
+                  const msg = e instanceof Error ? e.message : String(e);
+                  toast.error('Falha ao remover com cashout', { description: msg.slice(0, 220) });
+                } finally {
+                  setGuardIsBusy(false);
+                  setGuardMatchId(null);
+                  setGuardOrdersCount(0);
+                  setGuardMatchedCount(0);
+                }
+              }}
+            >
+              Cashout e remover
+            </Button>
+          </div>
         </DialogContent>
       </Dialog>
     </div>

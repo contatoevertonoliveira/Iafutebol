@@ -1,6 +1,7 @@
-import { Calendar, Globe, Loader2, Plus, RefreshCw, Trophy } from 'lucide-react';
+import { Calendar, Globe, Loader2, Plus, RefreshCw, Search, Trophy } from 'lucide-react';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
 import { Button } from './ui/button';
+import { Input } from './ui/input';
 
 interface FilterBarProps {
   selectedDate: string;
@@ -18,6 +19,8 @@ interface FilterBarProps {
   onRefresh?: () => void;
   isRefreshing?: boolean;
   onAddMatch?: () => void;
+  quickSearch?: string;
+  onQuickSearchChange?: (value: string) => void;
 }
 
 export function FilterBar({
@@ -36,6 +39,8 @@ export function FilterBar({
   onRefresh,
   isRefreshing,
   onAddMatch,
+  quickSearch,
+  onQuickSearchChange,
 }: FilterBarProps) {
   return (
     <div className="bg-white border-b border-gray-200 p-4 sticky top-0 z-10 shadow-sm">
@@ -176,13 +181,29 @@ export function FilterBar({
       </div>
 
       {/* Stats rápidos */}
-      <div className="mt-4 flex gap-4 text-sm">
-        <div className="px-3 py-1 bg-blue-50 text-blue-700 rounded-full font-semibold">
-          <span className="text-blue-900">Partidas:</span> {selectedDate === 'today' ? 'Hoje' : 'Filtradas'}
+      <div className="mt-4 flex flex-wrap items-center gap-3">
+        <div className="flex gap-4 text-sm">
+          <div className="px-3 py-1 bg-blue-50 text-blue-700 rounded-full font-semibold">
+            <span className="text-blue-900">Partidas:</span> {selectedDate === 'today' ? 'Hoje' : 'Filtradas'}
+          </div>
+          <div className="px-3 py-1 bg-green-50 text-green-700 rounded-full font-semibold">
+            <span className="text-green-900">Alta Confiança:</span> IA {'>'}80%
+          </div>
         </div>
-        <div className="px-3 py-1 bg-green-50 text-green-700 rounded-full font-semibold">
-          <span className="text-green-900">Alta Confiança:</span> IA {'>'}80%
-        </div>
+
+        {onQuickSearchChange ? (
+          <div className="flex items-center gap-2 ml-auto min-w-[260px]">
+            <div className="relative w-full max-w-[360px]">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+              <Input
+                value={quickSearch ?? ''}
+                onChange={(e) => onQuickSearchChange(e.target.value)}
+                placeholder="Buscar time..."
+                className="pl-9 h-8"
+              />
+            </div>
+          </div>
+        ) : null}
       </div>
     </div>
   );
