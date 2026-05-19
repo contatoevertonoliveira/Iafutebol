@@ -1449,6 +1449,8 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
                   const scalping = (raw as any)?.scalpingGoals && typeof (raw as any).scalpingGoals === 'object' ? (raw as any).scalpingGoals : {};
                   const ticks = (raw as any)?.scalpingTicks && typeof (raw as any).scalpingTicks === 'object' ? (raw as any).scalpingTicks : {};
                   const over = (raw as any)?.overGoalsLimit && typeof (raw as any).overGoalsLimit === 'object' ? (raw as any).overGoalsLimit : {};
+                  const favoriteRescue =
+                    (raw as any)?.favoriteRescue && typeof (raw as any).favoriteRescue === 'object' ? (raw as any).favoriteRescue : {};
 
                   const setLimits = (patch: any) => {
                     const next = {
@@ -1485,6 +1487,15 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
                     });
                   };
 
+                  const setFavoriteRescue = (patch: any) => {
+                    setLimits({
+                      favoriteRescue: {
+                        ...(((config.betfairRobotLimits as any)?.favoriteRescue ?? {}) as any),
+                        ...(patch ?? {}),
+                      },
+                    });
+                  };
+
                   const sgProfitPct = Number(scalping?.profitTargetPct);
                   const sgStakePct = Number(scalping?.stakePct);
                   const sgEntryOffsetTicks = Number(scalping?.entryOffsetTicks);
@@ -1505,6 +1516,18 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
                   const ogStakePct = Number(over?.stakePct);
                   const ogEntryOffsetTicks = Number(over?.entryOffsetTicks);
                   const ogSecondsToWaitMatch = Number(over?.secondsToWaitMatch);
+
+                  const frEnabled = Boolean(favoriteRescue?.enabled ?? true);
+                  const frMinFavProb = Number(favoriteRescue?.minFavWinProb);
+                  const frMinHomeWinRate = Number(favoriteRescue?.minHomeWinRate);
+                  const frAwayOdds01 = Number(favoriteRescue?.awayOddsMinLosing01);
+                  const frAwayOdds02 = Number(favoriteRescue?.awayOddsMinLosing02);
+                  const frStakeMO = Number(favoriteRescue?.matchOddsLayStakeAbs);
+                  const frStakeCS = Number(favoriteRescue?.correctScoreLayStakeAbs);
+                  const frTakeMin = Number(favoriteRescue?.matchOddsTakeProfitMinPct);
+                  const frTakeMax = Number(favoriteRescue?.matchOddsTakeProfitMaxPct);
+                  const frCsTake = Number(favoriteRescue?.correctScoreTakeProfitPct);
+                  const frExtremeCsv = String(favoriteRescue?.extremeCorrectScoresCsv ?? '0-3,0-4,1-4,0-5');
 
                   return (
                     <div className="mt-4 space-y-4">
@@ -1697,6 +1720,187 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
                                 const v = Number.isFinite(n) ? Math.max(1, Math.min(500, Math.floor(n))) : 50;
                                 setTicks({ maxCycles: v });
                               }}
+                              className="mt-2"
+                            />
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="rounded-lg border border-gray-200 bg-white p-3">
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <div className="text-sm font-semibold text-gray-900">Agente: Favorito perdendo (LAY visitante)</div>
+                            <div className="text-xs text-gray-600 mt-1">
+                              Detecta favorito pré-live (probabilidade mínima) perdendo 0x1/0x2 no 1º tempo com odds do visitante acima do limite e adiciona na automação com entrada automática.
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <div className="text-xs text-gray-600">Ativo</div>
+                            <Switch checked={frEnabled} onCheckedChange={(checked) => setFavoriteRescue({ enabled: checked })} />
+                          </div>
+                        </div>
+
+                        <div className="mt-3 grid md:grid-cols-3 gap-3">
+                          <div>
+                            <Label htmlFor="fr_minFavProb">Favorito pré-live (mín. %)</Label>
+                            <Input
+                              id="fr_minFavProb"
+                              inputMode="decimal"
+                              placeholder="Ex: 55"
+                              value={Number.isFinite(frMinFavProb) ? String(Math.round(frMinFavProb * 10000) / 100) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(0, Math.min(95, n)) / 100 : 0.55;
+                                setFavoriteRescue({ minFavWinProb: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="fr_minHomeWinRate">Aproveitamento casa (mín. %)</Label>
+                            <Input
+                              id="fr_minHomeWinRate"
+                              inputMode="decimal"
+                              placeholder="Ex: 80"
+                              value={Number.isFinite(frMinHomeWinRate) ? String(Math.round(frMinHomeWinRate * 10000) / 100) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(0, Math.min(100, n)) / 100 : 0.8;
+                                setFavoriteRescue({ minHomeWinRate: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="fr_awayOdds01">Odds visitante (0x1) mín.</Label>
+                            <Input
+                              id="fr_awayOdds01"
+                              inputMode="decimal"
+                              placeholder="Ex: 1.65"
+                              value={Number.isFinite(frAwayOdds01) ? String(Math.round(frAwayOdds01 * 100) / 100) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(1.01, Math.min(50, n)) : 1.65;
+                                setFavoriteRescue({ awayOddsMinLosing01: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="fr_awayOdds02">Odds visitante (0x2) mín.</Label>
+                            <Input
+                              id="fr_awayOdds02"
+                              inputMode="decimal"
+                              placeholder="Ex: 1.30"
+                              value={Number.isFinite(frAwayOdds02) ? String(Math.round(frAwayOdds02 * 100) / 100) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(1.01, Math.min(50, n)) : 1.3;
+                                setFavoriteRescue({ awayOddsMinLosing02: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="fr_stakeMO">Stake LAY (Match Odds) £</Label>
+                            <Input
+                              id="fr_stakeMO"
+                              inputMode="decimal"
+                              placeholder="Ex: 10"
+                              value={Number.isFinite(frStakeMO) ? String(Math.round(frStakeMO * 100) / 100) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(2, Math.min(10000, n)) : 10;
+                                setFavoriteRescue({ matchOddsLayStakeAbs: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="fr_stakeCS">Stake LAY (Correct Score) £</Label>
+                            <Input
+                              id="fr_stakeCS"
+                              inputMode="decimal"
+                              placeholder="Ex: 2"
+                              value={Number.isFinite(frStakeCS) ? String(Math.round(frStakeCS * 100) / 100) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(2, Math.min(10000, n)) : 2;
+                                setFavoriteRescue({ correctScoreLayStakeAbs: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="fr_takeMin">Saída MO (mín. % banca)</Label>
+                            <Input
+                              id="fr_takeMin"
+                              inputMode="decimal"
+                              placeholder="Ex: 10"
+                              value={Number.isFinite(frTakeMin) ? String(Math.round(frTakeMin * 10000) / 100) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(0, Math.min(100, n)) / 100 : 0.1;
+                                setFavoriteRescue({ matchOddsTakeProfitMinPct: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="fr_takeMax">Saída MO (máx. % banca)</Label>
+                            <Input
+                              id="fr_takeMax"
+                              inputMode="decimal"
+                              placeholder="Ex: 15"
+                              value={Number.isFinite(frTakeMax) ? String(Math.round(frTakeMax * 10000) / 100) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(0, Math.min(100, n)) / 100 : 0.15;
+                                setFavoriteRescue({ matchOddsTakeProfitMaxPct: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="fr_csTake">Saída CS (% banca)</Label>
+                            <Input
+                              id="fr_csTake"
+                              inputMode="decimal"
+                              placeholder="Ex: 3"
+                              value={Number.isFinite(frCsTake) ? String(Math.round(frCsTake * 10000) / 100) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(0, Math.min(100, n)) / 100 : 0.03;
+                                setFavoriteRescue({ correctScoreTakeProfitPct: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div className="md:col-span-3">
+                            <Label htmlFor="fr_extremes">Placar “goleada visitante” (CSV)</Label>
+                            <Input
+                              id="fr_extremes"
+                              placeholder="Ex: 0-3,0-4,1-4,0-5"
+                              value={frExtremeCsv}
+                              onChange={(e) => setFavoriteRescue({ extremeCorrectScoresCsv: String(e.target.value ?? '') })}
                               className="mt-2"
                             />
                           </div>

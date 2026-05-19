@@ -149,12 +149,15 @@ const robotTrafficBadge = (
         ? 'scalpingGoals'
         : agentRaw === 'scalpingticks' || agentRaw === 'scalping_ticks'
           ? 'scalpingTicks'
-          : 'correctScore';
+          : agentRaw === 'asianhandicap' || agentRaw === 'asian_handicap' || agentRaw === 'handicap_asiatico' || agentRaw === 'handicapasiatico'
+            ? 'asianHandicap'
+            : 'correctScore';
 
   const agentPhase = (() => {
     if (agent === 'scalpingGoals') return String(x?.strategy?.scalpingGoals?.phase ?? '').trim();
     if (agent === 'scalpingTicks') return String((x as any)?.strategy?.scalpingTicks?.phase ?? '').trim();
     if (agent === 'overGoalsLimit') return String((x as any)?.strategy?.overGoalsLimit?.phase ?? '').trim();
+    if (agent === 'asianHandicap') return String((x as any)?.strategy?.asianHandicap?.phase ?? '').trim();
     return String(x?.strategy?.correctScore?.lastPlan?.mode ?? x?.strategy?.correctScore?.planType ?? '').trim();
   })();
 
@@ -172,6 +175,7 @@ const robotTrafficBadge = (
     if (agent === 'scalpingGoals') return String(x?.strategy?.scalpingGoals?.lastTickAt ?? '').trim();
     if (agent === 'scalpingTicks') return String((x as any)?.strategy?.scalpingTicks?.lastTickAt ?? '').trim();
     if (agent === 'overGoalsLimit') return String((x as any)?.strategy?.overGoalsLimit?.lastTickAt ?? '').trim();
+    if (agent === 'asianHandicap') return String((x as any)?.strategy?.asianHandicap?.lastTickAt ?? '').trim();
     const exec = String(x?.strategy?.correctScore?.lastExecutionAt ?? '').trim();
     if (exec) return exec;
     const plan = String(x?.strategy?.correctScore?.lastPlannedAt ?? '').trim();
@@ -181,7 +185,13 @@ const robotTrafficBadge = (
 
   const lastActivityMs = lastActivityIso ? new Date(lastActivityIso).getTime() : NaN;
   const maxAgeMs =
-    agent === 'scalpingTicks' ? 12_000 : agent === 'scalpingGoals' ? 20_000 : agent === 'overGoalsLimit' ? 20_000 : 45_000;
+    agent === 'scalpingTicks'
+      ? 12_000
+      : agent === 'scalpingGoals'
+        ? 20_000
+        : agent === 'overGoalsLimit' || agent === 'asianHandicap'
+          ? 20_000
+          : 45_000;
 
   if (Number.isFinite(lastActivityMs) && nowMs - lastActivityMs > maxAgeMs) {
     const ageSec = Math.floor((nowMs - lastActivityMs) / 1000);
@@ -394,15 +404,17 @@ function TeamCrest({ src, name }: { src: string | null | undefined; name: string
 export default function AutomationPage() {
   const [items, setItems] = useState<QueueItem[]>([]);
   const itemsRef = useRef<QueueItem[]>([]);
+  const finishedStopSentRef = useRef<Set<string>>(new Set());
   const [status, setStatus] = useState<'idle' | 'loading' | 'error'>('idle');
   const [view, setView] = useState<'all' | 'live' | 'today' | 'tomorrow' | 'next'>('all');
   const [marketsOpen, setMarketsOpen] = useState(false);
   const [marketsItemId, setMarketsItemId] = useState<string | null>(null);
   const [marketsDraft, setMarketsDraft] = useState<AutomationMarketToggle[]>([]);
-  const [showPredictions, setShowPredictions] = useState(false);
   const [marketsSaveBusy, setMarketsSaveBusy] = useState(false);
   const [csPlanType, setCsPlanType] = useState<'coverage' | 'ladder_volume'>('coverage');
-  const [robotType, setRobotType] = useState<'correctScore' | 'scalpingGoals' | 'overGoalsLimit' | 'scalpingTicks'>('correctScore');
+  const [robotType, setRobotType] = useState<'correctScore' | 'scalpingGoals' | 'overGoalsLimit' | 'scalpingTicks' | 'asianHandicap'>(
+    'correctScore',
+  );
   const [startConfirmOpen, setStartConfirmOpen] = useState(false);
   const [startConfirmItem, setStartConfirmItem] = useState<QueueItem | null>(null);
   const [startConfirmBusy, setStartConfirmBusy] = useState(false);
@@ -912,7 +924,7 @@ export default function AutomationPage() {
           includeCorrectScore: true,
           runCorrectScorePlan: true,
           planConfig: {
-            minProfitPct: 0.02,
+            minProfitPct: 0.03,
             targetProfitPct: 0.03,
             maxProfitPct: 0.05,
             bankroll: bankrollForCorrectScore,
@@ -957,6 +969,50 @@ export default function AutomationPage() {
           await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/strategy/correctScore/execute`, {
             method: 'POST',
             body: JSON.stringify({ matchId: x.matchId, dryRun: false, adminToken, config: { bankroll: bankrollForCorrectScore } }),
+          }).catch(() => null);
+        }
+
+        await loadQueue({ silent: true });
+      }
+
+      if (adminToken) {
+        const snapshot = itemsRef.current;
+        const rebalanceTargets = snapshot
+          .filter((x) => x.status === 'running')
+          .filter((x) => {
+            const agent = normalizeAgent(x.strategy?.agent);
+            return agent === 'correctScore';
+          })
+          .filter((x) => Boolean(x.betfair?.correctScore?.marketId))
+          .filter((x) => Boolean(String(x.strategy?.correctScore?.lastExecutionAt ?? '').trim()) || Boolean(String(x.strategy?.correctScore?.adoptedExistingAt ?? '').trim()))
+          .slice(0, 6);
+
+        const nowTs = Date.now();
+        for (const x of rebalanceTargets) {
+          const lastReb = String((x.strategy as any)?.correctScore?.lastRebalanceAt ?? '').trim();
+          const lastRebTs = lastReb ? new Date(lastReb).getTime() : 0;
+          if (lastRebTs && Number.isFinite(lastRebTs) && nowTs - lastRebTs < 30_000) continue;
+
+          const apiLive = apiFootballLiveByMatchId[String(x.matchId)] ?? null;
+          const goalsHome = typeof apiLive?.goalsHome === 'number' ? apiLive.goalsHome : x.scoreHome;
+          const goalsAway = typeof apiLive?.goalsAway === 'number' ? apiLive.goalsAway : x.scoreAway;
+          const totalGoals = typeof goalsHome === 'number' && typeof goalsAway === 'number' ? Math.max(0, Math.floor(goalsHome) + Math.floor(goalsAway)) : null;
+          const lastGoals = Number((x.strategy as any)?.correctScore?.lastGoals);
+          const prevGoals = Number.isFinite(lastGoals) ? lastGoals : null;
+          if (totalGoals != null && prevGoals != null && totalGoals === prevGoals) continue;
+
+          await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/strategy/correctScore/rebalance`, {
+            method: 'POST',
+            body: JSON.stringify({
+              matchId: x.matchId,
+              adminToken,
+              dryRun: false,
+              config: {
+                targetMinGreenAbs: 0,
+                maxInstructions: 3,
+                maxStakePerInstruction: 50,
+              },
+            }),
           }).catch(() => null);
         }
 
@@ -1053,6 +1109,7 @@ export default function AutomationPage() {
           const lastTick = String(x.strategy?.overGoalsLimit?.lastTickAt ?? '').trim();
           const lastTickTs = lastTick ? new Date(lastTick).getTime() : 0;
           if (lastTickTs && Number.isFinite(lastTickTs) && Date.now() - lastTickTs < 10_000) continue;
+          const live = apiFootballLiveByMatchId[String(x.matchId)] ?? null;
           const lim = (robotLimits as any)?.overGoalsLimit && typeof (robotLimits as any).overGoalsLimit === 'object' ? (robotLimits as any).overGoalsLimit : {};
           const minOdds = Number(lim?.minOdds);
           const maxEntries = Number(lim?.maxEntries);
@@ -1068,6 +1125,21 @@ export default function AutomationPage() {
             body: JSON.stringify({
               matchId: x.matchId,
               adminToken,
+              stats: live
+                ? {
+                    fetchedAt: live.fetchedAt,
+                    dangerousAttacksHome: live.dangerousAttacksHome,
+                    dangerousAttacksAway: live.dangerousAttacksAway,
+                    attacksHome: live.attacksHome,
+                    attacksAway: live.attacksAway,
+                    shotsOnGoalHome: live.shotsOnGoalHome,
+                    shotsOnGoalAway: live.shotsOnGoalAway,
+                    cornersHome: live.cornersHome,
+                    cornersAway: live.cornersAway,
+                    cardsHome: live.cardsHome,
+                    cardsAway: live.cardsAway,
+                  }
+                : null,
               config: {
                 bankroll: bankrollForOverUnder,
                 bankrollTotal,
@@ -1080,6 +1152,63 @@ export default function AutomationPage() {
                 ...(Number.isFinite(stakePct) ? { stakePct } : {}),
                 ...(Number.isFinite(entryOffsetTicks) ? { entryOffsetTicks } : {}),
                 ...(Number.isFinite(secondsToWaitMatch) ? { secondsToWaitMatch } : {}),
+              },
+            }),
+          }).catch(() => null);
+        }
+
+        await loadQueue({ silent: true });
+      }
+
+      if (adminToken) {
+        const snapshot = itemsRef.current;
+        const asianHandicapTargets = snapshot
+          .filter((x) => x.status === 'running')
+          .filter((x) => normalizeAgent(x.strategy?.agent) === 'asianHandicap')
+          .slice(0, 4);
+
+        for (const x of asianHandicapTargets) {
+          const lastTick = String((x as any).strategy?.asianHandicap?.lastTickAt ?? '').trim();
+          const lastTickTs = lastTick ? new Date(lastTick).getTime() : 0;
+          if (lastTickTs && Number.isFinite(lastTickTs) && Date.now() - lastTickTs < 10_000) continue;
+          const live = apiFootballLiveByMatchId[String(x.matchId)] ?? null;
+          const lim = (robotLimits as any)?.asianHandicap && typeof (robotLimits as any).asianHandicap === 'object' ? (robotLimits as any).asianHandicap : {};
+          const profitTargetPct = Number(lim?.profitTargetPct);
+          const stakePct = Number(lim?.stakePct);
+          const entryOffsetTicks = Number(lim?.entryOffsetTicks);
+          const targetTicks = Number(lim?.targetTicks);
+          const maxEntries = Number(lim?.maxEntries);
+          await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/strategy/asianHandicap/tick`, {
+            method: 'POST',
+            body: JSON.stringify({
+              matchId: x.matchId,
+              adminToken,
+              live: live
+                ? { fetchedAt: live.fetchedAt, elapsed: live.elapsed, goalsHome: live.goalsHome, goalsAway: live.goalsAway, statusShort: live.statusShort }
+                : null,
+              stats: live
+                ? {
+                    fetchedAt: live.fetchedAt,
+                    dangerousAttacksHome: live.dangerousAttacksHome,
+                    dangerousAttacksAway: live.dangerousAttacksAway,
+                    attacksHome: live.attacksHome,
+                    attacksAway: live.attacksAway,
+                    shotsOnGoalHome: live.shotsOnGoalHome,
+                    shotsOnGoalAway: live.shotsOnGoalAway,
+                    cornersHome: live.cornersHome,
+                    cornersAway: live.cornersAway,
+                    cardsHome: live.cardsHome,
+                    cardsAway: live.cardsAway,
+                  }
+                : null,
+              config: {
+                bankroll: bankrollForOverUnder,
+                bankrollTotal,
+                ...(Number.isFinite(profitTargetPct) ? { profitTargetPct } : {}),
+                ...(Number.isFinite(stakePct) ? { stakePct } : {}),
+                ...(Number.isFinite(entryOffsetTicks) ? { entryOffsetTicks } : {}),
+                ...(Number.isFinite(targetTicks) ? { targetTicks } : {}),
+                ...(Number.isFinite(maxEntries) ? { maxEntries } : {}),
               },
             }),
           }).catch(() => null);
@@ -1329,11 +1458,16 @@ export default function AutomationPage() {
     return map;
   };
 
-  const normalizeAgent = (raw: unknown): 'correctScore' | 'scalpingGoals' | 'overGoalsLimit' | 'scalpingTicks' => {
+  const normalizeAgent = (
+    raw: unknown,
+  ): 'correctScore' | 'scalpingGoals' | 'overGoalsLimit' | 'scalpingTicks' | 'asianHandicap' | 'favoriteRescue' => {
     const agentRaw = String(raw ?? '').trim().toLowerCase();
     if (agentRaw === 'overgoalslimit' || agentRaw === 'over_goals_limit') return 'overGoalsLimit';
     if (agentRaw === 'scalpinggoals' || agentRaw === 'scalping_goals' || agentRaw === 'scalping_goals_above') return 'scalpingGoals';
     if (agentRaw === 'scalpingticks' || agentRaw === 'scalping_ticks') return 'scalpingTicks';
+    if (agentRaw === 'asianhandicap' || agentRaw === 'asian_handicap' || agentRaw === 'handicap_asiatico' || agentRaw === 'handicapasiatico')
+      return 'asianHandicap';
+    if (agentRaw === 'favoriterescue' || agentRaw === 'favorite_rescue' || agentRaw === 'lay_favorito_perdendo') return 'favoriteRescue';
     return 'correctScore';
   };
 
@@ -1342,20 +1476,23 @@ export default function AutomationPage() {
     setMarketsItemId(x.matchId);
     setMarketsDraft(base);
     const agentRaw = String(x.strategy?.agent ?? '').trim().toLowerCase();
-    const agent =
+      const agent =
       agentRaw === 'overgoalslimit' || agentRaw === 'over_goals_limit'
         ? 'overGoalsLimit'
         : agentRaw === 'scalpinggoals' || agentRaw === 'scalping_goals' || agentRaw === 'scalping_goals_above'
           ? 'scalpingGoals'
           : agentRaw === 'scalpingticks' || agentRaw === 'scalping_ticks'
             ? 'scalpingTicks'
-          : 'correctScore';
+            : agentRaw === 'asianhandicap' || agentRaw === 'asian_handicap' || agentRaw === 'handicap_asiatico' || agentRaw === 'handicapasiatico'
+              ? 'asianHandicap'
+                : agentRaw === 'favoriterescue' || agentRaw === 'favorite_rescue' || agentRaw === 'lay_favorito_perdendo'
+                  ? 'favoriteRescue'
+              : 'correctScore';
     setRobotType(agent);
     const currentPlanType = String(x.strategy?.correctScore?.planType ?? '').trim().toLowerCase() === 'ladder_volume'
       ? 'ladder_volume'
       : 'coverage';
     setCsPlanType(currentPlanType);
-    setShowPredictions(false);
     setMarketsOpen(true);
   };
 
@@ -1392,7 +1529,9 @@ export default function AutomationPage() {
               ? 'scalpingGoals'
               : robotType === 'scalpingTicks'
                 ? 'scalpingTicks'
-                : 'correctScore',
+                : robotType === 'asianHandicap'
+                  ? 'asianHandicap'
+                  : 'correctScore',
       };
       if (robotType === 'correctScore') {
         nextStrategy.correctScore = {
@@ -1400,12 +1539,12 @@ export default function AutomationPage() {
           planType: csPlanType === 'ladder_volume' ? 'ladder_volume' : 'coverage',
         };
       }
-      const ok = await updateItem(marketsItemId, { strategy: nextStrategy, markets: marketsDraft });
+      const marketsToSave = robotType === 'correctScore' ? normalizeMarketsCorrectScoreOnly(marketsDraft) : marketsDraft;
+      const ok = await updateItem(marketsItemId, { strategy: nextStrategy, markets: marketsToSave });
       if (!ok) return;
       setMarketsOpen(false);
       setMarketsItemId(null);
       setMarketsDraft([]);
-      setShowPredictions(false);
     } finally {
       setMarketsSaveBusy(false);
     }
@@ -1610,6 +1749,42 @@ export default function AutomationPage() {
     return true;
   };
 
+  const executeAsianHandicapOnce = async (
+    matchId: string,
+    config: {
+      bankroll: number;
+      bankrollTotal?: number;
+      profitTargetPct?: number;
+      stakePct?: number;
+      entryOffsetTicks?: number;
+      targetTicks?: number;
+      maxEntries?: number;
+      maxSpreadTicks?: number;
+      minMarketMatched?: number;
+      minRunnerMatched?: number;
+      mode?: 'scalp' | 'swing' | 'hybrid';
+    },
+  ) => {
+    const adminToken = getAdminTokenOrToast();
+    if (!adminToken) return false;
+    const { projectId } = await import('/utils/supabase/info');
+    const res = await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/strategy/asianHandicap/tick`, {
+      method: 'POST',
+      body: JSON.stringify({ matchId, adminToken, config }),
+    });
+    const raw = await res.text().catch(() => '');
+    let data: any = null;
+    if (raw) {
+      try {
+        data = JSON.parse(raw);
+      } catch {
+        throw new Error(`HTTP ${res.status} ${res.statusText} | Resposta inválida: ${raw.slice(0, 200)}`);
+      }
+    }
+    if (!res.ok || !data?.ok) throw new Error(String(data?.error ?? `HTTP ${res.status} ${res.statusText}`));
+    return true;
+  };
+
   const executeScalpingTicksOnce = async (
     matchId: string,
     config: {
@@ -1656,7 +1831,8 @@ export default function AutomationPage() {
     if (!ok) return;
     try {
       const agent = normalizeAgent(x.strategy?.agent);
-      if (agent === 'scalpingGoals' || agent === 'overGoalsLimit' || agent === 'scalpingTicks') {
+      if (agent === 'favoriteRescue') return;
+      if (agent === 'scalpingGoals' || agent === 'overGoalsLimit' || agent === 'scalpingTicks' || agent === 'asianHandicap') {
         const cfg = loadApiConfig();
         const bankrollTotal = Number(cfg?.betfairBankroll ?? 0);
         const marketPercents = (cfg?.betfairMarketPercents && typeof cfg.betfairMarketPercents === 'object') ? cfg.betfairMarketPercents : {};
@@ -1680,6 +1856,23 @@ export default function AutomationPage() {
             stakePct: Number(lim?.stakePct),
             entryOffsetTicks: Number(lim?.entryOffsetTicks),
             secondsToWaitMatch: Number(lim?.secondsToWaitMatch),
+          });
+        } else if (agent === 'asianHandicap') {
+          const lim = (robotLimits as any)?.asianHandicap && typeof (robotLimits as any).asianHandicap === 'object' ? (robotLimits as any).asianHandicap : {};
+          const m = String(lim?.mode ?? '').trim().toLowerCase();
+          const mode = m === 'scalp' || m === 'swing' || m === 'hybrid' ? (m as any) : undefined;
+          await executeAsianHandicapOnce(x.matchId, {
+            bankroll,
+            bankrollTotal,
+            profitTargetPct: Number(lim?.profitTargetPct),
+            stakePct: Number(lim?.stakePct),
+            entryOffsetTicks: Number(lim?.entryOffsetTicks),
+            targetTicks: Number(lim?.targetTicks),
+            maxEntries: Number(lim?.maxEntries),
+            maxSpreadTicks: Number(lim?.maxSpreadTicks),
+            minMarketMatched: Number(lim?.minMarketMatched),
+            minRunnerMatched: Number(lim?.minRunnerMatched),
+            ...(mode ? { mode } : {}),
           });
         } else if (agent === 'scalpingTicks') {
           const lim = (robotLimits as any)?.scalpingTicks && typeof (robotLimits as any).scalpingTicks === 'object' ? (robotLimits as any).scalpingTicks : {};
@@ -1757,6 +1950,24 @@ export default function AutomationPage() {
   }, []);
 
   useEffect(() => {
+    const id = window.setInterval(() => {
+      const rows = itemsRef.current;
+      if (!Array.isArray(rows) || rows.length === 0) return;
+      const store = (finishedStopSentRef.current as unknown as Set<string>) ?? new Set<string>();
+      for (const x of rows) {
+        if (!x?.matchId) continue;
+        if (x.status !== 'running' && x.status !== 'paused') continue;
+        if (!isFinished(x)) continue;
+        if (store.has(x.matchId)) continue;
+        store.add(x.matchId);
+        void updateItem(x.matchId, { status: 'stopped' });
+      }
+      finishedStopSentRef.current = store as any;
+    }, 20_000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  useEffect(() => {
     void refreshOdds();
     const id = window.setInterval(() => {
       void refreshOdds();
@@ -1805,7 +2016,6 @@ export default function AutomationPage() {
           if (!v) {
             setMarketsItemId(null);
             setMarketsDraft([]);
-            setShowPredictions(false);
           }
         }}
       >
@@ -1813,7 +2023,7 @@ export default function AutomationPage() {
           <DialogHeader>
             <DialogTitle>Mercados da automação</DialogTitle>
             <DialogDescription>
-              Selecione um robô para este jogo. As previsões do Dashboard são opcionais e só aparecem se você ativar.
+              Selecione um robô para este jogo.
             </DialogDescription>
           </DialogHeader>
 
@@ -1836,6 +2046,8 @@ export default function AutomationPage() {
                           ? 'scalpingGoals'
                           : e.target.value === 'scalpingTicks'
                             ? 'scalpingTicks'
+                            : e.target.value === 'asianHandicap'
+                              ? 'asianHandicap'
                             : 'correctScore';
                     setRobotType(v);
                   }}
@@ -1845,6 +2057,7 @@ export default function AutomationPage() {
                   <option value="scalpingGoals">Scalping Gol Acima</option>
                   <option value="overGoalsLimit">Over Gols Limite</option>
                   <option value="scalpingTicks">Scalping em Ticks</option>
+                  <option value="asianHandicap">Handicap Asiático</option>
                 </select>
               </div>
 
@@ -1877,6 +2090,10 @@ export default function AutomationPage() {
                 <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
                   Faz scalping no Under 0.5 acima do placar, buscando ciclos de ticks positivos.
                 </div>
+              ) : robotType === 'asianHandicap' ? (
+                <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                  Opera Asian Handicap com leitura de pressão + fluxo, alternando entre scalp e swing conforme o momentum.
+                </div>
               ) : (
                 <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
                   Opera mercados de Over (limite de gols) com leitura de liquidez/volume e até 3 entradas por jogo.
@@ -1886,36 +2103,13 @@ export default function AutomationPage() {
           ) : null}
 
           <div className="mt-3 rounded-lg border border-gray-200 bg-white px-3 py-3">
-            <div className="flex items-center justify-between gap-3">
-              <div className="min-w-0">
-                <div className="text-sm font-semibold text-gray-900">Previsões</div>
-                <div className="mt-1 text-xs text-gray-600">Ative para ver e ajustar as previsões vindas do Dashboard.</div>
-              </div>
-              <Switch checked={showPredictions} onCheckedChange={(v) => setShowPredictions(Boolean(v))} />
-            </div>
+            <div className="text-sm font-semibold text-gray-900">Previsões</div>
+            <div className="mt-1 text-xs text-gray-600">Desativado por enquanto. A automação está operando somente pelos bots e suas estratégias.</div>
           </div>
 
-          {showPredictions ? (
-            marketsDraft.length === 0 ? (
-              <div className="mt-2 text-sm text-gray-600">Nenhuma previsão disponível para este item.</div>
-            ) : (
-              <div className="mt-2 space-y-2">
-                {marketsDraft.map((m) => (
-                  <div key={m.key} className="flex items-center justify-between gap-3 rounded-lg border border-gray-200 bg-white px-3 py-2">
-                    <div className="min-w-0">
-                      <div className="font-semibold text-gray-900 truncate">{m.label}</div>
-                      {m.details ? <div className="text-xs text-gray-600">{m.details}</div> : null}
-                    </div>
-                    <Switch checked={Boolean(m.enabled)} onCheckedChange={(v) => updateMarketDraft(m.key, Boolean(v))} />
-                  </div>
-                ))}
-              </div>
-            )
-          ) : (
-            <div className="mt-2 text-xs text-gray-600">
-              Selecione um robô e clique em <span className="font-semibold">Salvar</span>. Depois clique em <span className="font-semibold">Iniciar</span> no card.
-            </div>
-          )}
+          <div className="mt-2 text-xs text-gray-600">
+            Selecione um robô e clique em <span className="font-semibold">Salvar</span>. Depois clique em <span className="font-semibold">Iniciar</span> no card.
+          </div>
 
           <div className="mt-4 flex items-center justify-end gap-2">
             <Button
@@ -1971,6 +2165,10 @@ export default function AutomationPage() {
                   ) : agent === 'overGoalsLimit' ? (
                     <div className="text-sm text-gray-700">
                       Robô: <span className="font-semibold">Over Gols Limite</span>
+                    </div>
+                  ) : agent === 'asianHandicap' ? (
+                    <div className="text-sm text-gray-700">
+                      Robô: <span className="font-semibold">Handicap Asiático</span>
                     </div>
                   ) : (
                     <div className="text-sm text-gray-700">
@@ -2425,14 +2623,15 @@ export default function AutomationPage() {
 
                       {rows.map((x) => {
                         const k = kickoffDate(x);
-                        const canPause = x.status === 'running';
-                        const canStart = x.status === 'queued' || x.status === 'paused' || x.status === 'stopped';
-                        const canStop = x.status === 'running' || x.status === 'paused';
+                        const agent = normalizeAgent(x.strategy?.agent);
                         const mapped = Boolean(x.betfair?.marketId);
                         const matched = x.betfair?.matchedVolume ?? null;
                         const markets = Array.isArray(x.markets) ? x.markets : deriveMarketsFromPrediction(x);
                         const finished = isFinished(x);
                         const live = isLive(x);
+                        const canPause = !finished && x.status === 'running';
+                        const canStart = !finished && (x.status === 'queued' || x.status === 'paused' || x.status === 'stopped');
+                        const canStop = !finished && (x.status === 'running' || x.status === 'paused');
                         const gameStatusLabel = live ? 'AO VIVO' : finished ? 'FINALIZADO' : 'EM BREVE';
                         const gameStatusVariant = live ? 'default' : finished ? 'secondary' : 'outline';
                         const baseMarketId = String(x.betfair?.marketId ?? '').trim();
@@ -2608,7 +2807,7 @@ export default function AutomationPage() {
                             key={x.matchId}
                             className={cn(
                               'relative grid grid-cols-[44px_72px_1fr_repeat(6,72px)_220px] border-b border-gray-100',
-                              finished ? 'bg-gray-50' : 'bg-white',
+                              finished ? 'bg-gray-50 border-l-4 border-gray-300 opacity-80 grayscale' : 'bg-white',
                             )}
                             onDoubleClick={(e) => {
                               const el = e.target as HTMLElement | null;
@@ -2649,9 +2848,9 @@ export default function AutomationPage() {
 
                                       const dotClass =
                                         kind === 'running'
-                                          ? 'bg-emerald-500 ring-emerald-200'
+                                          ? 'bg-emerald-500 ring-emerald-200 animate-pulse [animation-duration:2.8s]'
                                           : kind === 'oscillating'
-                                            ? 'bg-amber-400 ring-amber-200'
+                                            ? 'bg-amber-400 ring-amber-200 animate-pulse [animation-duration:2.8s]'
                                             : 'bg-red-500 ring-red-200';
 
                                       return <span className={cn('h-3 w-3 rounded-full ring-4', dotClass)} />;
@@ -2724,6 +2923,60 @@ export default function AutomationPage() {
                                 const money = (v: number | null) => (typeof v === 'number' && Number.isFinite(v) ? formatMoneyBR(v) : '—');
                                 const profitValue = typeof preview?.profit === 'number' && Number.isFinite(preview.profit) ? preview.profit : null;
                                 const profitClass = profitValue != null && profitValue >= 0 ? 'text-emerald-700' : 'text-red-700';
+                                const footer = (() => {
+                                  if (x.status !== 'running') return null;
+                                  if (!mapped) return { text: 'Mapeando evento/mercado na Betfair...', className: 'text-gray-600' };
+                                  if (finished) return { text: 'Jogo finalizado.', className: 'text-gray-600' };
+                                  const phase =
+                                    agent === 'scalpingGoals'
+                                      ? String(x.strategy?.scalpingGoals?.phase ?? '').trim()
+                                      : agent === 'scalpingTicks'
+                                        ? String((x as any).strategy?.scalpingTicks?.phase ?? '').trim()
+                                        : agent === 'overGoalsLimit'
+                                          ? String((x as any).strategy?.overGoalsLimit?.phase ?? '').trim()
+                                          : agent === 'asianHandicap'
+                                            ? String((x as any).strategy?.asianHandicap?.phase ?? '').trim()
+                                            : String(x.strategy?.correctScore?.lastPlan?.mode ?? x.strategy?.correctScore?.planType ?? '').trim();
+
+                                  if (!phase) {
+                                    return {
+                                      text: agent === 'correctScore' ? 'Calculando cenários...' : 'Analisando o mercado...',
+                                      className: 'text-red-700',
+                                    };
+                                  }
+                                  const p = phase.toLowerCase();
+                                  if (p.includes('closed_profit_target') || p.includes('closed')) {
+                                    return { text: 'Cashout efetuado com sucesso...', className: 'text-emerald-700' };
+                                  }
+                                  if (p.includes('time_exit') || p.includes('cashout') || p.includes('risk_exit')) {
+                                    return { text: 'Saindo da Operação...', className: 'text-purple-700' };
+                                  }
+                                  if (p.includes('exit_placed') || p.includes('waiting_exit')) {
+                                    return { text: 'Tentando sair da operação...', className: 'text-amber-700' };
+                                  }
+                                  if (p.includes('entered') || p.includes('entry')) {
+                                    return { text: 'Entrada efetuada...', className: 'text-emerald-700' };
+                                  }
+                                  if (p.includes('cooldown') || p.includes('post_goal_wait')) {
+                                    return { text: 'Aguardando o jogo normalizar para Scalpes...', className: 'text-purple-700' };
+                                  }
+                                  if (p.includes('skip_no_market') || p.includes('skip') || p.includes('blocked')) {
+                                    return { text: 'Monitorando oportunidades...', className: 'text-red-700' };
+                                  }
+                                  if (p.includes('waiting_entry')) {
+                                    return { text: 'Analisando o mercado...', className: 'text-red-700' };
+                                  }
+                                  if (p.includes('swing_hold_pressure') || p.includes('swing_hold')) {
+                                    return { text: 'Aguardando alerta de Gol...', className: 'text-red-700' };
+                                  }
+                                  if (agent === 'correctScore') {
+                                    if (p.includes('rebalance')) return { text: 'Redistribuindo greenbook...', className: 'text-purple-700' };
+                                    if (p.includes('dutch_back')) return { text: 'Montando dutching e distribuindo stakes...', className: 'text-red-700' };
+                                    if (p.includes('staged_back')) return { text: 'Aguardando odds melhores para dutching...', className: 'text-red-700' };
+                                    if (p.includes('adopt')) return { text: 'Gerenciando posição existente...', className: 'text-amber-700' };
+                                  }
+                                  return { text: 'Monitorando oportunidades...', className: 'text-red-700' };
+                                })();
 
                                 return (
                                   <>
@@ -2758,6 +3011,22 @@ export default function AutomationPage() {
                                         <div className="text-xs text-gray-600 order-3">{expanded ? 'Ocultar' : 'Detalhes'}</div>
                                       </div>
                                     </div>
+                                    {footer ? (
+                                      <div className="mt-1 flex items-center justify-between gap-2">
+                                        <div className={cn('text-[11px]', footer.className)}>{footer.text}</div>
+                                        {finished ? (
+                                          <Badge variant="secondary" className="h-5 px-2 text-[10px] font-semibold tracking-wide">
+                                            FINALIZADO
+                                          </Badge>
+                                        ) : null}
+                                      </div>
+                                    ) : finished ? (
+                                      <div className="mt-1 flex items-center justify-end">
+                                        <Badge variant="secondary" className="h-5 px-2 text-[10px] font-semibold tracking-wide">
+                                          FINALIZADO
+                                        </Badge>
+                                      </div>
+                                    ) : null}
 
                                     {expanded ? (
                                       <div className="mt-2">

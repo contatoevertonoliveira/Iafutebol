@@ -44,6 +44,32 @@ export interface ApiConfig {
       entryOffsetTicks?: number;
       secondsToWaitMatch?: number;
     };
+    asianHandicap?: {
+      targetTicks?: number;
+      maxSpreadTicks?: number;
+      minMarketMatched?: number;
+      minRunnerMatched?: number;
+      stakePct?: number;
+      profitTargetPct?: number;
+      secondsToWaitMatch?: number;
+    };
+    correctScore?: {
+      minProfitPct?: number;
+      maxSelections?: number;
+    };
+    favoriteRescue?: {
+      enabled?: boolean;
+      minFavWinProb?: number;
+      minHomeWinRate?: number;
+      awayOddsMinLosing01?: number;
+      awayOddsMinLosing02?: number;
+      matchOddsLayStakeAbs?: number;
+      correctScoreLayStakeAbs?: number;
+      matchOddsTakeProfitMinPct?: number;
+      matchOddsTakeProfitMaxPct?: number;
+      correctScoreTakeProfitPct?: number;
+      extremeCorrectScoresCsv?: string;
+    };
   };
 }
 
@@ -221,6 +247,32 @@ export function loadApiConfig(): ApiConfig | null {
           entryOffsetTicks: 2,
           secondsToWaitMatch: 10,
         },
+        asianHandicap: {
+          targetTicks: 10,
+          maxSpreadTicks: 2,
+          minMarketMatched: 120000,
+          minRunnerMatched: 20000,
+          stakePct: 1,
+          profitTargetPct: 0.03,
+          secondsToWaitMatch: 10,
+        },
+        correctScore: {
+          minProfitPct: 0.03,
+          maxSelections: 6,
+        },
+        favoriteRescue: {
+          enabled: false,
+          minFavWinProb: 0.55,
+          minHomeWinRate: 0.8,
+          awayOddsMinLosing01: 1.65,
+          awayOddsMinLosing02: 1.3,
+          matchOddsLayStakeAbs: 10,
+          correctScoreLayStakeAbs: 2,
+          matchOddsTakeProfitMinPct: 0.1,
+          matchOddsTakeProfitMaxPct: 0.15,
+          correctScoreTakeProfitPct: 0.03,
+          extremeCorrectScoresCsv: "0-3,0-4,1-4,0-5",
+        },
       },
     } satisfies ApiConfig;
 
@@ -253,10 +305,16 @@ export function loadApiConfig(): ApiConfig | null {
         const sg = raw?.scalpingGoals && typeof raw.scalpingGoals === 'object' ? raw.scalpingGoals : {};
         const st = raw?.scalpingTicks && typeof raw.scalpingTicks === 'object' ? raw.scalpingTicks : {};
         const og = raw?.overGoalsLimit && typeof raw.overGoalsLimit === 'object' ? raw.overGoalsLimit : {};
+        const ah = raw?.asianHandicap && typeof raw.asianHandicap === 'object' ? raw.asianHandicap : {};
+        const cs = raw?.correctScore && typeof raw.correctScore === 'object' ? raw.correctScore : {};
+        const fr = raw?.favoriteRescue && typeof raw.favoriteRescue === 'object' ? raw.favoriteRescue : {};
         return {
           scalpingGoals: { ...(defaults.betfairRobotLimits?.scalpingGoals ?? {}), ...(sg as any) },
           scalpingTicks: { ...(defaults.betfairRobotLimits?.scalpingTicks ?? {}), ...(st as any) },
           overGoalsLimit: { ...(defaults.betfairRobotLimits?.overGoalsLimit ?? {}), ...(og as any) },
+          asianHandicap: { ...(defaults.betfairRobotLimits?.asianHandicap ?? {}), ...(ah as any) },
+          correctScore: { ...(defaults.betfairRobotLimits?.correctScore ?? {}), ...(cs as any) },
+          favoriteRescue: { ...(defaults.betfairRobotLimits?.favoriteRescue ?? {}), ...(fr as any) },
         };
       })(),
     } satisfies ApiConfig;
@@ -299,6 +357,29 @@ export function loadApiConfig(): ApiConfig | null {
       entryOffsetTicks: 2,
       secondsToWaitMatch: 10,
     },
+    asianHandicap: {
+      targetTicks: 10,
+      maxSpreadTicks: 2,
+      minMarketMatched: 120000,
+      minRunnerMatched: 20000,
+      stakePct: 1,
+      profitTargetPct: 0.03,
+      secondsToWaitMatch: 10,
+    },
+    correctScore: { minProfitPct: 0.03, maxSelections: 6 },
+    favoriteRescue: {
+      enabled: false,
+      minFavWinProb: 0.55,
+      minHomeWinRate: 0.8,
+      awayOddsMinLosing01: 1.65,
+      awayOddsMinLosing02: 1.3,
+      matchOddsLayStakeAbs: 10,
+      correctScoreLayStakeAbs: 2,
+      matchOddsTakeProfitMinPct: 0.1,
+      matchOddsTakeProfitMaxPct: 0.15,
+      correctScoreTakeProfitPct: 0.03,
+      extremeCorrectScoresCsv: "0-3,0-4,1-4,0-5",
+    },
   };
 
   const merged = {
@@ -325,10 +406,16 @@ export function loadApiConfig(): ApiConfig | null {
       const sg = raw?.scalpingGoals && typeof raw.scalpingGoals === 'object' ? raw.scalpingGoals : {};
       const st = raw?.scalpingTicks && typeof raw.scalpingTicks === 'object' ? raw.scalpingTicks : {};
       const og = raw?.overGoalsLimit && typeof raw.overGoalsLimit === 'object' ? raw.overGoalsLimit : {};
+      const ah = raw?.asianHandicap && typeof raw.asianHandicap === 'object' ? raw.asianHandicap : {};
+      const cs = raw?.correctScore && typeof raw.correctScore === 'object' ? raw.correctScore : {};
+      const fr = raw?.favoriteRescue && typeof raw.favoriteRescue === 'object' ? raw.favoriteRescue : {};
       return {
         scalpingGoals: { ...(defaultsBetfairRobotLimits.scalpingGoals ?? {}), ...(sg as any) },
         scalpingTicks: { ...(defaultsBetfairRobotLimits.scalpingTicks ?? {}), ...(st as any) },
         overGoalsLimit: { ...(defaultsBetfairRobotLimits.overGoalsLimit ?? {}), ...(og as any) },
+        asianHandicap: { ...(defaultsBetfairRobotLimits.asianHandicap ?? {}), ...(ah as any) },
+        correctScore: { ...(defaultsBetfairRobotLimits.correctScore ?? {}), ...(cs as any) },
+        favoriteRescue: { ...(defaultsBetfairRobotLimits.favoriteRescue ?? {}), ...(fr as any) },
       };
     })(),
   } satisfies ApiConfig;

@@ -5,7 +5,7 @@ import { PredictionDetails } from '../components/PredictionDetails';
 import { FilterBar } from '../components/FilterBar';
 import { AgentAnalysis } from '../components/AgentAnalysis';
 import { DraggableWindow } from '../components/DraggableWindow';
-import { BarChart3, Brain, Globe, Loader2, Plus, Search, ShieldCheck, Target, TrendingUp } from 'lucide-react';
+import { BarChart3, Brain, Globe, Loader2, Plus, Search, ShieldCheck, Target, TrendingUp, X } from 'lucide-react';
 import { MobileMatchCard } from '../components/MobileMatchCard';
 import { getDynamicAgentProfiles, AgentEnsemble, AgentPrediction, learnFromMatchResult, recordTrainingSample, type FootballMatch } from '../services/aiAgents';
 import { loadApiConfig } from '../services/apiConfig';
@@ -1903,6 +1903,520 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
     } catch {}
   }, [filteredMatches, predictionByMatchId, apiSource]);
 
+  const favoriteRescueStatusKey = 'favorite_rescue_status_v1';
+  const readFavoriteRescueStatus = () => {
+    try {
+      const raw = localStorage.getItem(favoriteRescueStatusKey);
+      const parsed = raw ? (JSON.parse(raw) as any) : null;
+      if (!parsed || parsed.version !== 1) return { version: 1, enabled: false, kind: 'inactive', text: 'Desativado', updatedAt: new Date(0).toISOString() };
+      return parsed as {
+        version: 1;
+        enabled: boolean;
+        kind: 'inactive' | 'monitoring' | 'entry' | 'exit_mo' | 'exit_cs' | 'error';
+        text: string;
+        updatedAt: string;
+        lastErrorAt?: string;
+        error?: string;
+      };
+    } catch {
+      return { version: 1, enabled: false, kind: 'inactive', text: 'Desativado', updatedAt: new Date(0).toISOString() };
+    }
+  };
+  const writeFavoriteRescueStatus = (patch: Partial<ReturnType<typeof readFavoriteRescueStatus>>) => {
+    const cur = readFavoriteRescueStatus();
+    const next = { ...cur, ...patch, version: 1, updatedAt: new Date().toISOString() };
+    try {
+      localStorage.setItem(favoriteRescueStatusKey, JSON.stringify(next));
+    } catch {}
+    window.dispatchEvent(new Event('favoriteRescueStatusChanged'));
+  };
+
+  useEffect(() => {
+    const cfg = loadApiConfig();
+    const fr =
+      (cfg?.betfairRobotLimits && typeof cfg.betfairRobotLimits === 'object' ? (cfg.betfairRobotLimits as any).favoriteRescue : null) ?? null;
+    const enabled = Boolean(fr?.enabled ?? false);
+    if (apiSource === 'mock') {
+      writeFavoriteRescueStatus(
+        enabled
+          ? { enabled: true, kind: 'error', text: 'Oscilando: fonte mock (agente pausado).' }
+          : { enabled: false, kind: 'inactive', text: 'Desativado' },
+      );
+      return;
+    }
+    if (!enabled) {
+      writeFavoriteRescueStatus({ enabled: false, kind: 'inactive', text: 'Desativado' });
+      return;
+    }
+    writeFavoriteRescueStatus({ enabled: true, kind: 'monitoring', text: 'Monitorando oportunidades…' });
+
+    const minFavWinProb = Number(fr?.minFavWinProb);
+    const minHomeWinRate = Number(fr?.minHomeWinRate);
+    const awayOddsMinLosing01 = Number(fr?.awayOddsMinLosing01);
+    const awayOddsMinLosing02 = Number(fr?.awayOddsMinLosing02);
+    const matchOddsLayStakeAbs = Number(fr?.matchOddsLayStakeAbs);
+    const correctScoreLayStakeAbs = Number(fr?.correctScoreLayStakeAbs);
+    const matchOddsTakeProfitMinPct = Number(fr?.matchOddsTakeProfitMinPct);
+    const matchOddsTakeProfitMaxPct = Number(fr?.matchOddsTakeProfitMaxPct);
+    const correctScoreTakeProfitPct = Number(fr?.correctScoreTakeProfitPct);
+    const extremeCorrectScoresCsv = String(fr?.extremeCorrectScoresCsv ?? '0-3,0-4,1-4,0-5');
+
+    const safeMinFavWinProb = Number.isFinite(minFavWinProb) ? Math.max(0.05, Math.min(0.95, minFavWinProb)) : 0.55;
+    const safeMinHomeWinRate = Number.isFinite(minHomeWinRate) ? Math.max(0.05, Math.min(0.95, minHomeWinRate)) : 0.8;
+    const safeAwayOdds01 = Number.isFinite(awayOddsMinLosing01) ? Math.max(1.01, Math.min(50, awayOddsMinLosing01)) : 1.65;
+    const safeAwayOdds02 = Number.isFinite(awayOddsMinLosing02) ? Math.max(1.01, Math.min(50, awayOddsMinLosing02)) : 1.3;
+    const stakeMO = Number.isFinite(matchOddsLayStakeAbs) ? Math.max(2, Math.min(10000, matchOddsLayStakeAbs)) : 10;
+    const stakeCS = Number.isFinite(correctScoreLayStakeAbs) ? Math.max(2, Math.min(10000, correctScoreLayStakeAbs)) : 2;
+    const takeMinPct = Number.isFinite(matchOddsTakeProfitMinPct) ? Math.max(0, Math.min(1, matchOddsTakeProfitMinPct)) : 0.1;
+    const takeMaxPct = Number.isFinite(matchOddsTakeProfitMaxPct) ? Math.max(0, Math.min(1, matchOddsTakeProfitMaxPct)) : 0.15;
+    const csTakePct = Number.isFinite(correctScoreTakeProfitPct) ? Math.max(0, Math.min(1, correctScoreTakeProfitPct)) : 0.03;
+
+    const extremes = extremeCorrectScoresCsv
+      .split(',')
+      .map((x) => String(x).trim())
+      .filter(Boolean)
+      .map((x) => x.replace(/\s+/g, '').replace(':', '-').replace('–', '-').replace('—', '-'))
+      .filter((x) => /^\d+-\d+$/.test(x))
+      .slice(0, 8);
+
+    const storeKey = 'favorite_rescue_state_v1';
+    type RescueState = {
+      version: 1;
+      items: Record<
+        string,
+        {
+          createdAt: string;
+          scenario: 'losing_0_1' | 'losing_0_2';
+          minute: number | null;
+          scoreHome: number;
+          scoreAway: number;
+          awayOddAtEntry: number;
+          homeFavProb: number | null;
+          homeWinRate: number | null;
+          matchOdds: { marketId: string; selectionIdAway: number; layPrice: number; stake: number; takeProfitAbs: number };
+          correctScore?: {
+            marketId: string;
+            selections: Array<{ scoreKey: string; selectionId: number; layPrice: number; stake: number; takeProfitAbs: number }>;
+          };
+          toastDismissed?: boolean;
+          closed?: { matchOdds?: boolean; correctScore?: boolean; at?: string };
+        }
+      >;
+    };
+
+    const readStore = (): RescueState => {
+      try {
+        const raw = localStorage.getItem(storeKey);
+        if (!raw) return { version: 1, items: {} };
+        const parsed = JSON.parse(raw) as RescueState;
+        if (parsed?.version !== 1 || !parsed?.items || typeof parsed.items !== 'object') return { version: 1, items: {} };
+        return parsed;
+      } catch {
+        return { version: 1, items: {} };
+      }
+    };
+
+    const writeStore = (next: RescueState) => {
+      try {
+        localStorage.setItem(storeKey, JSON.stringify(next));
+      } catch {}
+    };
+
+    const impliedProbHome = (betfair: any) => {
+      const ho = Number(betfair?.odds?.home?.back);
+      const doo = Number(betfair?.odds?.draw?.back);
+      const ao = Number(betfair?.odds?.away?.back);
+      if (!Number.isFinite(ho) || !Number.isFinite(doo) || !Number.isFinite(ao)) return null;
+      if (ho <= 1 || doo <= 1 || ao <= 1) return null;
+      const ph = 1 / ho;
+      const pd = 1 / doo;
+      const pa = 1 / ao;
+      const sum = ph + pd + pa;
+      if (!Number.isFinite(sum) || sum <= 0) return null;
+      return ph / sum;
+    };
+
+    const homeWinRateFromPreLive = (m: FootballMatch | null) => {
+      const played = Number((m as any)?.preLive?.homeLast?.played);
+      const w = Number((m as any)?.preLive?.homeLast?.w);
+      if (!Number.isFinite(played) || played <= 0) return null;
+      if (!Number.isFinite(w) || w < 0) return null;
+      if (played < 5) return null;
+      return w / played;
+    };
+
+    const showToast = (args: {
+      matchId: string;
+      title: string;
+      lines: string[];
+      entryAt: string;
+      dismissable?: boolean;
+    }) => {
+      const id = `favorite_rescue:${args.matchId}`;
+      const st = readStore();
+      const cur = st.items[args.matchId];
+      if (cur?.toastDismissed) return;
+      toast.custom(
+        (t) => (
+          <div className="w-[360px] rounded-xl border border-gray-200 bg-white shadow-lg p-3">
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <div className="text-sm font-semibold text-gray-900 truncate">{args.title}</div>
+                <div className="text-[11px] text-gray-600 tabular-nums">{args.entryAt}</div>
+              </div>
+              {args.dismissable !== false ? (
+                <button
+                  type="button"
+                  className="shrink-0 rounded-md p-1 text-gray-500 hover:bg-gray-100 hover:text-gray-800"
+                  onClick={() => {
+                    const next = readStore();
+                    if (next.items[args.matchId]) {
+                      next.items[args.matchId] = { ...next.items[args.matchId], toastDismissed: true };
+                      writeStore(next);
+                    }
+                    toast.dismiss(t);
+                  }}
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              ) : null}
+            </div>
+            <div className="mt-2 space-y-1">
+              {args.lines.map((line, i) => (
+                <div key={i} className="text-xs text-gray-700">
+                  {line}
+                </div>
+              ))}
+            </div>
+          </div>
+        ),
+        { id, duration: Infinity },
+      );
+    };
+
+    const enqueueAutomation = async (m: DisplayMatch, pred: any) => {
+      const { projectId } = await import('/utils/supabase/info');
+      const res = await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/queue/add`, {
+        method: 'POST',
+        body: JSON.stringify({
+          matchId: m.id,
+          source: apiSource,
+          utcDate: m.date ? new Date(m.date).toISOString() : null,
+          homeTeam: m.homeTeam,
+          awayTeam: m.awayTeam,
+          homeCrest: m.homeCrest || null,
+          awayCrest: m.awayCrest || null,
+          scoreHome: typeof m.result?.home === 'number' ? m.result.home : null,
+          scoreAway: typeof m.result?.away === 'number' ? m.result.away : null,
+          prediction: pred ?? null,
+        }),
+      });
+      const raw = await res.text().catch(() => '');
+      const data = raw ? JSON.parse(raw) : null;
+      if (!res.ok || !data?.ok) throw new Error(String(data?.error ?? `HTTP ${res.status} ${res.statusText}`));
+      return data?.item ?? null;
+    };
+
+    const updateAutomationItem = async (matchId: string, patch: any) => {
+      const { projectId } = await import('/utils/supabase/info');
+      const res = await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/queue/update`, {
+        method: 'POST',
+        body: JSON.stringify({ matchId, patch }),
+      });
+      const raw = await res.text().catch(() => '');
+      const data = raw ? JSON.parse(raw) : null;
+      if (!res.ok || !data?.ok) throw new Error(String(data?.error ?? `HTTP ${res.status} ${res.statusText}`));
+      return data?.item ?? null;
+    };
+
+    const placeOrders = async (args: { adminToken: string; marketId: string; instructions: any[]; customerRef: string }) => {
+      const { projectId } = await import('/utils/supabase/info');
+      const res = await fetch(`https://${projectId}.supabase.co/functions/v1/betfair-core-server-1119702f/betfair/placeOrders`, {
+        method: 'POST',
+        body: JSON.stringify({ adminToken: args.adminToken, marketId: args.marketId, instructions: args.instructions, customerRef: args.customerRef }),
+      });
+      const raw = await res.text().catch(() => '');
+      const data = raw ? JSON.parse(raw) : null;
+      if (!res.ok || !data?.ok) throw new Error(String(data?.error ?? `HTTP ${res.status} ${res.statusText}`));
+      return data?.result ?? null;
+    };
+
+    const runOnce = async () => {
+      writeFavoriteRescueStatus({ enabled: true, kind: 'monitoring', text: 'Monitorando oportunidades…' });
+      const cfgNow = loadApiConfig();
+      const adminToken = String(cfgNow?.automationAdminToken ?? '').trim();
+      if (!adminToken) {
+        writeFavoriteRescueStatus({ enabled: true, kind: 'error', text: 'Oscilando: configure o Automation Admin Token.' });
+        return;
+      }
+      const bankrollTotalRaw = Number(cfgNow?.betfairBankroll ?? 0);
+      const bankrollTotal = Number.isFinite(bankrollTotalRaw) && bankrollTotalRaw > 0 ? bankrollTotalRaw : 0;
+
+      const state = readStore();
+
+      for (const m of filteredMatches) {
+        if (m.status !== 'live') continue;
+        const statusShort = String(m.liveStatusShort ?? '').trim().toUpperCase();
+        const minuteRaw = typeof m.liveElapsed === 'number' ? m.liveElapsed : null;
+        const minute = minuteRaw != null && Number.isFinite(minuteRaw) ? Math.max(0, Math.floor(minuteRaw)) : null;
+        const isFirstHalf = statusShort === '1H' || (minute != null && minute >= 0 && minute <= 45);
+        if (!isFirstHalf) continue;
+        const sh = typeof m.result?.home === 'number' ? m.result.home : null;
+        const sa = typeof m.result?.away === 'number' ? m.result.away : null;
+        if (sh == null || sa == null) continue;
+        if (!(sh === 0 && (sa === 1 || sa === 2))) continue;
+
+        if (state.items[m.id]) continue;
+
+        const fm = realMatchById[m.id] ?? null;
+        if (!fm) continue;
+
+        const homeFavProb = impliedProbHome((fm as any).betfair);
+        const homeWinRate = homeWinRateFromPreLive(fm);
+        const qualifiesFavorite = (homeFavProb != null && homeFavProb >= safeMinFavWinProb) || (homeWinRate != null && homeWinRate >= safeMinHomeWinRate);
+        if (!qualifiesFavorite) continue;
+
+        const awayOdd = Number((fm as any)?.betfair?.odds?.away?.back);
+        if (!Number.isFinite(awayOdd) || awayOdd <= 1) continue;
+        if (sa === 1 && awayOdd < safeAwayOdds01) continue;
+        if (sa === 2 && awayOdd < safeAwayOdds02) continue;
+
+        const betfair = (fm as any)?.betfair ?? null;
+        const marketId = String(betfair?.marketId ?? '').trim();
+        const selectionIdAway = Number(betfair?.runners?.awaySelectionId ?? NaN);
+        const layPrice = Number(betfair?.odds?.away?.lay ?? betfair?.odds?.away?.back ?? NaN);
+        if (!marketId || !Number.isFinite(selectionIdAway) || !Number.isFinite(layPrice) || layPrice <= 1) continue;
+
+        const takePct = (() => {
+          const lo = Math.min(takeMinPct, takeMaxPct);
+          const hi = Math.max(takeMinPct, takeMaxPct);
+          const u = Math.random();
+          return lo + (hi - lo) * u;
+        })();
+        const takeProfitAbs = bankrollTotal > 0 ? Math.round((bankrollTotal * takePct) * 100) / 100 : 0;
+        const csTakeProfitAbs = bankrollTotal > 0 ? Math.round((bankrollTotal * csTakePct) * 100) / 100 : 0;
+
+        const scenario = sa === 2 ? ('losing_0_2' as const) : ('losing_0_1' as const);
+        const createdAt = new Date().toISOString();
+        state.items[m.id] = {
+          createdAt,
+          scenario,
+          minute,
+          scoreHome: sh,
+          scoreAway: sa,
+          awayOddAtEntry: awayOdd,
+          homeFavProb,
+          homeWinRate,
+          matchOdds: { marketId, selectionIdAway, layPrice, stake: stakeMO, takeProfitAbs },
+          correctScore:
+            scenario === 'losing_0_2' && betfair?.correctScore?.marketId && extremes.length > 0
+              ? {
+                  marketId: String(betfair.correctScore.marketId),
+                  selections: extremes
+                    .map((k) => {
+                      const r = betfair?.correctScore?.runners?.[k] ?? null;
+                      const sid = Number(r?.selectionId ?? NaN);
+                      const lp = Number(r?.lay ?? r?.back ?? NaN);
+                      if (!Number.isFinite(sid) || !Number.isFinite(lp) || lp <= 1) return null;
+                      return { scoreKey: k, selectionId: sid, layPrice: lp, stake: stakeCS, takeProfitAbs: csTakeProfitAbs };
+                    })
+                    .filter((x: any) => Boolean(x)),
+                }
+              : undefined,
+        };
+        writeStore(state);
+
+        try {
+          await enqueueAutomation(m, predictionByMatchId[m.id] ?? null).catch(() => null);
+          await updateAutomationItem(m.id, {
+            status: 'running',
+            strategy: {
+              agent: 'favoriteRescue',
+              favoriteRescue: { createdAt, scenario, minute, scoreHome: sh, scoreAway: sa, awayOddAtEntry: awayOdd, homeFavProb, homeWinRate },
+            },
+            markets:
+              scenario === 'losing_0_2'
+                ? [
+                    { key: 'winner', label: 'Match Odds (1X2)', enabled: true, details: null },
+                    { key: 'correctScore', label: 'Placar correto', enabled: true, details: null },
+                  ]
+                : [{ key: 'winner', label: 'Match Odds (1X2)', enabled: true, details: null }],
+          }).catch(() => null);
+        } catch {}
+
+        const orders: Array<{ market: string; stake: number }> = [];
+
+        await placeOrders({
+          adminToken,
+          marketId,
+          customerRef: `FR_MO_${m.id}_${Date.now().toString(16)}`.slice(0, 32),
+          instructions: [
+            {
+              selectionId: selectionIdAway,
+              handicap: 0,
+              side: 'LAY',
+              orderType: 'LIMIT',
+              limitOrder: { size: stakeMO, price: layPrice, persistenceType: 'LAPSE' },
+            },
+          ],
+        });
+        orders.push({ market: 'Match Odds (LAY visitante)', stake: stakeMO });
+
+        if (scenario === 'losing_0_2' && state.items[m.id]?.correctScore?.selections?.length) {
+          const csMarketId = String(state.items[m.id].correctScore!.marketId);
+          const csInstructions = state.items[m.id].correctScore!.selections.map((s) => ({
+            selectionId: s.selectionId,
+            handicap: 0,
+            side: 'LAY',
+            orderType: 'LIMIT',
+            limitOrder: { size: s.stake, price: s.layPrice, persistenceType: 'LAPSE' },
+          }));
+          await placeOrders({
+            adminToken,
+            marketId: csMarketId,
+            customerRef: `FR_CS_${m.id}_${Date.now().toString(16)}`.slice(0, 32),
+            instructions: csInstructions.slice(0, 8),
+          });
+          orders.push({ market: 'Correct Score (LAY goleada visitante)', stake: stakeCS });
+        }
+
+        const title = `Agente independente executou entrada`;
+        const lines = [
+          `${m.homeTeam} x ${m.awayTeam} • ${sh}x${sa} • ${minute != null ? `${minute}’` : 'Ao vivo'}`,
+          `Motivo: ${scenario === 'losing_0_2' ? 'Favorito 0x2 (1ºT)' : 'Favorito 0x1 (1ºT)'} • Odds visitante: ${awayOdd.toFixed(2)}`,
+          `Mercados: ${orders.map((o) => o.market).join(' + ')}`,
+          `Stake: ${orders.map((o) => `£${o.stake}`).join(' / ')}`,
+        ];
+        showToast({ matchId: m.id, title, lines, entryAt: createdAt });
+        writeFavoriteRescueStatus({ enabled: true, kind: 'entry', text: `Entrada efetuada (${m.homeTeam} x ${m.awayTeam})` });
+      }
+
+      const next = readStore();
+      const ids = Object.keys(next.items);
+      if (ids.length === 0) return;
+
+      for (const matchId of ids) {
+        const entry = next.items[matchId];
+        if (!entry) continue;
+        const fm = realMatchById[matchId] ?? null;
+        if (!fm) continue;
+        const betfair = (fm as any)?.betfair ?? null;
+        if (!betfair) continue;
+
+        if (!entry.closed?.matchOdds) {
+          const awayBack = Number(betfair?.odds?.away?.back);
+          if (Number.isFinite(awayBack) && awayBack > 1 && entry.matchOdds.takeProfitAbs > 0) {
+            const profit = entry.matchOdds.stake * (awayBack - entry.matchOdds.layPrice);
+            if (profit >= entry.matchOdds.takeProfitAbs) {
+              await placeOrders({
+                adminToken,
+                marketId: entry.matchOdds.marketId,
+                customerRef: `FR_MO_EXIT_${matchId}_${Date.now().toString(16)}`.slice(0, 32),
+                instructions: [
+                  {
+                    selectionId: entry.matchOdds.selectionIdAway,
+                    handicap: 0,
+                    side: 'BACK',
+                    orderType: 'LIMIT',
+                    limitOrder: { size: entry.matchOdds.stake, price: awayBack, persistenceType: 'LAPSE' },
+                  },
+                ],
+              }).catch(() => null);
+              next.items[matchId] = {
+                ...entry,
+                closed: { ...(entry.closed ?? {}), matchOdds: true, at: new Date().toISOString() },
+              };
+              writeStore(next);
+              showToast({
+                matchId,
+                title: 'Saída automática (Match Odds)',
+                lines: [`Lucro estimado >= alvo. Saída enviada.`, `£${profit.toFixed(2)} (alvo £${entry.matchOdds.takeProfitAbs.toFixed(2)})`],
+                entryAt: new Date().toISOString(),
+              });
+              writeFavoriteRescueStatus({ enabled: true, kind: 'exit_mo', text: 'Saída enviada (Match Odds)' });
+            }
+          }
+        }
+
+        if (entry.correctScore && !entry.closed?.correctScore) {
+          const cs = betfair?.correctScore ?? null;
+          const csMarketId = String(cs?.marketId ?? '').trim();
+          if (csMarketId) {
+            let hit = false;
+            for (const s of entry.correctScore.selections) {
+              const r = cs?.runners?.[s.scoreKey] ?? null;
+              const back = Number(r?.back);
+              if (!Number.isFinite(back) || back <= 1) continue;
+              const profit = s.stake * (back - s.layPrice);
+              if (profit >= s.takeProfitAbs) {
+                hit = true;
+                break;
+              }
+            }
+            if (hit) {
+              const instr = entry.correctScore.selections
+                .map((s) => {
+                  const r = cs?.runners?.[s.scoreKey] ?? null;
+                  const back = Number(r?.back);
+                  if (!Number.isFinite(back) || back <= 1) return null;
+                  return {
+                    selectionId: s.selectionId,
+                    handicap: 0,
+                    side: 'BACK',
+                    orderType: 'LIMIT',
+                    limitOrder: { size: s.stake, price: back, persistenceType: 'LAPSE' },
+                  };
+                })
+                .filter((x: any) => Boolean(x));
+              if (instr.length > 0) {
+                await placeOrders({
+                  adminToken,
+                  marketId: csMarketId,
+                  customerRef: `FR_CS_EXIT_${matchId}_${Date.now().toString(16)}`.slice(0, 32),
+                  instructions: instr.slice(0, 8),
+                }).catch(() => null);
+                next.items[matchId] = {
+                  ...entry,
+                  closed: { ...(entry.closed ?? {}), correctScore: true, at: new Date().toISOString() },
+                };
+                writeStore(next);
+                showToast({
+                  matchId,
+                  title: 'Saída automática (Correct Score)',
+                  lines: ['Lucro estimado >= alvo. Saída enviada.'],
+                  entryAt: new Date().toISOString(),
+                });
+                writeFavoriteRescueStatus({ enabled: true, kind: 'exit_cs', text: 'Saída enviada (Correct Score)' });
+              }
+            }
+          }
+        }
+      }
+    };
+
+    let stopped = false;
+    const tick = () => {
+      if (stopped) return;
+      void runOnce().catch((e) => {
+        const msg = e instanceof Error ? e.message : String(e ?? 'Erro desconhecido');
+        writeFavoriteRescueStatus({
+          enabled: true,
+          kind: 'error',
+          text: 'Oscilando: erro na execução.',
+          lastErrorAt: new Date().toISOString(),
+          error: msg,
+        });
+      });
+    };
+
+    tick();
+    const t = window.setInterval(tick, 15_000);
+    return () => {
+      stopped = true;
+      window.clearInterval(t);
+    };
+  }, [apiSource, filteredMatches, predictionByMatchId, realMatchById]);
+
   const winnerPerformance = useMemo(() => {
     const finished = filteredMatches.filter(
       (m) =>
@@ -2170,7 +2684,7 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
                 awayTeam: it.match.awayTeam?.name ?? '',
                 utcDate: it.match.utcDate ?? null,
                 minFreshSeconds: it.minFreshSeconds,
-                includeCorrectScore: true,
+                includeCorrectScore: false,
                 force: it.force,
               }),
             });
@@ -2630,6 +3144,7 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
           )}
         </div>
       )}
+
     </div>
   );
 }

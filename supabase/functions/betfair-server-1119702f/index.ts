@@ -416,7 +416,7 @@ const listBetfairSoccerMatchOddsRange = async (params: { fromIso: string; toIso:
       () =>
         call("SportsAPING/v1.0/listMarketBook", {
           marketIds: chunk,
-          priceProjection: { priceData: ["EX_BEST_OFFERS"], virtualise: true },
+          priceProjection: { priceData: ["EX_BEST_OFFERS", "EX_TRADED"], virtualise: true },
         }),
       12_000,
     );
@@ -501,10 +501,11 @@ const listBetfairSoccerMatchOddsRange = async (params: { fromIso: string; toIso:
       const ex = rb?.ex ?? {};
       const back0 = Array.isArray(ex?.availableToBack) ? ex.availableToBack[0] : null;
       const lay0 = Array.isArray(ex?.availableToLay) ? ex.availableToLay[0] : null;
+      const ltp = Number(rb?.lastPriceTraded);
       return {
-        back: back0 ? Number(back0.price) : null,
+        back: back0 ? Number(back0.price) : Number.isFinite(ltp) ? ltp : null,
         backSize: back0 ? Number(back0.size) : null,
-        lay: lay0 ? Number(lay0.price) : null,
+        lay: lay0 ? Number(lay0.price) : Number.isFinite(ltp) ? ltp : null,
         laySize: lay0 ? Number(lay0.size) : null,
       };
     };
@@ -710,6 +711,81 @@ const resolveBetfairMatchOdds = async (params: { homeTeam: string; awayTeam: str
   };
 };
 
+const parseCorrectScoreKey = (runnerName: string) => {
+  const m = String(runnerName ?? "").trim().match(/^(\d+)\s*-\s*(\d+)$/);
+  if (!m) return null;
+  const h = Number(m[1]);
+  const a = Number(m[2]);
+  if (!Number.isFinite(h) || !Number.isFinite(a)) return null;
+  return `${Math.max(0, Math.floor(h))}-${Math.max(0, Math.floor(a))}`;
+};
+
+const resolveBetfairCorrectScoreMarket = async (params: { eventId: string }) => {
+  const eventId = String(params.eventId ?? "").trim();
+  if (!eventId) throw new Error("Betfair: eventId ausente (Correct Score)");
+
+  const catalogue = await withTimeout(
+    () =>
+      call("SportsAPING/v1.0/listMarketCatalogue", {
+        filter: { eventIds: [eventId], marketTypeCodes: ["CORRECT_SCORE"] },
+        maxResults: 1,
+        marketProjection: ["RUNNER_DESCRIPTION", "MARKET_START_TIME"],
+      }),
+    8000,
+  );
+
+  const mk = Array.isArray(catalogue) ? catalogue[0] : null;
+  const marketId = String(mk?.marketId ?? "").trim();
+  if (!marketId) throw new Error("Betfair: marketId (CORRECT_SCORE) não encontrado");
+
+  const marketBook = await withTimeout(
+    () =>
+      call("SportsAPING/v1.0/listMarketBook", {
+        marketIds: [marketId],
+        priceProjection: { priceData: ["EX_BEST_OFFERS", "EX_TRADED"], virtualise: true },
+      }),
+    8000,
+  );
+
+  const book = Array.isArray(marketBook) ? marketBook[0] : null;
+  const marketStatus = String(book?.status ?? "").trim() || null;
+  const isClosed = String(marketStatus ?? "").toUpperCase() === "CLOSED";
+  const inPlay = isClosed ? false : Boolean(book?.inplay ?? false);
+  const totalMatched = Number(book?.totalMatched);
+  const runnersBook = Array.isArray(book?.runners) ? book.runners : [];
+
+  const runners: Record<string, any> = {};
+  for (const rb of runnersBook) {
+    const selectionId = Number(rb?.selectionId);
+    if (!Number.isFinite(selectionId)) continue;
+    const runnerName = String(rb?.runnerName ?? "").trim();
+    const key = parseCorrectScoreKey(runnerName);
+    if (!key) continue;
+    const ex = rb?.ex ?? {};
+    const back0 = Array.isArray(ex?.availableToBack) ? ex.availableToBack[0] : null;
+    const lay0 = Array.isArray(ex?.availableToLay) ? ex.availableToLay[0] : null;
+    const ltp = Number(rb?.lastPriceTraded);
+    runners[key] = {
+      selectionId,
+      runnerName,
+      back: back0 ? Number(back0.price) : Number.isFinite(ltp) ? ltp : null,
+      backSize: back0 ? Number(back0.size) : null,
+      lay: lay0 ? Number(lay0.price) : Number.isFinite(ltp) ? ltp : null,
+      laySize: lay0 ? Number(lay0.size) : null,
+    };
+  }
+
+  return {
+    marketId,
+    marketStartTime: String(mk?.marketStartTime ?? "").trim() || null,
+    inPlay,
+    marketStatus,
+    matchedVolume: Number.isFinite(totalMatched) ? totalMatched : null,
+    runners,
+    oddsFetchedAt: new Date().toISOString(),
+  };
+};
+
 Deno.serve(async (req) => {
   const method = String((req as any)?.method ?? "").toUpperCase();
   try {
@@ -759,7 +835,17 @@ Deno.serve(async (req) => {
         const awayTeam = String((body as any)?.awayTeam ?? "").trim();
         const utcDate = (body as any)?.utcDate == null ? null : String((body as any).utcDate);
         if (!homeTeam || !awayTeam) return json({ ok: false, error: "homeTeam/awayTeam obrigatórios" }, 400);
+        const includeCorrectScore = Boolean((body as any)?.includeCorrectScore ?? false);
         const betfair = await resolveBetfairMatchOdds({ homeTeam, awayTeam, utcDate });
+        if (includeCorrectScore) {
+          try {
+            const eventId = String((betfair as any)?.eventId ?? "").trim();
+            if (eventId) {
+              const cs = await resolveBetfairCorrectScoreMarket({ eventId });
+              (betfair as any).correctScore = cs;
+            }
+          } catch {}
+        }
         return json({ ok: true, betfair, cached: false, fetchedAt: betfair?.oddsFetchedAt ?? new Date().toISOString() });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
