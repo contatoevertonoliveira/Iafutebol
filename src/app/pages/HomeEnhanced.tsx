@@ -95,12 +95,58 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
   const requestedFixturesKey = 'requested_fixtures_v1';
   const isSyncingRequestedRef = useRef(false);
   const isSyncingBetfairOddsRef = useRef(false);
+  const restoredRequestedFromQueueRef = useRef(false);
+  const requestedSaveTimerRef = useRef<number | null>(null);
   const [addMatchOpen, setAddMatchOpen] = useState(false);
   const [addMatchQuery, setAddMatchQuery] = useState('');
   const [addMatchLoading, setAddMatchLoading] = useState(false);
   const [addMatchError, setAddMatchError] = useState('');
   const [addMatchFixtures, setAddMatchFixtures] = useState<AddMatchCandidate[]>([]);
   const [addMatchResults, setAddMatchResults] = useState<AddMatchCandidate[]>([]);
+
+  const getEdgeHeaders = async () => {
+    const { publicAnonKey } = await import('/utils/supabase/info');
+    return {
+      'Content-Type': 'application/json',
+      apikey: publicAnonKey,
+      Authorization: `Bearer ${publicAnonKey}`,
+    };
+  };
+
+  const getCacheServerBaseUrl = async () => {
+    const { projectId } = await import('/utils/supabase/info');
+    return `https://${projectId}.supabase.co/functions/v1/cache-server-1119702f`;
+  };
+
+  const getAppStateFromServer = async (key: 'requested_fixtures_v1' | 'favorite_matches_v1' | 'dismissed_matches_v1') => {
+    try {
+      const baseUrl = await getCacheServerBaseUrl();
+      const headers = await getEdgeHeaders();
+      const res = await fetch(`${baseUrl}/app/state/get`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ key }),
+      });
+      const raw = await res.text().catch(() => '');
+      const data = raw ? JSON.parse(raw) : null;
+      if (!res.ok || !data?.ok) return null;
+      return data?.value ?? null;
+    } catch {
+      return null;
+    }
+  };
+
+  const setAppStateToServer = async (key: 'requested_fixtures_v1' | 'favorite_matches_v1' | 'dismissed_matches_v1', value: unknown) => {
+    try {
+      const baseUrl = await getCacheServerBaseUrl();
+      const headers = await getEdgeHeaders();
+      await fetch(`${baseUrl}/app/state/set`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ key, value }),
+      }).catch(() => null);
+    } catch {}
+  };
 
   useEffect(() => {
     realMatchesRef.current = realMatches;
@@ -112,7 +158,20 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
         const raw = localStorage.getItem(favoritesKey) || '[]';
         const parsed = JSON.parse(raw) as unknown;
         if (Array.isArray(parsed)) {
-          setFavoriteMatchIds(parsed.map(String));
+          const ids = parsed.map(String);
+          setFavoriteMatchIds(ids);
+          if (ids.length === 0) {
+            void (async () => {
+              const remote = await getAppStateFromServer('favorite_matches_v1');
+              if (!Array.isArray(remote) || remote.length === 0) return;
+              const next = remote.map(String).filter(Boolean);
+              try {
+                localStorage.setItem(favoritesKey, JSON.stringify(next));
+              } catch {}
+              setFavoriteMatchIds(next);
+              window.dispatchEvent(new Event('favoritesChanged'));
+            })();
+          }
         } else {
           setFavoriteMatchIds([]);
         }
@@ -143,7 +202,20 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
         const raw = localStorage.getItem(dismissedMatchesKey) || '[]';
         const parsed = JSON.parse(raw) as unknown;
         if (Array.isArray(parsed)) {
-          setDismissedMatchIds(parsed.map(String).filter(Boolean));
+          const ids = parsed.map(String).filter(Boolean);
+          setDismissedMatchIds(ids);
+          if (ids.length === 0) {
+            void (async () => {
+              const remote = await getAppStateFromServer('dismissed_matches_v1');
+              if (!Array.isArray(remote) || remote.length === 0) return;
+              const next = remote.map(String).filter(Boolean);
+              try {
+                localStorage.setItem(dismissedMatchesKey, JSON.stringify(next));
+              } catch {}
+              setDismissedMatchIds(next);
+              window.dispatchEvent(new Event('dismissedMatchesChanged'));
+            })();
+          }
         } else {
           setDismissedMatchIds([]);
         }
@@ -177,6 +249,7 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
       localStorage.setItem(favoritesKey, JSON.stringify(next));
       setFavoriteMatchIds(next);
       window.dispatchEvent(new Event('favoritesChanged'));
+      void setAppStateToServer('favorite_matches_v1', next);
     } catch {
       return;
     }
@@ -518,7 +591,76 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
   };
 
   useEffect(() => {
-    void syncRequestedFixtures();
+    const restoreRequestedFromAutomationQueue = async () => {
+      if (restoredRequestedFromQueueRef.current) return;
+      restoredRequestedFromQueueRef.current = true;
+
+      const hasLocalItems = (() => {
+        try {
+          const raw = localStorage.getItem(requestedFixturesKey);
+          if (!raw) return false;
+          const parsed = JSON.parse(raw) as any;
+          if (!parsed || typeof parsed !== 'object' || !parsed.items || typeof parsed.items !== 'object') return false;
+          return Object.keys(parsed.items).length > 0;
+        } catch {
+          return false;
+        }
+      })();
+
+      if (hasLocalItems) return;
+
+      try {
+        const remote = await getAppStateFromServer('requested_fixtures_v1');
+        if (remote && typeof remote === 'object') {
+          const parsed = remote as any;
+          const hasRemoteItems =
+            parsed?.version === 2 && parsed?.items && typeof parsed.items === 'object' && Object.keys(parsed.items).length > 0;
+          if (hasRemoteItems) {
+            try {
+              localStorage.setItem(requestedFixturesKey, JSON.stringify(parsed));
+              window.dispatchEvent(new Event('requestedFixturesChanged'));
+              toast.success('Seleção restaurada', { description: `Restaurada do servidor (última utilização).` });
+            } catch {}
+            return;
+          }
+        }
+      } catch {}
+
+      try {
+        const { projectId } = await import('/utils/supabase/info');
+        const headers = await getEdgeHeaders();
+        const res = await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/queue/list`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({}),
+        });
+        const raw = await res.text().catch(() => '');
+        const data = raw ? JSON.parse(raw) : null;
+        if (!res.ok || !data?.ok) return;
+
+        const items = Array.isArray(data?.items) ? data.items : [];
+        const store: RequestedFixturesStoreV2 = { version: 2, items: {} };
+        for (const it of items) {
+          const id = Number((it as any)?.matchId ?? NaN);
+          if (!Number.isFinite(id) || id <= 0) continue;
+          store.items[String(id)] = { source: 'api-football', fixtureId: id };
+        }
+        const count = Object.keys(store.items).length;
+        if (count === 0) return;
+
+        try {
+          localStorage.setItem(requestedFixturesKey, JSON.stringify(store));
+          window.dispatchEvent(new Event('requestedFixturesChanged'));
+          toast.success('Seleção restaurada', { description: `Restaurados ${count} jogos a partir da fila de Automação.` });
+        } catch {}
+      } catch {}
+    };
+
+    void (async () => {
+      await restoreRequestedFromAutomationQueue();
+      await syncRequestedFixtures();
+    })();
+
     const onRequested = () => void syncRequestedFixtures();
     window.addEventListener('requestedFixturesChanged' as any, onRequested as any);
     return () => {
@@ -623,6 +765,12 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
   const writeRequestedStore = (store: RequestedFixturesStoreV2) => {
     localStorage.setItem(requestedFixturesKey, JSON.stringify(store));
     window.dispatchEvent(new Event('requestedFixturesChanged'));
+    if (requestedSaveTimerRef.current != null) {
+      window.clearTimeout(requestedSaveTimerRef.current);
+    }
+    requestedSaveTimerRef.current = window.setTimeout(() => {
+      void setAppStateToServer('requested_fixtures_v1', store);
+    }, 800);
   };
 
   const dismissMatch = (matchId: string) => {
@@ -635,6 +783,7 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
       localStorage.setItem(dismissedMatchesKey, JSON.stringify(nextIds));
       setDismissedMatchIds(nextIds);
       window.dispatchEvent(new Event('dismissedMatchesChanged'));
+      void setAppStateToServer('dismissed_matches_v1', nextIds);
     } catch {}
 
     try {
@@ -709,7 +858,7 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
         apikey: publicAnonKey,
         Authorization: `Bearer ${publicAnonKey}`,
       },
-      body: JSON.stringify({ dateFrom: ymd, dateTo: ymd, maxResults: 400 }),
+      body: JSON.stringify({ dateFrom: ymd, dateTo: ymd, maxResults: 150 }),
     });
     const raw = await res.text().catch(() => '');
     let data: any = null;
@@ -1462,7 +1611,7 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
             body: JSON.stringify({
               dateFrom,
               dateTo,
-              maxResults: selectedDate === 'today' ? 120 : selectedDate === 'week' ? 220 : 300,
+              maxResults: selectedDate === 'today' ? 120 : 150,
             }),
           },
         );
@@ -2096,8 +2245,10 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
 
     const enqueueAutomation = async (m: DisplayMatch, pred: any) => {
       const { projectId } = await import('/utils/supabase/info');
+      const headers = await getEdgeHeaders();
       const res = await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/queue/add`, {
         method: 'POST',
+        headers,
         body: JSON.stringify({
           matchId: m.id,
           source: apiSource,
@@ -2119,8 +2270,10 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
 
     const updateAutomationItem = async (matchId: string, patch: any) => {
       const { projectId } = await import('/utils/supabase/info');
+      const headers = await getEdgeHeaders();
       const res = await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/queue/update`, {
         method: 'POST',
+        headers,
         body: JSON.stringify({ matchId, patch }),
       });
       const raw = await res.text().catch(() => '');
@@ -2131,8 +2284,10 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
 
     const placeOrders = async (args: { adminToken: string; marketId: string; instructions: any[]; customerRef: string }) => {
       const { projectId } = await import('/utils/supabase/info');
+      const headers = await getEdgeHeaders();
       const res = await fetch(`https://${projectId}.supabase.co/functions/v1/betfair-core-server-1119702f/betfair/placeOrders`, {
         method: 'POST',
+        headers,
         body: JSON.stringify({ adminToken: args.adminToken, marketId: args.marketId, instructions: args.instructions, customerRef: args.customerRef }),
       });
       const raw = await res.text().catch(() => '');

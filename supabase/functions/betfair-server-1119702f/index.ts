@@ -1,6 +1,6 @@
 const CORS_HEADERS: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization, apikey, x-automation-token",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-automation-token",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
   "Access-Control-Max-Age": "600",
 };
@@ -70,11 +70,116 @@ const getBetfairConfig = () => {
 };
 
 let cachedSession: { token: string; fetchedAtMs: number } | null = null;
+let kvPromise: Promise<Deno.Kv | null> | null = null;
+
+const getKv = async () => {
+  if (kvPromise) return kvPromise;
+  kvPromise = Deno.openKv().catch(() => null);
+  return kvPromise;
+};
+
+const delay = async (ms: number) => {
+  const t = Math.max(0, Math.min(30_000, Math.floor(ms)));
+  if (!t) return;
+  await new Promise((r) => setTimeout(r, t));
+};
+
+const getEnvNum = (key: string, fallback: number, min: number, max: number) => {
+  const raw = String(Deno.env.get(key) ?? "").trim();
+  const n = raw ? Number(raw) : NaN;
+  const v = Number.isFinite(n) ? n : fallback;
+  return Math.max(min, Math.min(max, v));
+};
+
+const createRateLimiter = (rps: number, burst: number) => {
+  const rate = Math.max(0.01, rps);
+  const cap = Math.max(1, Math.floor(burst));
+  let tokens = cap;
+  let lastMs = Date.now();
+  let chain = Promise.resolve();
+  const acquire = async () => {
+    chain = chain.then(async () => {
+      const now = Date.now();
+      const elapsed = Math.max(0, now - lastMs);
+      tokens = Math.min(cap, tokens + (elapsed * rate) / 1000);
+      lastMs = now;
+      if (tokens < 1) {
+        const waitMs = ((1 - tokens) / rate) * 1000;
+        await delay(waitMs);
+        const now2 = Date.now();
+        const elapsed2 = Math.max(0, now2 - lastMs);
+        tokens = Math.min(cap, tokens + (elapsed2 * rate) / 1000);
+        lastMs = now2;
+      }
+      tokens = Math.max(0, tokens - 1);
+    });
+    await chain;
+  };
+  return { acquire };
+};
+
+const betfairRpcLimiter = createRateLimiter(getEnvNum("BETFAIR_RPC_RPS", 5, 0.2, 20), getEnvNum("BETFAIR_RPC_BURST", 2, 1, 20));
+const betfairLoginLimiter = createRateLimiter(getEnvNum("BETFAIR_LOGIN_RPS", 0.05, 0.01, 1), 1);
+const betfairIpsLimiter = createRateLimiter(getEnvNum("BETFAIR_IPS_RPS", 3, 0.2, 20), getEnvNum("BETFAIR_IPS_BURST", 2, 1, 20));
+
+const getBanUntilMs = async () => {
+  try {
+    const kv = await getKv();
+    if (!kv) return 0;
+    const res = await kv.get<{ untilMs: number }>(["betfair", "ban_until"]);
+    const untilMs = Number(res?.value?.untilMs);
+    return Number.isFinite(untilMs) ? untilMs : 0;
+  } catch {
+    return 0;
+  }
+};
+
+const setBanUntilMs = async (untilMs: number) => {
+  try {
+    const kv = await getKv();
+    if (!kv) return;
+    const safeUntilMs = Number.isFinite(untilMs) ? Math.max(0, Math.floor(untilMs)) : 0;
+    const ttl = Math.max(0, safeUntilMs - Date.now());
+    await kv.set(["betfair", "ban_until"], { untilMs: safeUntilMs }, { expireIn: Math.min(60 * 60 * 1000, Math.max(30_000, ttl)) });
+  } catch {}
+};
+
+const acquireLoginLock = async (ttlMs: number) => {
+  const kv = await getKv();
+  if (!kv) return { ok: true, release: async () => {} };
+
+  const lockKey: Deno.KvKey = ["betfair", "session_lock"];
+  const expireIn = Math.max(1000, Math.min(20_000, Math.floor(ttlMs)));
+  const acquired = await kv
+    .atomic()
+    .check({ key: lockKey, versionstamp: null })
+    .set(lockKey, { acquiredAtMs: Date.now() }, { expireIn })
+    .commit()
+    .then((r) => Boolean((r as any)?.ok))
+    .catch(() => false);
+
+  return {
+    ok: acquired,
+    release: async () => {
+      try {
+        if (acquired) await kv.delete(lockKey);
+      } catch {}
+    },
+  };
+};
 
 const betfairCertLogin = async () => {
   const cfg = getBetfairConfig();
   if (!cfg.appKey || !cfg.username || !cfg.password) throw new Error("Betfair: credenciais ausentes (APP_KEY/USERNAME/PASSWORD)");
   if (!cfg.certPem || !cfg.keyPem) throw new Error("Betfair: certificado ausente (CERT_PEM/KEY_PEM)");
+
+  const banUntilMs = await getBanUntilMs();
+  if (banUntilMs && Date.now() < banUntilMs) {
+    const waitSec = Math.max(1, Math.ceil((banUntilMs - Date.now()) / 1000));
+    throw new Error(`Betfair login bloqueado temporariamente. Aguarde ${waitSec}s`);
+  }
+
+  await betfairLoginLimiter.acquire();
 
   const client = Deno.createHttpClient({
     cert: cfg.certPem,
@@ -106,7 +211,12 @@ const betfairCertLogin = async () => {
   if (!res.ok) throw new Error(`Betfair login falhou (HTTP ${res.status}): ${text.slice(0, 260)}`);
   const status = String(data?.loginStatus ?? "").trim();
   const sessionToken = String(data?.sessionToken ?? "").trim();
-  if (status !== "SUCCESS" || !sessionToken) throw new Error(`Betfair login falhou: ${status || "UNKNOWN"}`);
+  if (status !== "SUCCESS" || !sessionToken) {
+    if (/TEMPORARY_BAN_TOO_MANY_REQUESTS/i.test(status)) {
+      await setBanUntilMs(Date.now() + 10 * 60 * 1000);
+    }
+    throw new Error(`Betfair login falhou: ${status || "UNKNOWN"}`);
+  }
 
   cachedSession = { token: sessionToken, fetchedAtMs: Date.now() };
   return sessionToken;
@@ -116,13 +226,61 @@ const getBetfairSessionToken = async (opts?: { force?: boolean }) => {
   if (!opts?.force && cachedSession?.token) {
     if (Date.now() - cachedSession.fetchedAtMs < 50 * 60 * 1000) return cachedSession.token;
   }
-  return await betfairCertLogin();
+
+  const banUntilMs = await getBanUntilMs();
+  if (banUntilMs && Date.now() < banUntilMs) {
+    const waitSec = Math.max(1, Math.ceil((banUntilMs - Date.now()) / 1000));
+    throw new Error(`Betfair login bloqueado temporariamente. Aguarde ${waitSec}s`);
+  }
+
+  try {
+    const kv = await getKv();
+    if (kv && !opts?.force) {
+      const cached = await kv.get<{ token: string; fetchedAtMs: number }>(["betfair", "session"]);
+      const v = cached?.value ?? null;
+      if (v?.token && typeof v.fetchedAtMs === "number") {
+        if (Date.now() - v.fetchedAtMs < 50 * 60 * 1000) {
+          cachedSession = { token: v.token, fetchedAtMs: v.fetchedAtMs };
+          return v.token;
+        }
+      }
+    }
+  } catch {}
+
+  const kv = await getKv();
+  const lock = await acquireLoginLock(12_000);
+  try {
+    if (!lock.ok && kv && !opts?.force) {
+      const startedAt = Date.now();
+      while (Date.now() - startedAt < 12_000) {
+        await new Promise((r) => setTimeout(r, 250));
+        const cached = await kv.get<{ token: string; fetchedAtMs: number }>(["betfair", "session"]);
+        const v = cached?.value ?? null;
+        if (v?.token && typeof v.fetchedAtMs === "number") {
+          if (Date.now() - v.fetchedAtMs < 50 * 60 * 1000) {
+            cachedSession = { token: v.token, fetchedAtMs: v.fetchedAtMs };
+            return v.token;
+          }
+        }
+      }
+    }
+
+    const token = await betfairCertLogin();
+    try {
+      if (kv) await kv.set(["betfair", "session"], { token, fetchedAtMs: Date.now() }, { expireIn: 55 * 60 * 1000 });
+    } catch {}
+    return token;
+  } finally {
+    await lock.release();
+  }
 };
 
 const betfairJsonRpcRaw = async (params: { method: string; params: any; sessionToken: string }) => {
   const cfg = getBetfairConfig();
   if (!cfg.appKey) throw new Error("Betfair: APP_KEY ausente");
   const method = String(params.method ?? "").trim();
+
+  await betfairRpcLimiter.acquire();
 
   const res = await fetch(cfg.rpcUrl, {
     method: "POST",
@@ -144,8 +302,10 @@ const betfairJsonRpcRaw = async (params: { method: string; params: any; sessionT
       String(first?.error?.data?.errorCode ?? "").trim();
     const code = codeRaw || msg;
     const isSessionInvalid = /INVALID_SESSION|NO_SESSION|SESSION.*INVALID/i.test(code);
+    const isRetryable = /ANGX-0001/i.test(code);
     const err = new Error(`Betfair API error: ${msg}`.slice(0, 600)) as any;
     err.__betfairSessionInvalid = isSessionInvalid;
+    err.__betfairRetryable = isRetryable;
     throw err;
   }
   return first?.result ?? null;
@@ -170,6 +330,12 @@ const withTimeout = async <T>(fn: (signal: AbortSignal) => Promise<T>, ms: numbe
   } finally {
     clearTimeout(t);
   }
+};
+
+const sleep = async (ms: number) => {
+  const t = Math.max(0, Math.min(5000, Math.floor(ms)));
+  if (!t) return;
+  await new Promise((r) => setTimeout(r, t));
 };
 
 const normalizeName = (input: unknown) => {
@@ -318,35 +484,63 @@ const listBetfairSoccerMatchOddsRange = async (params: { fromIso: string; toIso:
 
   let sessionToken = await getBetfairSessionToken();
   const call = async (method: string, rpcParams: any) => {
-    try {
-      return await betfairJsonRpc({ method, params: rpcParams, sessionToken });
-    } catch (e) {
-      const invalid = Boolean((e as any)?.__betfairSessionInvalid);
-      if (!invalid) throw e;
-      sessionToken = await getBetfairSessionToken({ force: true });
-      return await betfairJsonRpc({ method, params: rpcParams, sessionToken });
+    let lastErr: unknown = null;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        return await betfairJsonRpc({ method, params: rpcParams, sessionToken });
+      } catch (e) {
+        lastErr = e;
+        const invalid = Boolean((e as any)?.__betfairSessionInvalid);
+        const retryable = Boolean((e as any)?.__betfairRetryable);
+        if (!(invalid || retryable) || attempt >= 2) throw e;
+        if (retryable) {
+          await sleep(450 * (attempt + 1));
+          continue;
+        }
+        sessionToken = await getBetfairSessionToken({ force: true });
+      }
     }
+    throw lastErr;
   };
 
-  const events = await withTimeout(
-    () =>
-      call("SportsAPING/v1.0/listEvents", {
-        filter: { eventTypeIds: ["1"], marketStartTime: { from: fromIso, to: toIso } },
-        sort: "FIRST_TO_START",
-        maxResults,
-      }),
-    9000,
-  );
+  const startMs = new Date(fromIso).getTime();
+  const endMs = new Date(toIso).getTime();
+  if (!(Number.isFinite(startMs) && Number.isFinite(endMs) && endMs > startMs)) return [];
 
+  const stepMs = 6 * 60 * 60 * 1000;
+  const maxCatalogueResults = String(Math.max(1, Math.min(50, Math.floor(maxResults))));
+  const marketsById = new Map<string, any>();
+  for (let t = startMs; t < endMs; t += stepMs) {
+    const chunkFromIso = new Date(t).toISOString();
+    const chunkToIso = new Date(Math.min(endMs, t + stepMs)).toISOString();
+    const cats = await withTimeout(
+      () =>
+        call("SportsAPING/v1.0/listMarketCatalogue", {
+          filter: { eventTypeIds: ["1"], marketTypeCodes: ["MATCH_ODDS"], marketStartTime: { from: chunkFromIso, to: chunkToIso } },
+          maxResults: maxCatalogueResults,
+          sort: "FIRST_TO_START",
+          marketProjection: ["EVENT", "COMPETITION", "RUNNER_DESCRIPTION", "MARKET_START_TIME"],
+        }),
+      12_000,
+    );
+    for (const mk of Array.isArray(cats) ? cats : []) {
+      const marketId = String(mk?.marketId ?? "").trim();
+      if (!marketId) continue;
+      if (!marketsById.has(marketId)) marketsById.set(marketId, mk);
+    }
+    if (marketsById.size >= Math.max(50, Math.min(600, maxResults * 3))) break;
+  }
+
+  const markets = Array.from(marketsById.values()).slice(0, maxResults);
   const eventIds = Array.from(
     new Set(
-      (Array.isArray(events) ? events : [])
-        .map((row: any) => String((row?.event ?? row)?.id ?? "").trim())
+      markets
+        .map((m: any) => String(m?.event?.id ?? "").trim())
         .filter(Boolean),
     ),
   ).slice(0, maxResults);
 
-  if (eventIds.length === 0) return [];
+  if (markets.length === 0 || eventIds.length === 0) return [];
 
   const byEventId = new Map<string, any>();
   for (let i = 0; i < eventIds.length; i += 50) {
@@ -354,6 +548,7 @@ const listBetfairSoccerMatchOddsRange = async (params: { fromIso: string; toIso:
       const chunk = eventIds.slice(i, i + 50);
       const idsParam = encodeURIComponent(chunk.join(","));
       const fetchIps = async (url: string) => {
+        await betfairIpsLimiter.acquire();
         const res = await fetch(url, {
           method: "GET",
           redirect: "follow",
@@ -389,18 +584,6 @@ const listBetfairSoccerMatchOddsRange = async (params: { fromIso: string; toIso:
     } catch {}
   }
 
-  const catalogues = await withTimeout(
-    () =>
-      call("SportsAPING/v1.0/listMarketCatalogue", {
-        filter: { eventIds, marketTypeCodes: ["MATCH_ODDS"] },
-        maxResults: String(Math.min(eventIds.length, maxResults)),
-        sort: "FIRST_TO_START",
-        marketProjection: ["EVENT", "COMPETITION", "RUNNER_DESCRIPTION", "MARKET_START_TIME"],
-      }),
-    12_000,
-  );
-
-  const markets = Array.isArray(catalogues) ? catalogues : [];
   const marketIds = markets
     .map((m: any) => String(m?.marketId ?? "").trim())
     .filter(Boolean)
@@ -409,7 +592,7 @@ const listBetfairSoccerMatchOddsRange = async (params: { fromIso: string; toIso:
   if (marketIds.length === 0) return [];
 
   const booksByMarketId = new Map<string, any>();
-  const chunkSize = 40;
+  const chunkSize = 10;
   for (let i = 0; i < marketIds.length; i += chunkSize) {
     const chunk = marketIds.slice(i, i + chunkSize);
     const books = await withTimeout(
@@ -578,75 +761,59 @@ const resolveBetfairMatchOdds = async (params: { homeTeam: string; awayTeam: str
 
   let sessionToken = await getBetfairSessionToken();
   const call = async (method: string, rpcParams: any) => {
-    try {
-      return await betfairJsonRpc({ method, params: rpcParams, sessionToken });
-    } catch (e) {
-      const invalid = Boolean((e as any)?.__betfairSessionInvalid);
-      if (!invalid) throw e;
-      sessionToken = await getBetfairSessionToken({ force: true });
-      return await betfairJsonRpc({ method, params: rpcParams, sessionToken });
-    }
-  };
-
-  const stripTeamNoise = (value: string) => {
-    const n = normalizeName(value);
-    if (!n) return "";
-    const stop = new Set(["fc", "cf", "sc", "ac", "cd", "de", "da", "do", "the", "club", "clube"]);
-    return n
-      .split(" ")
-      .filter((t) => t && t.length >= 3 && !stop.has(t) && !/^\d+$/.test(t))
-      .join(" ")
-      .trim();
-  };
-
-  const qHome = stripTeamNoise(homeTeam);
-  const qAway = stripTeamNoise(awayTeam);
-  const eventQueries = Array.from(
-    new Set(
-      [
-        homeTeam,
-        awayTeam,
-        `${homeTeam} ${awayTeam}`,
-        qHome,
-        qAway,
-        `${qHome} ${qAway}`.trim(),
-        `${(qHome.split(" ")[0] ?? "").trim()} ${(qAway.split(" ")[0] ?? "").trim()}`.trim(),
-      ].map((x) => String(x ?? "").trim()).filter(Boolean),
-    ),
-  );
-  let events: any[] = [];
-  for (const q of eventQueries) {
-    const r = await withTimeout(
-      () => call("SportsAPING/v1.0/listEvents", { filter: { eventTypeIds: ["1"], textQuery: q, marketStartTime: { from, to } } }),
-      8000,
-    );
-    if (Array.isArray(r) && r.length > 0) {
-      events = r;
-      const bestEv = pickBestEvent(events, homeTeam, awayTeam, utcDate);
-      if (bestEv) {
-        events = [{ event: bestEv }];
-        break;
+    let lastErr: unknown = null;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        return await betfairJsonRpc({ method, params: rpcParams, sessionToken });
+      } catch (e) {
+        lastErr = e;
+        const invalid = Boolean((e as any)?.__betfairSessionInvalid);
+        const retryable = Boolean((e as any)?.__betfairRetryable);
+        if (!(invalid || retryable) || attempt >= 2) throw e;
+        if (retryable) {
+          await sleep(450 * (attempt + 1));
+          continue;
+        }
+        sessionToken = await getBetfairSessionToken({ force: true });
       }
     }
-  }
-
-  const best = pickBestEvent(events, homeTeam, awayTeam, utcDate);
-  const eventId = String(best?.id ?? "").trim();
-  if (!eventId) throw new Error("Betfair: eventId não encontrado");
-
-  const catalogue = await withTimeout(
+    throw lastErr;
+  };
+  const catalogues = await withTimeout(
     () =>
       call("SportsAPING/v1.0/listMarketCatalogue", {
-        filter: { eventIds: [eventId], marketTypeCodes: ["MATCH_ODDS"] },
-        maxResults: 1,
-        marketProjection: ["RUNNER_DESCRIPTION", "MARKET_START_TIME"],
+        filter: { eventTypeIds: ["1"], marketTypeCodes: ["MATCH_ODDS"], marketStartTime: { from, to } },
+        maxResults: "200",
+        maxResults: "200",
+        sort: "FIRST_TO_START",
+        marketProjection: ["EVENT", "COMPETITION", "RUNNER_DESCRIPTION", "MARKET_START_TIME"],
       }),
-    8000,
+    12_000,
   );
 
-  const mk = Array.isArray(catalogue) ? catalogue[0] : null;
+  const markets = Array.isArray(catalogues) ? catalogues : [];
+  let bestMarket: { mk: any; score: number } | null = null;
+  for (const mk0 of markets) {
+    const ev = mk0?.event ?? null;
+    const evName = String(ev?.name ?? "").trim();
+    const baseScore = scoreEventName(evName, homeTeam, awayTeam);
+    if (baseScore <= 0) continue;
+
+    const startIso = String(mk0?.marketStartTime ?? "").trim();
+    const startMs = startIso ? new Date(startIso).getTime() : NaN;
+    let timeBonus = 0;
+    if (Number.isFinite(kickoffMs) && Number.isFinite(startMs)) {
+      const diffMin = Math.abs(kickoffMs - startMs) / 60000;
+      timeBonus = Math.max(0, 6 - diffMin / 30);
+    }
+    const s = baseScore + timeBonus;
+    if (!bestMarket || s > bestMarket.score) bestMarket = { mk: mk0, score: s };
+  }
+
+  const mk = bestMarket?.mk ?? null;
+  const eventId = String(mk?.event?.id ?? "").trim();
   const marketId = String(mk?.marketId ?? "").trim();
-  if (!marketId) throw new Error("Betfair: marketId (MATCH_ODDS) não encontrado");
+  if (!eventId || !marketId) throw new Error("Betfair: eventId não encontrado");
 
   const runners = Array.isArray(mk?.runners) ? mk.runners : [];
   const selectionByRole: Record<string, number> = {};
@@ -695,7 +862,7 @@ const resolveBetfairMatchOdds = async (params: { homeTeam: string; awayTeam: str
 
   return {
     eventId,
-    eventName: String(best?.name ?? "").trim() || null,
+    eventName: String(mk?.event?.name ?? "").trim() || null,
     marketId,
     marketStartTime: String(mk?.marketStartTime ?? "").trim() || null,
     inPlay,
@@ -787,9 +954,11 @@ const resolveBetfairCorrectScoreMarket = async (params: { eventId: string }) => 
 };
 
 Deno.serve(async (req) => {
-  const method = String((req as any)?.method ?? "").toUpperCase();
   try {
-    if (method === "OPTIONS") return new Response("", { status: 204, headers: CORS_HEADERS });
+    const method = String((req as any)?.method ?? "").toUpperCase();
+    const isPreflight =
+      method === "OPTIONS" || (req.headers.has("origin") && req.headers.has("access-control-request-method"));
+    if (isPreflight) return new Response(null, { status: 204, headers: CORS_HEADERS });
 
     const url = (() => {
       try {
@@ -807,20 +976,50 @@ Deno.serve(async (req) => {
         const body = await readJson(req);
         const dateFrom = String((body as any)?.dateFrom ?? "").trim();
         const dateTo = String((body as any)?.dateTo ?? "").trim();
-        const maxResults = Number((body as any)?.maxResults ?? (body as any)?.maxEvents ?? 200);
+        const maxResultsRaw = Number((body as any)?.maxResults ?? (body as any)?.maxEvents ?? 120);
+        const maxResults = Number.isFinite(maxResultsRaw) ? Math.max(1, Math.min(150, Math.floor(maxResultsRaw))) : 120;
 
         if (!/^\d{4}-\d{2}-\d{2}$/.test(dateFrom) || !/^\d{4}-\d{2}-\d{2}$/.test(dateTo)) {
           return json({ ok: false, error: "dateFrom/dateTo devem estar no formato YYYY-MM-DD" }, 400);
         }
 
-        const fromIso = new Date(`${dateFrom}T00:00:00-03:00`).toISOString();
-        const toIso = new Date(`${dateTo}T23:59:59-03:00`).toISOString();
+        const addDaysYmd = (ymd: string, delta: number) => {
+          const base = String(ymd ?? "").trim();
+          if (!/^\d{4}-\d{2}-\d{2}$/.test(base)) return base;
+          const d = new Date(`${base}T12:00:00.000Z`);
+          if (!Number.isFinite(d.getTime())) return base;
+          d.setUTCDate(d.getUTCDate() + Math.trunc(delta || 0));
+          const y = d.getUTCFullYear();
+          const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+          const day = String(d.getUTCDate()).padStart(2, "0");
+          return `${y}-${m}-${day}`;
+        };
+        const ymdToUtcNoon = (ymd: string) => new Date(`${ymd}T12:00:00.000Z`).getTime();
 
-        const matches = await listBetfairSoccerMatchOddsRange({
-          fromIso,
-          toIso,
-          maxResults: Number.isFinite(maxResults) ? maxResults : 200,
-        });
+        const fromDayMs = ymdToUtcNoon(dateFrom);
+        const toDayMs = ymdToUtcNoon(dateTo);
+        if (!(Number.isFinite(fromDayMs) && Number.isFinite(toDayMs))) {
+          return json({ ok: false, error: "dateFrom/dateTo inválidos" }, 400);
+        }
+
+        const diffDays = Math.round((toDayMs - fromDayMs) / 86400000);
+        const days = Math.max(0, Math.min(7, diffDays));
+        const perDayLimitBase = maxResults;
+        const perDayLimit = Math.max(10, Math.min(80, Math.ceil(perDayLimitBase / Math.max(1, days + 1))));
+
+        const out: any[] = [];
+        for (let i = 0; i <= days; i += 1) {
+          const ymd = addDaysYmd(dateFrom, i);
+          const fromIso = new Date(`${ymd}T00:00:00-03:00`).toISOString();
+          const toIso = new Date(`${ymd}T23:59:59-03:00`).toISOString();
+          const chunk = await listBetfairSoccerMatchOddsRange({
+            fromIso,
+            toIso,
+            maxResults: perDayLimit,
+          });
+          out.push(...(Array.isArray(chunk) ? chunk : []));
+        }
+        const matches = out.slice(0, perDayLimitBase);
         return json({ ok: true, matches });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -855,7 +1054,12 @@ Deno.serve(async (req) => {
 
     return json({ ok: false, error: "Not Found" }, 404);
   } catch (error) {
-    if (method === "OPTIONS") return new Response("", { status: 204, headers: CORS_HEADERS });
+    try {
+      const method = String((req as any)?.method ?? "").toUpperCase();
+      const isPreflight =
+        method === "OPTIONS" || (req.headers.has("origin") && req.headers.has("access-control-request-method"));
+      if (isPreflight) return new Response(null, { status: 204, headers: CORS_HEADERS });
+    } catch {}
     const message = error instanceof Error ? error.message : String(error);
     return json({ ok: false, error: message || "Erro interno" }, 500);
   }

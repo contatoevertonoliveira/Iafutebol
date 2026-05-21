@@ -217,7 +217,14 @@ export class ApiFootballService {
 
   private isQuotaErrorMessage(message: string) {
     const m = String(message ?? '').toLowerCase();
-    return m.includes('request limit for the day') || m.includes('you have reached the request limit') || m.includes('reached the request limit');
+    return (
+      m.includes('request limit for the day') ||
+      m.includes('you have reached the request limit') ||
+      m.includes('reached the request limit') ||
+      m.includes('too many requests') ||
+      m.includes('limit of requests per minute') ||
+      m.includes('ratelimit')
+    );
   }
 
   private isQuotaErrorList(errs: string[]) {
@@ -225,6 +232,7 @@ export class ApiFootballService {
       const msg = String(e ?? '');
       if (!msg) return false;
       if (msg.toLowerCase().startsWith('requests:') && this.isQuotaErrorMessage(msg)) return true;
+      if (msg.toLowerCase().startsWith('ratelimit:') && this.isQuotaErrorMessage(msg)) return true;
       return this.isQuotaErrorMessage(msg);
     });
   }
@@ -270,12 +278,17 @@ export class ApiFootballService {
   }
 
   private async fetchViaServerProxy<T>(url: string): Promise<T> {
-    const { projectId } = await import('/utils/supabase/info');
+    const { projectId, publicAnonKey } = await import('/utils/supabase/info');
 
     const response = await fetch(
       `https://${projectId}.supabase.co/functions/v1/proxy-server-1119702f/proxy/api-football`,
       {
         method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          apikey: publicAnonKey,
+          Authorization: `Bearer ${publicAnonKey}`,
+        },
         body: JSON.stringify({
           url,
           apiKey: this.apiKey,
@@ -313,7 +326,9 @@ export class ApiFootballService {
         this.clearQuotaLock();
         return data;
       } catch (proxyError) {
-        console.warn('⚠️ Proxy via servidor falhou, tentando requisição direta...', proxyError);
+        if (!this.isUnsupportedPageParamError(proxyError)) {
+          console.warn('⚠️ Proxy via servidor falhou, tentando requisição direta...', proxyError);
+        }
       }
 
       const controller = new AbortController();

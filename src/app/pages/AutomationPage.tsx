@@ -407,6 +407,15 @@ export default function AutomationPage() {
   const finishedStopSentRef = useRef<Set<string>>(new Set());
   const [status, setStatus] = useState<'idle' | 'loading' | 'error'>('idle');
   const [view, setView] = useState<'all' | 'live' | 'today' | 'tomorrow' | 'next'>('all');
+  const [isTestMode, setIsTestMode] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('automation_test_mode_v1') === '1';
+    } catch {
+      return false;
+    }
+  });
+  const testModeInitRef = useRef(false);
+  const isTestModeRef = useRef(isTestMode);
   const [marketsOpen, setMarketsOpen] = useState(false);
   const [marketsItemId, setMarketsItemId] = useState<string | null>(null);
   const [marketsDraft, setMarketsDraft] = useState<AutomationMarketToggle[]>([]);
@@ -435,6 +444,51 @@ export default function AutomationPage() {
   const lastFundsSyncAtRef = useRef(0);
   const isRefreshingOddsRef = useRef(false);
   const isRefreshingTradePreviewRef = useRef(false);
+
+  // #region debug-point A:init
+  const dbg = (hypothesisId: 'A' | 'B' | 'C' | 'D' | 'E', msg: string, data?: Record<string, unknown>) => {
+    try {
+      if (localStorage.getItem('automation_debug_enabled_v1') !== '1') return;
+    } catch {
+      return;
+    }
+    fetch('http://127.0.0.1:7777/event', {
+      method: 'POST',
+      body: JSON.stringify({
+        sessionId: 'automation-bots-no-entry',
+        runId: 'post-fix',
+        hypothesisId,
+        location: 'AutomationPage.tsx',
+        msg: `[DEBUG] ${msg}`,
+        data: data ?? {},
+        ts: Date.now(),
+      }),
+    }).catch(() => {});
+  };
+  // #endregion
+
+  useEffect(() => {
+    isTestModeRef.current = isTestMode;
+    try {
+      localStorage.setItem('automation_test_mode_v1', isTestMode ? '1' : '0');
+    } catch {}
+    if (!testModeInitRef.current) {
+      testModeInitRef.current = true;
+      return;
+    }
+    toast[isTestMode ? 'warning' : 'success'](isTestMode ? 'Modo teste ativado' : 'Modo real ativado', {
+      description: isTestMode ? 'Ao iniciar um robô, uma ordem de teste será enviada automaticamente.' : 'Robôs voltaram a operar conforme as validações normais.',
+    });
+  }, [isTestMode]);
+
+  const getEdgeHeaders = async () => {
+    const { publicAnonKey } = await import('/utils/supabase/info');
+    return {
+      'Content-Type': 'application/json',
+      apikey: publicAnonKey,
+      Authorization: `Bearer ${publicAnonKey}`,
+    };
+  };
   const [expandedById, setExpandedById] = useState<Record<string, boolean>>({});
   const clickTimersRef = useRef<Record<string, number>>({});
   const [manualOpen, setManualOpen] = useState(false);
@@ -844,8 +898,10 @@ export default function AutomationPage() {
     if (!opts?.silent) setStatus('loading');
     try {
       const { projectId } = await import('/utils/supabase/info');
+      const headers = await getEdgeHeaders();
       const res = await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/queue/list`, {
         method: 'POST',
+        headers,
         body: '{}',
       });
       const raw = await res.text().catch(() => '');
@@ -867,9 +923,15 @@ export default function AutomationPage() {
   const refreshOdds = async () => {
     if (isRefreshingOddsRef.current) return;
     isRefreshingOddsRef.current = true;
+    // #region debug-point A:refreshOdds-enter
+    dbg('A', 'refreshOdds enter', { itemsCount: itemsRef.current.length });
+    // #endregion
     try {
       const cfg = loadApiConfig();
       const adminToken = String(cfg?.automationAdminToken ?? '').trim();
+      // #region debug-point B:adminToken
+      dbg('B', 'adminToken check', { hasAdminToken: Boolean(adminToken), len: adminToken.length });
+      // #endregion
       const bankrollTotalStored = Number(cfg?.betfairBankroll ?? 0);
       const marketPercents = (cfg?.betfairMarketPercents && typeof cfg.betfairMarketPercents === 'object') ? cfg.betfairMarketPercents : {};
       const correctScorePct = Number(marketPercents.correctScore ?? 10);
@@ -878,6 +940,7 @@ export default function AutomationPage() {
       const robotLimits = (cfg?.betfairRobotLimits && typeof cfg.betfairRobotLimits === 'object') ? cfg.betfairRobotLimits : {};
 
       const { projectId } = await import('/utils/supabase/info');
+      const headers = await getEdgeHeaders();
 
       if (adminToken) {
         const shouldAutoSync = !Number.isFinite(bankrollTotalStored) || bankrollTotalStored <= 0;
@@ -888,6 +951,7 @@ export default function AutomationPage() {
             try {
               const fundsRes = await fetch(`https://${projectId}.supabase.co/functions/v1/betfair-core-server-1119702f/automation/betfair/account/funds`, {
                 method: 'POST',
+                headers,
                 body: JSON.stringify({ adminToken }),
               });
               const fundsRaw = await fundsRes.text().catch(() => '');
@@ -916,28 +980,51 @@ export default function AutomationPage() {
           ? Math.round(((bankrollTotal * overUnderPct) / 100) * 100) / 100
           : 50;
 
+      const testModeActive = isTestModeRef.current;
       const res = await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/queue/refreshOdds`, {
         method: 'POST',
+        headers,
         body: JSON.stringify({
-          max: 30,
-          minFreshSeconds: 10,
-          includeCorrectScore: true,
-          runCorrectScorePlan: true,
-          planConfig: {
-            minProfitPct: 0.03,
-            targetProfitPct: 0.03,
-            maxProfitPct: 0.05,
-            bankroll: bankrollForCorrectScore,
-            maxSelections: 10,
-            maxGoals: 3,
-            includeAnyOther: true,
-          },
+          max: testModeActive ? 10 : 30,
+          minFreshSeconds: testModeActive ? 25 : 10,
+          includeCorrectScore: !testModeActive,
+          runCorrectScorePlan: !testModeActive,
+          ...(testModeActive
+            ? {}
+            : {
+                planConfig: {
+                  minProfitPct: 0.03,
+                  targetProfitPct: 0.03,
+                  maxProfitPct: 0.05,
+                  bankroll: bankrollForCorrectScore,
+                  maxSelections: 10,
+                  maxGoals: 3,
+                  includeAnyOther: true,
+                },
+              }),
         }),
       });
       const raw = await res.text().catch(() => '');
       const data = raw ? JSON.parse(raw) : null;
+      // #region debug-point A:refreshOdds-response
+      dbg('A', 'queue/refreshOdds response', { ok: Boolean(res.ok && data?.ok), status: res.status, hasBody: Boolean(raw), error: data?.error ?? null });
+      // #endregion
       if (!res.ok || !data?.ok) return;
       await loadQueue({ silent: true });
+      // #region debug-point C:queue-after-refresh
+      dbg('C', 'queue loaded after refreshOdds', {
+        running: itemsRef.current.filter((x) => x.status === 'running').length,
+        paused: itemsRef.current.filter((x) => x.status === 'paused').length,
+        stopped: itemsRef.current.filter((x) => x.status === 'stopped').length,
+        agents: itemsRef.current.reduce((acc: Record<string, number>, x) => {
+          const a = normalizeAgent(x.strategy?.agent) || 'none';
+          acc[a] = (acc[a] ?? 0) + 1;
+          return acc;
+        }, {}),
+      });
+      // #endregion
+
+      if (isTestModeRef.current) return;
 
       if (adminToken) {
         const snapshot = itemsRef.current;
@@ -955,6 +1042,9 @@ export default function AutomationPage() {
             return cs ? Boolean(cs.enabled) : true;
           })
           .slice(0, 6);
+        // #region debug-point C:targets-correctScore
+        dbg('C', 'targets correctScore', { count: targets.length, ids: targets.map((t) => t.matchId) });
+        // #endregion
 
         const nowTs = Date.now();
         for (const x of targets) {
@@ -966,10 +1056,37 @@ export default function AutomationPage() {
           const hasInstructions = Array.isArray(x.strategy?.correctScore?.lastPlan?.instructions) && x.strategy?.correctScore?.lastPlan?.instructions.length > 0;
           if (!hasInstructions) continue;
 
-          await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/strategy/correctScore/execute`, {
+          // #region debug-point D:correctScore-exec
+          dbg('D', 'correctScore execute call', { matchId: x.matchId, mode });
+          // #endregion
+          const execRes = await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/strategy/correctScore/execute`, {
             method: 'POST',
+            headers,
             body: JSON.stringify({ matchId: x.matchId, dryRun: false, adminToken, config: { bankroll: bankrollForCorrectScore } }),
-          }).catch(() => null);
+          }).catch((e) => {
+            // #region debug-point E:correctScore-exec-error
+            dbg('E', 'correctScore execute fetch error', { matchId: x.matchId, error: e instanceof Error ? e.message : String(e) });
+            // #endregion
+            return null;
+          });
+          if (execRes) {
+            const t = await execRes.text().catch(() => '');
+            let j: any = null;
+            try {
+              j = t ? JSON.parse(t) : null;
+            } catch {}
+            // #region debug-point D:correctScore-exec-response
+            dbg('D', 'correctScore execute response', {
+              matchId: x.matchId,
+              status: execRes.status,
+              ok: Boolean(execRes.ok && j?.ok),
+              skipped: Boolean(j?.skipped),
+              reason: j?.reason ?? null,
+              adoptedExisting: Boolean(j?.adoptedExisting),
+              error: j?.error ?? null,
+            });
+            // #endregion
+          }
         }
 
         await loadQueue({ silent: true });
@@ -986,6 +1103,9 @@ export default function AutomationPage() {
           .filter((x) => Boolean(x.betfair?.correctScore?.marketId))
           .filter((x) => Boolean(String(x.strategy?.correctScore?.lastExecutionAt ?? '').trim()) || Boolean(String(x.strategy?.correctScore?.adoptedExistingAt ?? '').trim()))
           .slice(0, 6);
+        // #region debug-point C:targets-cs-rebalance
+        dbg('C', 'targets correctScore rebalance', { count: rebalanceTargets.length, ids: rebalanceTargets.map((t) => t.matchId) });
+        // #endregion
 
         const nowTs = Date.now();
         for (const x of rebalanceTargets) {
@@ -1001,8 +1121,12 @@ export default function AutomationPage() {
           const prevGoals = Number.isFinite(lastGoals) ? lastGoals : null;
           if (totalGoals != null && prevGoals != null && totalGoals === prevGoals) continue;
 
-          await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/strategy/correctScore/rebalance`, {
+          // #region debug-point D:correctScore-rebalance-call
+          dbg('D', 'correctScore rebalance call', { matchId: x.matchId, totalGoals, prevGoals });
+          // #endregion
+          const rebRes = await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/strategy/correctScore/rebalance`, {
             method: 'POST',
+            headers,
             body: JSON.stringify({
               matchId: x.matchId,
               adminToken,
@@ -1013,7 +1137,29 @@ export default function AutomationPage() {
                 maxStakePerInstruction: 50,
               },
             }),
-          }).catch(() => null);
+          }).catch((e) => {
+            // #region debug-point E:correctScore-rebalance-error
+            dbg('E', 'correctScore rebalance fetch error', { matchId: x.matchId, error: e instanceof Error ? e.message : String(e) });
+            // #endregion
+            return null;
+          });
+          if (rebRes) {
+            const t = await rebRes.text().catch(() => '');
+            let j: any = null;
+            try {
+              j = t ? JSON.parse(t) : null;
+            } catch {}
+            // #region debug-point D:correctScore-rebalance-response
+            dbg('D', 'correctScore rebalance response', {
+              matchId: x.matchId,
+              status: rebRes.status,
+              ok: Boolean(rebRes.ok && j?.ok),
+              skipped: Boolean(j?.skipped),
+              reason: j?.reason ?? null,
+              error: j?.error ?? null,
+            });
+            // #endregion
+          }
         }
 
         await loadQueue({ silent: true });
@@ -1028,6 +1174,9 @@ export default function AutomationPage() {
             return agent === 'scalpingGoals';
           })
           .slice(0, 4);
+        // #region debug-point C:targets-scalpingGoals
+        dbg('C', 'targets scalpingGoals', { count: scalpingTargets.length, ids: scalpingTargets.map((t) => t.matchId) });
+        // #endregion
 
         for (const x of scalpingTargets) {
           const lastTick = String(x.strategy?.scalpingGoals?.lastTickAt ?? '').trim();
@@ -1038,8 +1187,12 @@ export default function AutomationPage() {
           const stakePct = Number(lim?.stakePct);
           const entryOffsetTicks = Number(lim?.entryOffsetTicks);
           const secondsToWaitMatch = Number(lim?.secondsToWaitMatch);
-          await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/strategy/scalpingGoals/tick`, {
+          // #region debug-point D:scalpingGoals-tick-call
+          dbg('D', 'scalpingGoals tick call', { matchId: x.matchId });
+          // #endregion
+          const tickRes = await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/strategy/scalpingGoals/tick`, {
             method: 'POST',
+            headers,
             body: JSON.stringify({
               matchId: x.matchId,
               adminToken,
@@ -1051,7 +1204,31 @@ export default function AutomationPage() {
                 ...(Number.isFinite(secondsToWaitMatch) ? { secondsToWaitMatch } : {}),
               },
             }),
-          }).catch(() => null);
+          }).catch((e) => {
+            // #region debug-point E:scalpingGoals-tick-error
+            dbg('E', 'scalpingGoals tick fetch error', { matchId: x.matchId, error: e instanceof Error ? e.message : String(e) });
+            // #endregion
+            return null;
+          });
+          if (tickRes) {
+            const t = await tickRes.text().catch(() => '');
+            let j: any = null;
+            try {
+              j = t ? JSON.parse(t) : null;
+            } catch {}
+            // #region debug-point D:scalpingGoals-tick-response
+            dbg('D', 'scalpingGoals tick response', {
+              matchId: x.matchId,
+              status: tickRes.status,
+              ok: Boolean(tickRes.ok && j?.ok),
+              skipped: Boolean(j?.skipped),
+              reason: j?.reason ?? null,
+              entered: Boolean(j?.entered),
+              closed: Boolean(j?.closed),
+              error: j?.error ?? null,
+            });
+            // #endregion
+          }
         }
 
         await loadQueue({ silent: true });
@@ -1063,6 +1240,9 @@ export default function AutomationPage() {
           .filter((x) => x.status === 'running')
           .filter((x) => normalizeAgent(x.strategy?.agent) === 'scalpingTicks')
           .slice(0, 4);
+        // #region debug-point C:targets-scalpingTicks
+        dbg('C', 'targets scalpingTicks', { count: scalpingTicksTargets.length, ids: scalpingTicksTargets.map((t) => t.matchId) });
+        // #endregion
 
         for (const x of scalpingTicksTargets) {
           const lastTick = String((x as any).strategy?.scalpingTicks?.lastTickAt ?? '').trim();
@@ -1076,8 +1256,12 @@ export default function AutomationPage() {
           const stakePct = Number(lim?.stakePct);
           const maxCycles = Number(lim?.maxCycles);
           const secondsToWaitMatch = Number(lim?.secondsToWaitMatch);
-          await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/strategy/scalpingTicks/tick`, {
+          // #region debug-point D:scalpingTicks-tick-call
+          dbg('D', 'scalpingTicks tick call', { matchId: x.matchId });
+          // #endregion
+          const tickRes = await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/strategy/scalpingTicks/tick`, {
             method: 'POST',
+            headers,
             body: JSON.stringify({
               matchId: x.matchId,
               adminToken,
@@ -1092,7 +1276,31 @@ export default function AutomationPage() {
                 ...(Number.isFinite(secondsToWaitMatch) ? { secondsToWaitMatch } : {}),
               },
             }),
-          }).catch(() => null);
+          }).catch((e) => {
+            // #region debug-point E:scalpingTicks-tick-error
+            dbg('E', 'scalpingTicks tick fetch error', { matchId: x.matchId, error: e instanceof Error ? e.message : String(e) });
+            // #endregion
+            return null;
+          });
+          if (tickRes) {
+            const t = await tickRes.text().catch(() => '');
+            let j: any = null;
+            try {
+              j = t ? JSON.parse(t) : null;
+            } catch {}
+            // #region debug-point D:scalpingTicks-tick-response
+            dbg('D', 'scalpingTicks tick response', {
+              matchId: x.matchId,
+              status: tickRes.status,
+              ok: Boolean(tickRes.ok && j?.ok),
+              skipped: Boolean(j?.skipped),
+              reason: j?.reason ?? null,
+              entered: Boolean(j?.entered),
+              closed: Boolean(j?.closed),
+              error: j?.error ?? null,
+            });
+            // #endregion
+          }
         }
 
         await loadQueue({ silent: true });
@@ -1104,6 +1312,9 @@ export default function AutomationPage() {
           .filter((x) => x.status === 'running')
           .filter((x) => normalizeAgent(x.strategy?.agent) === 'overGoalsLimit')
           .slice(0, 4);
+        // #region debug-point C:targets-overGoalsLimit
+        dbg('C', 'targets overGoalsLimit', { count: overGoalsLimitTargets.length, ids: overGoalsLimitTargets.map((t) => t.matchId) });
+        // #endregion
 
         for (const x of overGoalsLimitTargets) {
           const lastTick = String(x.strategy?.overGoalsLimit?.lastTickAt ?? '').trim();
@@ -1120,8 +1331,12 @@ export default function AutomationPage() {
           const stakePct = Number(lim?.stakePct);
           const entryOffsetTicks = Number(lim?.entryOffsetTicks);
           const secondsToWaitMatch = Number(lim?.secondsToWaitMatch);
-          await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/strategy/overGoalsLimit/tick`, {
+          // #region debug-point D:overGoalsLimit-tick-call
+          dbg('D', 'overGoalsLimit tick call', { matchId: x.matchId, hasLive: Boolean(live) });
+          // #endregion
+          const tickRes = await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/strategy/overGoalsLimit/tick`, {
             method: 'POST',
+            headers,
             body: JSON.stringify({
               matchId: x.matchId,
               adminToken,
@@ -1154,7 +1369,29 @@ export default function AutomationPage() {
                 ...(Number.isFinite(secondsToWaitMatch) ? { secondsToWaitMatch } : {}),
               },
             }),
-          }).catch(() => null);
+          }).catch((e) => {
+            // #region debug-point E:overGoalsLimit-tick-error
+            dbg('E', 'overGoalsLimit tick fetch error', { matchId: x.matchId, error: e instanceof Error ? e.message : String(e) });
+            // #endregion
+            return null;
+          });
+          if (tickRes) {
+            const t = await tickRes.text().catch(() => '');
+            let j: any = null;
+            try {
+              j = t ? JSON.parse(t) : null;
+            } catch {}
+            // #region debug-point D:overGoalsLimit-tick-response
+            dbg('D', 'overGoalsLimit tick response', {
+              matchId: x.matchId,
+              status: tickRes.status,
+              ok: Boolean(tickRes.ok && j?.ok),
+              skipped: Boolean(j?.skipped),
+              reason: j?.reason ?? null,
+              error: j?.error ?? null,
+            });
+            // #endregion
+          }
         }
 
         await loadQueue({ silent: true });
@@ -1166,6 +1403,9 @@ export default function AutomationPage() {
           .filter((x) => x.status === 'running')
           .filter((x) => normalizeAgent(x.strategy?.agent) === 'asianHandicap')
           .slice(0, 4);
+        // #region debug-point C:targets-asianHandicap
+        dbg('C', 'targets asianHandicap', { count: asianHandicapTargets.length, ids: asianHandicapTargets.map((t) => t.matchId) });
+        // #endregion
 
         for (const x of asianHandicapTargets) {
           const lastTick = String((x as any).strategy?.asianHandicap?.lastTickAt ?? '').trim();
@@ -1178,8 +1418,12 @@ export default function AutomationPage() {
           const entryOffsetTicks = Number(lim?.entryOffsetTicks);
           const targetTicks = Number(lim?.targetTicks);
           const maxEntries = Number(lim?.maxEntries);
-          await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/strategy/asianHandicap/tick`, {
+          // #region debug-point D:asianHandicap-tick-call
+          dbg('D', 'asianHandicap tick call', { matchId: x.matchId, hasLive: Boolean(live) });
+          // #endregion
+          const tickRes = await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/strategy/asianHandicap/tick`, {
             method: 'POST',
+            headers,
             body: JSON.stringify({
               matchId: x.matchId,
               adminToken,
@@ -1211,16 +1455,44 @@ export default function AutomationPage() {
                 ...(Number.isFinite(maxEntries) ? { maxEntries } : {}),
               },
             }),
-          }).catch(() => null);
+          }).catch((e) => {
+            // #region debug-point E:asianHandicap-tick-error
+            dbg('E', 'asianHandicap tick fetch error', { matchId: x.matchId, error: e instanceof Error ? e.message : String(e) });
+            // #endregion
+            return null;
+          });
+          if (tickRes) {
+            const t = await tickRes.text().catch(() => '');
+            let j: any = null;
+            try {
+              j = t ? JSON.parse(t) : null;
+            } catch {}
+            // #region debug-point D:asianHandicap-tick-response
+            dbg('D', 'asianHandicap tick response', {
+              matchId: x.matchId,
+              status: tickRes.status,
+              ok: Boolean(tickRes.ok && j?.ok),
+              skipped: Boolean(j?.skipped),
+              reason: j?.reason ?? null,
+              error: j?.error ?? null,
+            });
+            // #endregion
+          }
         }
 
         await loadQueue({ silent: true });
       }
 
     } catch {
+      // #region debug-point E:refreshOdds-exception
+      dbg('E', 'refreshOdds exception', {});
+      // #endregion
       return;
     } finally {
       isRefreshingOddsRef.current = false;
+      // #region debug-point A:refreshOdds-exit
+      dbg('A', 'refreshOdds exit', {});
+      // #endregion
     }
   };
 
@@ -1234,8 +1506,10 @@ export default function AutomationPage() {
     setLoadingMarketsByMatchId((prev) => ({ ...prev, [matchId]: true }));
     try {
       const { projectId } = await import('/utils/supabase/info');
+      const headers = await getEdgeHeaders();
       const res = await fetch(`https://${projectId}.supabase.co/functions/v1/betfair-core-server-1119702f/betfair/rpc`, {
         method: 'POST',
+        headers,
         body: JSON.stringify({
           method: 'SportsAPING/v1.0/listMarketCatalogue',
           params: {
@@ -1288,8 +1562,10 @@ export default function AutomationPage() {
     setLoadingBookByMatchId((prev) => ({ ...prev, [matchId]: true }));
     try {
       const { projectId } = await import('/utils/supabase/info');
+      const headers = await getEdgeHeaders();
       const res = await fetch(`https://${projectId}.supabase.co/functions/v1/betfair-core-server-1119702f/betfair/rpc`, {
         method: 'POST',
+        headers,
         body: JSON.stringify({
           method: 'SportsAPING/v1.0/listMarketBook',
           params: {
@@ -1356,6 +1632,79 @@ export default function AutomationPage() {
     }
   };
 
+  const fetchBetfairMarketBookSnapshot = async (matchId: string, marketId: string) => {
+    const mid = String(marketId ?? '').trim();
+    if (!mid) return null;
+    try {
+      const { projectId } = await import('/utils/supabase/info');
+      const headers = await getEdgeHeaders();
+      const res = await fetch(`https://${projectId}.supabase.co/functions/v1/betfair-core-server-1119702f/betfair/rpc`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          method: 'SportsAPING/v1.0/listMarketBook',
+          params: {
+            marketIds: [mid],
+            priceProjection: { priceData: ['EX_BEST_OFFERS'], virtualise: true },
+          },
+        }),
+      });
+      const raw = await res.text().catch(() => '');
+      const data = raw ? JSON.parse(raw) : null;
+      if (!res.ok || !data?.ok) throw new Error(String(data?.error ?? `HTTP ${res.status} ${res.statusText}`));
+      const book = Array.isArray(data.result) ? data.result[0] : null;
+      const runners = Array.isArray(book?.runners) ? book.runners : [];
+      const quotes: Record<
+        string,
+        {
+          selectionId: number;
+          runnerName: string;
+          back: number | null;
+          backSize: number | null;
+          lay: number | null;
+          laySize: number | null;
+        }
+      > = {};
+
+      const options = marketOptionsByMatchId[matchId]?.items ?? [];
+      const opt = options.find((o) => o.marketId === mid) ?? null;
+      const nameBySelectionId = new Map<number, string>();
+      for (const r of opt?.runners ?? []) nameBySelectionId.set(r.selectionId, r.runnerName);
+
+      for (const r of runners) {
+        const selectionId = Number(r?.selectionId);
+        if (!Number.isFinite(selectionId)) continue;
+        const atb = Array.isArray(r?.ex?.availableToBack) ? r.ex.availableToBack : [];
+        const atl = Array.isArray(r?.ex?.availableToLay) ? r.ex.availableToLay : [];
+        const back = typeof atb?.[0]?.price === 'number' ? atb[0].price : null;
+        const backSize = typeof atb?.[0]?.size === 'number' ? atb[0].size : null;
+        const lay = typeof atl?.[0]?.price === 'number' ? atl[0].price : null;
+        const laySize = typeof atl?.[0]?.size === 'number' ? atl[0].size : null;
+        quotes[String(selectionId)] = {
+          selectionId,
+          runnerName: nameBySelectionId.get(selectionId) ?? `#${selectionId}`,
+          back,
+          backSize,
+          lay,
+          laySize,
+        };
+      }
+
+      const snapshot = {
+        marketId: mid,
+        marketStatus: typeof book?.status === 'string' ? book.status : null,
+        fetchedAt: new Date().toISOString(),
+        runners: quotes,
+      };
+      setMarketBookByMatchId((prev) => ({ ...prev, [matchId]: snapshot }));
+      return snapshot;
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      toast.error('Falha ao carregar cotações do mercado', { description: msg.slice(0, 220) });
+      return null;
+    }
+  };
+
   const openManualOrder = (draft: {
     matchId: string;
     marketId: string;
@@ -1396,8 +1745,10 @@ export default function AutomationPage() {
     setIsPlacingManual(true);
     try {
       const { projectId } = await import('/utils/supabase/info');
+      const headers = await getEdgeHeaders();
       const res = await fetch(`https://${projectId}.supabase.co/functions/v1/betfair-core-server-1119702f/betfair/placeOrders`, {
         method: 'POST',
+        headers,
         body: JSON.stringify({
           adminToken,
           marketId: d.marketId,
@@ -1430,8 +1781,10 @@ export default function AutomationPage() {
   const updateItem = async (matchId: string, patch: Partial<QueueItem>) => {
     try {
       const { projectId } = await import('/utils/supabase/info');
+      const headers = await getEdgeHeaders();
       const res = await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/queue/update`, {
         method: 'POST',
+        headers,
         body: JSON.stringify({ matchId, patch }),
       });
       const raw = await res.text().catch(() => '');
@@ -1553,8 +1906,10 @@ export default function AutomationPage() {
   const removeItem = async (matchId: string) => {
     try {
       const { projectId } = await import('/utils/supabase/info');
+      const headers = await getEdgeHeaders();
       const res = await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/queue/remove`, {
         method: 'POST',
+        headers,
         body: JSON.stringify({ matchId }),
       });
       const raw = await res.text().catch(() => '');
@@ -1589,10 +1944,12 @@ export default function AutomationPage() {
     const adminToken = getAdminTokenOrToast();
     if (!adminToken) return null;
     const { projectId } = await import('/utils/supabase/info');
+    const headers = await getEdgeHeaders();
     const res = await fetch(
       `https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/strategy/correctScore/openOrdersSummary`,
       {
         method: 'POST',
+        headers,
         body: JSON.stringify({ matchId, adminToken }),
       },
     );
@@ -1610,8 +1967,10 @@ export default function AutomationPage() {
     const adminToken = getAdminTokenOrToast();
     if (!adminToken) return false;
     const { projectId } = await import('/utils/supabase/info');
+    const headers = await getEdgeHeaders();
     const res = await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/strategy/correctScore/cancelOpenOrders`, {
       method: 'POST',
+      headers,
       body: JSON.stringify({ matchId, adminToken }),
     });
     const raw = await res.text().catch(() => '');
@@ -1631,8 +1990,10 @@ export default function AutomationPage() {
     const adminToken = getAdminTokenSilent();
     if (!adminToken) return null;
     const { projectId } = await import('/utils/supabase/info');
+    const headers = await getEdgeHeaders();
     const res = await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/strategy/correctScore/tradePreview`, {
       method: 'POST',
+      headers,
       body: JSON.stringify({ matchId, adminToken }),
     });
     const raw = await res.text().catch(() => '');
@@ -1658,8 +2019,10 @@ export default function AutomationPage() {
     const adminToken = getAdminTokenOrToast();
     if (!adminToken) return false;
     const { projectId } = await import('/utils/supabase/info');
+    const headers = await getEdgeHeaders();
     const res = await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/strategy/correctScore/cashout`, {
       method: 'POST',
+      headers,
       body: JSON.stringify({ matchId, adminToken }),
     });
     const raw = await res.text().catch(() => '');
@@ -1672,8 +2035,10 @@ export default function AutomationPage() {
     const adminToken = getAdminTokenOrToast();
     if (!adminToken) return false;
     const { projectId } = await import('/utils/supabase/info');
+    const headers = await getEdgeHeaders();
     const res = await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/strategy/correctScore/execute`, {
       method: 'POST',
+      headers,
       body: JSON.stringify({ matchId, dryRun: false, adminToken, config: config && typeof config === 'object' ? config : {} }),
     });
     const raw = await res.text().catch(() => '');
@@ -1696,8 +2061,10 @@ export default function AutomationPage() {
     const adminToken = getAdminTokenOrToast();
     if (!adminToken) return false;
     const { projectId } = await import('/utils/supabase/info');
+    const headers = await getEdgeHeaders();
     const res = await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/strategy/scalpingGoals/tick`, {
       method: 'POST',
+      headers,
       body: JSON.stringify({ matchId, adminToken, config }),
     });
     const raw = await res.text().catch(() => '');
@@ -1732,8 +2099,10 @@ export default function AutomationPage() {
     const adminToken = getAdminTokenOrToast();
     if (!adminToken) return false;
     const { projectId } = await import('/utils/supabase/info');
+    const headers = await getEdgeHeaders();
     const res = await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/strategy/overGoalsLimit/tick`, {
       method: 'POST',
+      headers,
       body: JSON.stringify({ matchId, adminToken, config }),
     });
     const raw = await res.text().catch(() => '');
@@ -1768,8 +2137,10 @@ export default function AutomationPage() {
     const adminToken = getAdminTokenOrToast();
     if (!adminToken) return false;
     const { projectId } = await import('/utils/supabase/info');
+    const headers = await getEdgeHeaders();
     const res = await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/strategy/asianHandicap/tick`, {
       method: 'POST',
+      headers,
       body: JSON.stringify({ matchId, adminToken, config }),
     });
     const raw = await res.text().catch(() => '');
@@ -1801,8 +2172,10 @@ export default function AutomationPage() {
     const adminToken = getAdminTokenOrToast();
     if (!adminToken) return false;
     const { projectId } = await import('/utils/supabase/info');
+    const headers = await getEdgeHeaders();
     const res = await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/strategy/scalpingTicks/tick`, {
       method: 'POST',
+      headers,
       body: JSON.stringify({ matchId, adminToken, config }),
     });
     const raw = await res.text().catch(() => '');
@@ -1831,6 +2204,85 @@ export default function AutomationPage() {
     if (!ok) return;
     try {
       const agent = normalizeAgent(x.strategy?.agent);
+      if (isTestMode) {
+        const adminToken = getAdminTokenOrToast();
+        if (!adminToken) return;
+
+        const desiredMarketId = (() => {
+          if (agent === 'correctScore') {
+            const cs = String(x.betfair?.correctScore?.marketId ?? '').trim();
+            if (cs) return cs;
+          }
+          return String(x.betfair?.marketId ?? '').trim();
+        })();
+        if (!desiredMarketId) throw new Error('Jogo ainda não está mapeado na Betfair (marketId ausente).');
+
+        await fetchBetfairMarketsForItem(x);
+        const snapshot = await fetchBetfairMarketBookSnapshot(x.matchId, desiredMarketId);
+        const marketStatus = String(snapshot?.marketStatus ?? '').trim().toUpperCase();
+        if (marketStatus && marketStatus !== 'OPEN') {
+          throw new Error(`Mercado não está OPEN (status: ${marketStatus}).`);
+        }
+
+        const pickFromOdds = () => {
+          const marketId = desiredMarketId;
+          const odds = x.betfair?.odds ?? null;
+          const sel = x.betfair?.runners ?? null;
+          const hb = odds?.home?.back ?? null;
+          const ab = odds?.away?.back ?? null;
+          const hs = sel?.homeSelectionId ?? null;
+          const as = sel?.awaySelectionId ?? null;
+          if (typeof hb === 'number' && Number.isFinite(hb) && hb > 1 && typeof ab === 'number' && Number.isFinite(ab) && ab > 1) {
+            if (hb <= ab && typeof hs === 'number' && Number.isFinite(hs)) return { marketId, selectionId: hs, price: hb, label: 'Casa' };
+            if (typeof as === 'number' && Number.isFinite(as)) return { marketId, selectionId: as, price: ab, label: 'Fora' };
+          }
+          if (typeof hb === 'number' && Number.isFinite(hb) && hb > 1 && typeof hs === 'number' && Number.isFinite(hs)) {
+            return { marketId, selectionId: hs, price: hb, label: 'Casa' };
+          }
+          if (typeof ab === 'number' && Number.isFinite(ab) && ab > 1 && typeof as === 'number' && Number.isFinite(as)) {
+            return { marketId, selectionId: as, price: ab, label: 'Fora' };
+          }
+          return null;
+        };
+
+        const pickFromBook = () => {
+          const runners = snapshot?.runners ?? {};
+          const entries = Object.values(runners);
+          const best = entries.find((r) => typeof r.back === 'number' && Number.isFinite(r.back) && r.back > 1) ?? null;
+          if (!best) return null;
+          return { marketId: desiredMarketId, selectionId: best.selectionId, price: best.back as number, label: best.runnerName };
+        };
+
+        const picked = pickFromOdds() ?? pickFromBook();
+        if (!picked) throw new Error('Sem preço BACK disponível para enviar ordem de teste.');
+
+        const { projectId } = await import('/utils/supabase/info');
+        const headers = await getEdgeHeaders();
+        const res = await fetch(`https://${projectId}.supabase.co/functions/v1/betfair-core-server-1119702f/betfair/placeOrders`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            adminToken,
+            marketId: picked.marketId,
+            instructions: [
+              {
+                selectionId: picked.selectionId,
+                handicap: 0,
+                side: 'BACK',
+                orderType: 'LIMIT',
+                limitOrder: { size: 2.0, price: picked.price, persistenceType: 'LAPSE' },
+              },
+            ],
+            customerRef: `test_${agent}_${x.matchId}_${Date.now().toString(16)}`.slice(0, 32),
+          }),
+        });
+        const raw = await res.text().catch(() => '');
+        const data = raw ? JSON.parse(raw) : null;
+        if (!res.ok || !data?.ok) throw new Error(String(data?.error ?? `HTTP ${res.status} ${res.statusText}`));
+        toast.success('Ordem de teste enviada', { description: `${agent} | ${picked.label} @ ${formatOdd(picked.price)} | stake R$ 2` });
+        await loadQueue({ silent: true });
+        return;
+      }
       if (agent === 'favoriteRescue') return;
       if (agent === 'scalpingGoals' || agent === 'overGoalsLimit' || agent === 'scalpingTicks' || agent === 'asianHandicap') {
         const cfg = loadApiConfig();
@@ -2560,10 +3012,21 @@ export default function AutomationPage() {
             </div>
           </div>
 
-          <Button variant="outline" onClick={loadQueue} disabled={status === 'loading'}>
-            <RefreshCw className={cn('w-4 h-4 mr-2', status === 'loading' ? 'animate-spin' : '')} />
-            Atualizar
-          </Button>
+          <div className="flex items-center gap-4">
+            <div className="flex items-center gap-2">
+              <Switch checked={isTestMode} onCheckedChange={setIsTestMode} />
+              <div className="text-right">
+                <div className="text-sm font-semibold text-gray-900">{isTestMode ? 'Modo teste' : 'Modo real'}</div>
+                <div className={cn('text-xs', isTestMode ? 'text-amber-700' : 'text-gray-600')}>
+                  {isTestMode ? 'Envia ordem ao iniciar' : 'Estratégia normal'}
+                </div>
+              </div>
+            </div>
+            <Button variant="outline" onClick={() => void loadQueue()} disabled={status === 'loading'}>
+              <RefreshCw className={cn('w-4 h-4 mr-2', status === 'loading' ? 'animate-spin' : '')} />
+              Atualizar
+            </Button>
+          </div>
         </div>
 
         <Card className="p-4">

@@ -5,7 +5,7 @@ import { MobileHeader } from './MobileHeader';
 import { MobileBottomNav } from './MobileBottomNav';
 import { Badge } from './ui/badge';
 import { Switch } from './ui/switch';
-import { loadApiConfig, saveApiConfig } from '../services/apiConfig';
+import { hydrateApiConfigFromServer, loadApiConfig, saveApiConfig } from '../services/apiConfig';
 
 export function Layout() {
   const favoriteRescueStatusKey = 'favorite_rescue_status_v1';
@@ -42,6 +42,7 @@ export function Layout() {
   const [statusSnapshot, setStatusSnapshot] = useState(() => readStatus());
 
   useEffect(() => {
+    void hydrateApiConfigFromServer();
     const sync = () => {
       const cfg = loadApiConfig();
       const fr =

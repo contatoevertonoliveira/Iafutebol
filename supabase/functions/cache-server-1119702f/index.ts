@@ -47,14 +47,90 @@ const validateLeaguesCachePayload = (payload: any) => {
   return { ok: true } as const;
 };
 
+const appConfigKey = () => `app:config:v1`;
+const appStateKey = (k: string) => `app:state:v1:${k}`;
+
+const allowedAppStateKeys = new Set([
+  "requested_fixtures_v1",
+  "favorite_matches_v1",
+  "dismissed_matches_v1",
+]);
+
+const validateSmallJsonPayload = (payload: any, maxBytes = 200_000) => {
+  try {
+    const bytes = JSON.stringify(payload ?? null).length;
+    if (bytes > maxBytes) return { ok: false, error: "payload muito grande" } as const;
+    return { ok: true } as const;
+  } catch {
+    return { ok: false, error: "payload inválido" } as const;
+  }
+};
+
 Deno.serve(async (req) => {
-  if (req.method === "OPTIONS") return new Response("", { status: 204, headers: CORS_HEADERS });
+  const method = String(req.method ?? "").toUpperCase();
+  const isPreflight = method === "OPTIONS" || (req.headers.has("origin") && req.headers.has("access-control-request-method"));
+  if (isPreflight) return new Response(null, { status: 204, headers: CORS_HEADERS });
   const url = new URL(req.url);
   const path = url.pathname;
 
   if (req.method === "GET" && (path === "/health" || path.endsWith("/health"))) return json({ status: "ok" });
 
   if (req.method !== "POST") return json({ ok: false, error: "Not Found" }, 404);
+
+  if (path.endsWith("/app/config/get") || path === "/app/config/get") {
+    try {
+      const value = await kv.get(appConfigKey());
+      return json({ ok: true, value: value ?? null });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return json({ ok: false, error: message || "Erro ao ler config" }, 500);
+    }
+  }
+
+  if (path.endsWith("/app/config/set") || path === "/app/config/set") {
+    try {
+      const body = await readJson(req);
+      const payload = (body as any)?.payload ?? null;
+      const validation = validateSmallJsonPayload(payload, 350_000);
+      if (!validation.ok) return json({ ok: false, error: validation.error }, 400);
+      await kv.set(appConfigKey(), payload);
+      return json({ ok: true });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return json({ ok: false, error: message || "Erro ao salvar config" }, 500);
+    }
+  }
+
+  if (path.endsWith("/app/state/get") || path === "/app/state/get") {
+    try {
+      const body = await readJson(req);
+      const key = String((body as any)?.key ?? "").trim();
+      if (!key) return json({ ok: false, error: "key obrigatório" }, 400);
+      if (!allowedAppStateKeys.has(key)) return json({ ok: false, error: "key não permitido" }, 400);
+      const value = await kv.get(appStateKey(key));
+      return json({ ok: true, value: value ?? null });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return json({ ok: false, error: message || "Erro ao ler state" }, 500);
+    }
+  }
+
+  if (path.endsWith("/app/state/set") || path === "/app/state/set") {
+    try {
+      const body = await readJson(req);
+      const key = String((body as any)?.key ?? "").trim();
+      if (!key) return json({ ok: false, error: "key obrigatório" }, 400);
+      if (!allowedAppStateKeys.has(key)) return json({ ok: false, error: "key não permitido" }, 400);
+      const value = (body as any)?.value ?? null;
+      const validation = validateSmallJsonPayload(value, 450_000);
+      if (!validation.ok) return json({ ok: false, error: validation.error }, 400);
+      await kv.set(appStateKey(key), value);
+      return json({ ok: true });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return json({ ok: false, error: message || "Erro ao salvar state" }, 500);
+    }
+  }
 
   if (path.endsWith("/cache/api-football/leagues/get") || path === "/cache/api-football/leagues/get") {
     try {

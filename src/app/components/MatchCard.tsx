@@ -21,6 +21,15 @@ const automationQueueCache: {
   inflight: Promise<Set<string>> | null;
 } = { fetchedAt: 0, ids: new Set<string>(), byId: new Map<string, any>(), inflight: null };
 
+const getEdgeHeaders = async () => {
+  const { publicAnonKey } = await import('/utils/supabase/info');
+  return {
+    'Content-Type': 'application/json',
+    apikey: publicAnonKey,
+    Authorization: `Bearer ${publicAnonKey}`,
+  } as const;
+};
+
 const ensureAutomationQueueIds = async () => {
   const ttlMs = 30_000;
   const now = Date.now();
@@ -30,8 +39,10 @@ const ensureAutomationQueueIds = async () => {
   automationQueueCache.inflight = (async () => {
     try {
       const { projectId } = await import('/utils/supabase/info');
+      const headers = await getEdgeHeaders();
       const res = await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/queue/list`, {
         method: 'POST',
+        headers,
         body: '{}',
       });
       const raw = await res.text().catch(() => '');
@@ -492,8 +503,10 @@ export function MatchCard({
   const [guardOrdersCount, setGuardOrdersCount] = useState(0);
   const [guardMatchedCount, setGuardMatchedCount] = useState(0);
   const [guardIsBusy, setGuardIsBusy] = useState(false);
-  const [homeHomeRows, setHomeHomeRows] = useState<FormMatchRow[] | null>(null);
-  const [awayAwayRows, setAwayAwayRows] = useState<FormMatchRow[] | null>(null);
+  const [homeFormFilter, setHomeFormFilter] = useState<'all' | 'home' | 'away'>('home');
+  const [awayFormFilter, setAwayFormFilter] = useState<'all' | 'home' | 'away'>('away');
+  const [homeAllRows, setHomeAllRows] = useState<FormMatchRow[] | null>(null);
+  const [awayAllRows, setAwayAllRows] = useState<FormMatchRow[] | null>(null);
   const [isLoadingForm, setIsLoadingForm] = useState(false);
   const [formError, setFormError] = useState<string>('');
   const [matchOuContext, setMatchOuContext] = useState<MatchOuContext | null>(null);
@@ -779,8 +792,10 @@ export function MatchCard({
     setIsEnqueueingBetfair(true);
     try {
       const { projectId } = await import('/utils/supabase/info');
+      const headers = await getEdgeHeaders();
       const res = await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/queue/add`, {
         method: 'POST',
+        headers,
         body: JSON.stringify({
           matchId: match.id,
           source: apiSource,
@@ -838,10 +853,12 @@ export function MatchCard({
     const adminToken = getAdminTokenOrToast();
     if (!adminToken) return null;
     const { projectId } = await import('/utils/supabase/info');
+    const headers = await getEdgeHeaders();
     const res = await fetch(
       `https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/strategy/correctScore/openOrdersSummary`,
       {
         method: 'POST',
+        headers,
         body: JSON.stringify({ matchId, adminToken }),
       },
     );
@@ -859,8 +876,10 @@ export function MatchCard({
     const adminToken = getAdminTokenOrToast();
     if (!adminToken) return false;
     const { projectId } = await import('/utils/supabase/info');
+    const headers = await getEdgeHeaders();
     const res = await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/strategy/correctScore/cashout`, {
       method: 'POST',
+      headers,
       body: JSON.stringify({ matchId, adminToken }),
     });
     const raw = await res.text().catch(() => '');
@@ -873,8 +892,10 @@ export function MatchCard({
     const adminToken = getAdminTokenOrToast();
     if (!adminToken) return false;
     const { projectId } = await import('/utils/supabase/info');
+    const headers = await getEdgeHeaders();
     const res = await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/strategy/correctScore/cancelOpenOrders`, {
       method: 'POST',
+      headers,
       body: JSON.stringify({ matchId, adminToken }),
     });
     const raw = await res.text().catch(() => '');
@@ -888,8 +909,10 @@ export function MatchCard({
     setIsRemovingBetfair(true);
     try {
       const { projectId } = await import('/utils/supabase/info');
+      const headers = await getEdgeHeaders();
       const res = await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/queue/remove`, {
         method: 'POST',
+        headers,
         body: JSON.stringify({ matchId }),
       });
       const raw = await res.text().catch(() => '');
@@ -1064,8 +1087,10 @@ export function MatchCard({
     if (target?.closest('button')) return;
     if (!isFinished && (derivedStatus === 'scheduled' || isLive)) {
       setFormError('');
-      setHomeHomeRows(null);
-      setAwayAwayRows(null);
+      setHomeFormFilter('home');
+      setAwayFormFilter('away');
+      setHomeAllRows(null);
+      setAwayAllRows(null);
       setMatchOuContext(null);
       setFormOpen(true);
       return;
@@ -1076,14 +1101,14 @@ export function MatchCard({
 
   useEffect(() => {
     if (!formOpen) return;
-    if (homeHomeRows !== null && awayAwayRows !== null) return;
+    if (homeAllRows !== null && awayAllRows !== null) return;
 
     const cfg = loadApiConfig();
     const apiFootballKey = String(cfg?.apiFootballKey ?? '').trim();
     if (!apiFootballKey) {
       setFormError('Configure a API-Football em Configurações para ver o histórico.');
-      setHomeHomeRows([]);
-      setAwayAwayRows([]);
+      setHomeAllRows([]);
+      setAwayAllRows([]);
       return;
     }
 
@@ -1110,8 +1135,8 @@ export function MatchCard({
 
         if (!Number.isFinite(homeTeamId) || !Number.isFinite(awayTeamId)) {
           setFormError(`Não foi possível identificar os times na API-Football (${match.homeTeam} vs ${match.awayTeam}).`);
-          setHomeHomeRows([]);
-          setAwayAwayRows([]);
+          setHomeAllRows([]);
+          setAwayAllRows([]);
           return;
         }
 
@@ -1139,6 +1164,19 @@ export function MatchCard({
           tableSize: standingsRows.length > 0 ? standingsRows.length : null,
         });
 
+        const leagueIdForMatch = Number(fixtureForContext?.league?.id);
+        const seasonForMatch = Number(fixtureForContext?.league?.season);
+        const filterToMatchLeague = (items: ApiFootballMatch[]) => {
+          let out = Array.isArray(items) ? items : [];
+          if (Number.isFinite(leagueIdForMatch) && leagueIdForMatch > 0) {
+            out = out.filter((m) => Number((m as any)?.league?.id) === leagueIdForMatch);
+          }
+          if (Number.isFinite(seasonForMatch) && seasonForMatch > 0) {
+            out = out.filter((m) => Number((m as any)?.league?.season) === seasonForMatch);
+          }
+          return out;
+        };
+
         const loadTeam = async (teamId: number) => {
           const cacheKey = `api-football:team:last60:${teamId}`;
           const now = Date.now();
@@ -1151,26 +1189,24 @@ export function MatchCard({
 
         const [homeTeamFixtures, awayTeamFixtures] = await Promise.all([loadTeam(homeTeamId), loadTeam(awayTeamId)]);
 
-        const homeRows = homeTeamFixtures
+        const homeRowsAll = filterToMatchLeague(homeTeamFixtures)
           .map((m) => toFormRow(m, homeTeamId))
           .filter((v): v is FormMatchRow => Boolean(v))
-          .filter((r) => r.isTeamHome)
           .sort((a, b) => new Date(b.utcDate).getTime() - new Date(a.utcDate).getTime())
-          .slice(0, 10);
+          .slice(0, 30);
 
-        const awayRows = awayTeamFixtures
+        const awayRowsAll = filterToMatchLeague(awayTeamFixtures)
           .map((m) => toFormRow(m, awayTeamId))
           .filter((v): v is FormMatchRow => Boolean(v))
-          .filter((r) => !r.isTeamHome)
           .sort((a, b) => new Date(b.utcDate).getTime() - new Date(a.utcDate).getTime())
-          .slice(0, 10);
+          .slice(0, 30);
 
-        setHomeHomeRows(homeRows);
-        setAwayAwayRows(awayRows);
+        setHomeAllRows(homeRowsAll);
+        setAwayAllRows(awayRowsAll);
       } catch (e) {
         setFormError(e instanceof Error ? e.message : 'Erro ao carregar histórico');
-        setHomeHomeRows([]);
-        setAwayAwayRows([]);
+        setHomeAllRows([]);
+        setAwayAllRows([]);
         setMatchOuContext(null);
       } finally {
         setIsLoadingForm(false);
@@ -1179,30 +1215,36 @@ export function MatchCard({
     void run();
   }, [
     apiSource,
-    awayAwayRows,
+    awayAllRows,
     footballMatch,
     formOpen,
-    homeHomeRows,
+    homeAllRows,
     isLive,
     derivedStatus,
   ]);
 
   const ouPanel = useMemo(() => {
-    if (!homeHomeRows || !awayAwayRows) return null;
+    if (!homeAllRows || !awayAllRows) return null;
     const line = 2.5;
-    const ouHome = calcOu(homeHomeRows, line);
-    const ouAway = calcOu(awayAwayRows, line);
-    const combined = [...homeHomeRows, ...awayAwayRows];
+    const pickRows = (rows: FormMatchRow[], filter: 'all' | 'home' | 'away') => {
+      const out = filter === 'all' ? rows : filter === 'home' ? rows.filter((r) => r.isTeamHome) : rows.filter((r) => !r.isTeamHome);
+      return out.slice(0, 10);
+    };
+    const homeRows = pickRows(homeAllRows, homeFormFilter);
+    const awayRows = pickRows(awayAllRows, awayFormFilter);
+    const ouHome = calcOu(homeRows, line);
+    const ouAway = calcOu(awayRows, line);
+    const combined = [...homeRows, ...awayRows];
     const ouAll = calcOu(combined, line);
 
-    const avgTotalHome = avg(homeHomeRows.map((r) => r.totalGoals));
-    const avgTotalAway = avg(awayAwayRows.map((r) => r.totalGoals));
+    const avgTotalHome = avg(homeRows.map((r) => r.totalGoals));
+    const avgTotalAway = avg(awayRows.map((r) => r.totalGoals));
     const avgTotalAll = avg(combined.map((r) => r.totalGoals));
 
-    const homeFor = avg(homeHomeRows.map((r) => r.homeGoals));
-    const homeAgainst = avg(homeHomeRows.map((r) => r.awayGoals));
-    const awayFor = avg(awayAwayRows.map((r) => r.awayGoals));
-    const awayAgainst = avg(awayAwayRows.map((r) => r.homeGoals));
+    const homeFor = avg(homeRows.map((r) => r.homeGoals));
+    const homeAgainst = avg(homeRows.map((r) => r.awayGoals));
+    const awayFor = avg(awayRows.map((r) => r.awayGoals));
+    const awayAgainst = avg(awayRows.map((r) => r.homeGoals));
 
     const round = matchOuContext?.round ?? null;
     const leagueType = matchOuContext?.leagueType ?? null;
@@ -1337,7 +1379,7 @@ export function MatchCard({
       agents,
       consensus,
     };
-  }, [awayAwayRows, homeHomeRows, matchOuContext, match.awayTeam, match.homeTeam]);
+  }, [awayAllRows, awayFormFilter, homeAllRows, homeFormFilter, matchOuContext, match.awayTeam, match.homeTeam]);
 
   return (
     <>
@@ -1880,11 +1922,11 @@ export function MatchCard({
       </Dialog>
 
       <Dialog open={formOpen} onOpenChange={setFormOpen}>
-        <DialogContent className="sm:max-w-6xl">
+        <DialogContent className="sm:max-w-6xl h-[82vh] overflow-hidden flex flex-col">
         <DialogHeader>
           <DialogTitle>Panorama rápido (últimos jogos)</DialogTitle>
           <DialogDescription>
-            Últimos 10 jogos do mandante em casa e do visitante fora, com % de Over/Under 2.5 gols.
+            Últimos jogos por time (Casa/Fora/Todos) dentro do mesmo campeonato, e um panorama de probabilidades.
           </DialogDescription>
         </DialogHeader>
 
@@ -1894,8 +1936,8 @@ export function MatchCard({
           </Card>
         ) : null}
 
-        <div className="grid gap-4 md:grid-cols-3">
-          <Card className="p-4">
+        <div className="grid gap-4 md:grid-cols-3 flex-1 min-h-0">
+          <Card className="p-4 flex flex-col min-h-0">
             <div className="flex items-center justify-between gap-3">
               <div className="flex items-center gap-2 min-w-0">
                 <TeamLogo teamName={match.homeTeam} logoUrl={homeCrest} size="sm" showName={false} />
@@ -1904,10 +1946,33 @@ export function MatchCard({
               <Badge variant="outline">Casa</Badge>
             </div>
 
-            {homeHomeRows ? (
+            <div className="mt-3 flex items-center gap-1">
+              {(['home', 'away', 'all'] as const).map((k) => (
+                <button
+                  key={k}
+                  type="button"
+                  className={`px-2 py-1 rounded-md text-[11px] font-semibold border ${
+                    homeFormFilter === k
+                      ? 'bg-gray-900 text-white border-gray-900'
+                      : 'bg-white text-gray-700 border-gray-200 hover:bg-gray-50'
+                  }`}
+                  onClick={() => setHomeFormFilter(k)}
+                >
+                  {k === 'home' ? 'Casa' : k === 'away' ? 'Fora' : 'Todos'}
+                </button>
+              ))}
+            </div>
+
+            {homeAllRows ? (
               <>
                 {(() => {
-                  const ou = calcOu(homeHomeRows, 2.5);
+                  const rows =
+                    homeFormFilter === 'all'
+                      ? homeAllRows.slice(0, 10)
+                      : homeFormFilter === 'home'
+                        ? homeAllRows.filter((r) => r.isTeamHome).slice(0, 10)
+                        : homeAllRows.filter((r) => !r.isTeamHome).slice(0, 10);
+                  const ou = calcOu(rows, 2.5);
                   return (
                     <div className="mt-3 space-y-2">
                       <div className="grid grid-cols-[88px_64px_1fr_28px] items-center gap-2 text-sm">
@@ -1930,14 +1995,20 @@ export function MatchCard({
                   );
                 })()}
 
-                <ScrollArea className="mt-4 h-72 border border-gray-200 rounded-lg">
-                  {homeHomeRows.length === 0 ? (
+                <ScrollArea className="mt-4 flex-1 min-h-0 border border-gray-200 rounded-lg">
+                  {homeAllRows.length === 0 ? (
                     <div className="p-3 text-sm text-gray-600">Sem dados suficientes.</div>
                   ) : (
                     <div>
                       {(() => {
+                        const rows =
+                          homeFormFilter === 'all'
+                            ? homeAllRows.slice(0, 10)
+                            : homeFormFilter === 'home'
+                              ? homeAllRows.filter((r) => r.isTeamHome).slice(0, 10)
+                              : homeAllRows.filter((r) => !r.isTeamHome).slice(0, 10);
                         const map = new Map<string, FormMatchRow[]>();
-                        for (const r of homeHomeRows) {
+                        for (const r of rows) {
                           const k = formatMonthGroup(r.utcDate);
                           map.set(k, [...(map.get(k) ?? []), r]);
                         }
@@ -1999,7 +2070,7 @@ export function MatchCard({
             )}
           </Card>
 
-          <Card className="p-4">
+          <Card className="p-4 flex flex-col min-h-0">
             <div className="flex items-center justify-between gap-3">
               <div className="font-semibold text-gray-900">Panorama do jogo</div>
               {ouPanel ? (
@@ -2016,6 +2087,28 @@ export function MatchCard({
                 <Badge variant="outline">—</Badge>
               )}
             </div>
+
+            {prediction ? (
+              <div className="mt-3">
+                <div className="text-xs text-gray-600">Possibilidades prováveis (IA)</div>
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  <Badge variant="secondary" className="text-[11px] tabular-nums">
+                    1X2: {prediction.winner.prediction === 'home' ? 'Casa' : prediction.winner.prediction === 'away' ? 'Fora' : 'Empate'}{' '}
+                    {Math.round(prediction.winner.confidence)}%
+                  </Badge>
+                  <Badge variant="secondary" className="text-[11px] tabular-nums">
+                    OU {Number(prediction.overUnder.line).toFixed(1)}: {prediction.overUnder.prediction === 'over' ? 'Over' : 'Under'}{' '}
+                    {Math.round(prediction.overUnder.confidence)}%
+                  </Badge>
+                  <Badge variant="secondary" className="text-[11px] tabular-nums">
+                    BTTS: {prediction.btts.prediction === 'yes' ? 'Sim' : 'Não'} {Math.round(prediction.btts.confidence)}%
+                  </Badge>
+                  <Badge variant="secondary" className="text-[11px] tabular-nums">
+                    Placar: {prediction.correctScore.score} {Math.round(prediction.correctScore.confidence)}%
+                  </Badge>
+                </div>
+              </div>
+            ) : null}
 
             {ouPanel ? (
               <div className="mt-3 space-y-3">
@@ -2098,7 +2191,7 @@ export function MatchCard({
             )}
           </Card>
 
-          <Card className="p-4">
+          <Card className="p-4 flex flex-col min-h-0">
             <div className="flex items-center justify-between gap-3">
               <div className="flex items-center gap-2 min-w-0">
                 <TeamLogo teamName={match.awayTeam} logoUrl={awayCrest} size="sm" showName={false} />
@@ -2107,10 +2200,33 @@ export function MatchCard({
               <Badge variant="outline">Fora</Badge>
             </div>
 
-            {awayAwayRows ? (
+            <div className="mt-3 flex items-center gap-1">
+              {(['home', 'away', 'all'] as const).map((k) => (
+                <button
+                  key={k}
+                  type="button"
+                  className={`px-2 py-1 rounded-md text-[11px] font-semibold border ${
+                    awayFormFilter === k
+                      ? 'bg-gray-900 text-white border-gray-900'
+                      : 'bg-white text-gray-700 border-gray-200 hover:bg-gray-50'
+                  }`}
+                  onClick={() => setAwayFormFilter(k)}
+                >
+                  {k === 'home' ? 'Casa' : k === 'away' ? 'Fora' : 'Todos'}
+                </button>
+              ))}
+            </div>
+
+            {awayAllRows ? (
               <>
                 {(() => {
-                  const ou = calcOu(awayAwayRows, 2.5);
+                  const rows =
+                    awayFormFilter === 'all'
+                      ? awayAllRows.slice(0, 10)
+                      : awayFormFilter === 'home'
+                        ? awayAllRows.filter((r) => r.isTeamHome).slice(0, 10)
+                        : awayAllRows.filter((r) => !r.isTeamHome).slice(0, 10);
+                  const ou = calcOu(rows, 2.5);
                   return (
                     <div className="mt-3 space-y-2">
                       <div className="grid grid-cols-[88px_64px_1fr_28px] items-center gap-2 text-sm">
@@ -2133,14 +2249,20 @@ export function MatchCard({
                   );
                 })()}
 
-                <ScrollArea className="mt-4 h-72 border border-gray-200 rounded-lg">
-                  {awayAwayRows.length === 0 ? (
+                <ScrollArea className="mt-4 flex-1 min-h-0 border border-gray-200 rounded-lg">
+                  {awayAllRows.length === 0 ? (
                     <div className="p-3 text-sm text-gray-600">Sem dados suficientes.</div>
                   ) : (
                     <div>
                       {(() => {
+                        const rows =
+                          awayFormFilter === 'all'
+                            ? awayAllRows.slice(0, 10)
+                            : awayFormFilter === 'home'
+                              ? awayAllRows.filter((r) => r.isTeamHome).slice(0, 10)
+                              : awayAllRows.filter((r) => !r.isTeamHome).slice(0, 10);
                         const map = new Map<string, FormMatchRow[]>();
-                        for (const r of awayAwayRows) {
+                        for (const r of rows) {
                           const k = formatMonthGroup(r.utcDate);
                           map.set(k, [...(map.get(k) ?? []), r]);
                         }

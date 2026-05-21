@@ -114,13 +114,129 @@ const cleanupStorageForConfigSave = () => {
 export function saveApiConfig(config: ApiConfig): void {
   try {
     localStorage.setItem('apiConfig', JSON.stringify(config));
+    localStorage.setItem('apiConfig_savedAt_v1', new Date().toISOString());
   } catch (e) {
     if (!isQuotaExceeded(e)) throw e;
     cleanupStorageForConfigSave();
     localStorage.setItem('apiConfig', JSON.stringify(config));
+    try {
+      localStorage.setItem('apiConfig_savedAt_v1', new Date().toISOString());
+    } catch {}
   }
   if (typeof window !== 'undefined') {
     window.dispatchEvent(new Event('apiConfigChanged'));
+  }
+
+  try {
+    void saveApiConfigToServer(config);
+  } catch {}
+}
+
+const getEdgeHeaders = async () => {
+  const { publicAnonKey } = await import('/utils/supabase/info');
+  return {
+    'Content-Type': 'application/json',
+    apikey: publicAnonKey,
+    Authorization: `Bearer ${publicAnonKey}`,
+  };
+};
+
+export async function saveApiConfigToServer(config: ApiConfig): Promise<boolean> {
+  try {
+    const { projectId } = await import('/utils/supabase/info');
+    const headers = await getEdgeHeaders();
+    const savedAt = (() => {
+      try {
+        return localStorage.getItem('apiConfig_savedAt_v1') || new Date().toISOString();
+      } catch {
+        return new Date().toISOString();
+      }
+    })();
+    const res = await fetch(`https://${projectId}.supabase.co/functions/v1/cache-server-1119702f/app/config/set`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ payload: { ...config, savedAt } }),
+    });
+    const raw = await res.text().catch(() => '');
+    const data = raw ? JSON.parse(raw) : null;
+    return Boolean(res.ok && data?.ok);
+  } catch {
+    return false;
+  }
+}
+
+export async function hydrateApiConfigFromServer(): Promise<ApiConfig | null> {
+  try {
+    const { projectId } = await import('/utils/supabase/info');
+    const headers = await getEdgeHeaders();
+    const res = await fetch(`https://${projectId}.supabase.co/functions/v1/cache-server-1119702f/app/config/get`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({}),
+    });
+    const raw = await res.text().catch(() => '');
+    const data = raw ? JSON.parse(raw) : null;
+    if (!res.ok || !data?.ok) return null;
+    const value = data?.value ?? null;
+    if (!value || typeof value !== 'object') return null;
+
+    const candidate = value as any;
+    if (typeof candidate.apiFootballKey !== 'string') return null;
+    if (typeof candidate.kaggleUsername !== 'string') return null;
+    if (typeof candidate.kaggleApiKey !== 'string') return null;
+
+    const next: ApiConfig = {
+      apiFootballKey: String(candidate.apiFootballKey ?? ''),
+      kaggleUsername: String(candidate.kaggleUsername ?? ''),
+      kaggleApiKey: String(candidate.kaggleApiKey ?? ''),
+      agentTrainingEnabled: Boolean(candidate.agentTrainingEnabled ?? false),
+      apiFootballDisabledLeagueIds: Array.isArray(candidate.apiFootballDisabledLeagueIds)
+        ? candidate.apiFootballDisabledLeagueIds.map(Number).filter(Number.isFinite)
+        : [],
+      llmEnabled: candidate.llmEnabled ?? undefined,
+      llmProvider: candidate.llmProvider ?? undefined,
+      deepseekApiKey: candidate.deepseekApiKey ?? undefined,
+      deepseekModel: candidate.deepseekModel ?? undefined,
+      openaiApiKey: candidate.openaiApiKey ?? undefined,
+      openaiModel: candidate.openaiModel ?? undefined,
+      anthropicApiKey: candidate.anthropicApiKey ?? undefined,
+      anthropicModel: candidate.anthropicModel ?? undefined,
+      googleApiKey: candidate.googleApiKey ?? undefined,
+      googleModel: candidate.googleModel ?? undefined,
+      automationAdminToken: candidate.automationAdminToken ?? undefined,
+      betfairBankroll: typeof candidate.betfairBankroll === 'number' ? candidate.betfairBankroll : undefined,
+      betfairMarketPercents: candidate.betfairMarketPercents ?? undefined,
+      betfairRobotLimits: candidate.betfairRobotLimits ?? undefined,
+    };
+
+    const local = loadApiConfig();
+    const localSavedAt = (() => {
+      try {
+        return String(localStorage.getItem('apiConfig_savedAt_v1') ?? '').trim();
+      } catch {
+        return '';
+      }
+    })();
+    const serverSavedAt = String((candidate as any)?.savedAt ?? '').trim();
+    const localMs = localSavedAt ? new Date(localSavedAt).getTime() : NaN;
+    const serverMs = serverSavedAt ? new Date(serverSavedAt).getTime() : NaN;
+
+    const shouldReplace =
+      !local ||
+      !localSavedAt ||
+      (Number.isFinite(serverMs) && (!Number.isFinite(localMs) || serverMs > localMs));
+
+    if (shouldReplace) {
+      saveApiConfig(next);
+      try {
+        if (serverSavedAt) localStorage.setItem('apiConfig_savedAt_v1', serverSavedAt);
+      } catch {}
+      return next;
+    }
+
+    return null;
+  } catch {
+    return null;
   }
 }
 

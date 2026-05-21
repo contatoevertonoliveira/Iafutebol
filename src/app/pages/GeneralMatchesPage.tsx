@@ -431,8 +431,10 @@ export default function GeneralMatchesPage() {
   const loadAutomationQueueIds = async () => {
     try {
       const { projectId } = await import('/utils/supabase/info');
+      const headers = await getEdgeHeaders();
       const res = await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/queue/list`, {
         method: 'POST',
+        headers,
         body: '{}',
       });
       const raw = await res.text().catch(() => '');
@@ -461,14 +463,25 @@ export default function GeneralMatchesPage() {
     return adminToken;
   };
 
+  const getEdgeHeaders = async () => {
+    const { publicAnonKey } = await import('/utils/supabase/info');
+    return {
+      'Content-Type': 'application/json',
+      apikey: publicAnonKey,
+      Authorization: `Bearer ${publicAnonKey}`,
+    } as const;
+  };
+
   const fetchOrdersSummary = async (matchId: string) => {
     const adminToken = getAdminTokenOrToast();
     if (!adminToken) return null;
     const { projectId } = await import('/utils/supabase/info');
+    const headers = await getEdgeHeaders();
     const res = await fetch(
       `https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/strategy/correctScore/openOrdersSummary`,
       {
         method: 'POST',
+        headers,
         body: JSON.stringify({ matchId, adminToken }),
       },
     );
@@ -486,8 +499,10 @@ export default function GeneralMatchesPage() {
     const adminToken = getAdminTokenOrToast();
     if (!adminToken) return false;
     const { projectId } = await import('/utils/supabase/info');
+    const headers = await getEdgeHeaders();
     const res = await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/strategy/correctScore/cancelOpenOrders`, {
       method: 'POST',
+      headers,
       body: JSON.stringify({ matchId, adminToken }),
     });
     const raw = await res.text().catch(() => '');
@@ -500,8 +515,10 @@ export default function GeneralMatchesPage() {
     const adminToken = getAdminTokenOrToast();
     if (!adminToken) return false;
     const { projectId } = await import('/utils/supabase/info');
+    const headers = await getEdgeHeaders();
     const res = await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/strategy/correctScore/cashout`, {
       method: 'POST',
+      headers,
       body: JSON.stringify({ matchId, adminToken }),
     });
     const raw = await res.text().catch(() => '');
@@ -523,8 +540,10 @@ export default function GeneralMatchesPage() {
   const removeFromAutomation = async (matchId: string) => {
     try {
       const { projectId } = await import('/utils/supabase/info');
+      const headers = await getEdgeHeaders();
       const res = await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/queue/remove`, {
         method: 'POST',
+        headers,
         body: JSON.stringify({ matchId }),
       });
       const raw = await res.text().catch(() => '');
@@ -575,8 +594,10 @@ export default function GeneralMatchesPage() {
 
     try {
       const { projectId } = await import('/utils/supabase/info');
+      const headers = await getEdgeHeaders();
       const res = await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/queue/add`, {
         method: 'POST',
+        headers,
         body: JSON.stringify({
           matchId: fixtureId,
           source: 'api-football',
@@ -667,7 +688,7 @@ export default function GeneralMatchesPage() {
             apikey: publicAnonKey,
             Authorization: `Bearer ${publicAnonKey}`,
           },
-          body: JSON.stringify({ dateFrom: date, dateTo: date, maxResults: 400 }),
+          body: JSON.stringify({ dateFrom: date, dateTo: date, maxResults: 150 }),
         });
         const raw = await res.text().catch(() => '');
         const data = raw ? JSON.parse(raw) : null;

@@ -71,6 +71,14 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
   const [leaguesProgress, setLeaguesProgress] = useState<{ page: number; total: number; count: number } | null>(null);
 
   const googleModelPresets = ['gemma-4-26b-a4b-it', 'gemma-4-31b-it'] as const;
+  const getEdgeHeaders = async () => {
+    const { publicAnonKey } = await import('/utils/supabase/info');
+    return {
+      'Content-Type': 'application/json',
+      apikey: publicAnonKey,
+      Authorization: `Bearer ${publicAnonKey}`,
+    } as const;
+  };
   const validateGoogleGeminiKey = async () => {
     if (isValidatingGoogleKey) return;
     const apiKey = String(config.googleApiKey ?? '').trim();
@@ -82,8 +90,10 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
     setIsValidatingGoogleKey(true);
     try {
       const { projectId } = await import('/utils/supabase/info');
+      const headers = await getEdgeHeaders();
       const res = await fetch(`https://${projectId}.supabase.co/functions/v1/validate-server-1119702f/validate-api/google-gemini`, {
         method: 'POST',
+        headers,
         body: JSON.stringify({ apiKey, model }),
       });
 
@@ -114,8 +124,10 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
     setBetfairTest({ status: 'testing', message: 'Testando…', tokenPreview: null, fetchedAt: null, eventTypesCount: null });
     try {
       const { projectId } = await import('/utils/supabase/info');
+      const headers = await getEdgeHeaders();
       const sessionRes = await fetch(`https://${projectId}.supabase.co/functions/v1/betfair-core-server-1119702f/betfair/session`, {
         method: 'POST',
+        headers,
         body: '{}',
       });
 
@@ -133,6 +145,7 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
 
       const rpcRes = await fetch(`https://${projectId}.supabase.co/functions/v1/betfair-core-server-1119702f/betfair/rpc`, {
         method: 'POST',
+        headers,
         body: JSON.stringify({
           method: 'SportsAPING/v1.0/listEventTypes',
           params: { filter: {} },
@@ -189,8 +202,10 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
     setBetfairFunds((prev) => ({ ...prev, status: 'loading', message: 'Buscando…' }));
     try {
       const { projectId } = await import('/utils/supabase/info');
+      const headers = await getEdgeHeaders();
       const res = await fetch(`https://${projectId}.supabase.co/functions/v1/betfair-core-server-1119702f/automation/betfair/account/funds`, {
         method: 'POST',
+        headers,
         body: JSON.stringify({ adminToken }),
       });
       const raw = await res.text().catch(() => '');
@@ -238,6 +253,7 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
     setIsTestingLlm(true);
     try {
       const { projectId } = await import('/utils/supabase/info');
+      const headers = await getEdgeHeaders();
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
       const body = {
         systemInstruction: {
@@ -269,6 +285,7 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
 
       const res = await fetch(`https://${projectId}.supabase.co/functions/v1/ai-proxy-server-1119702f/proxy/google`, {
         method: 'POST',
+        headers,
         body: JSON.stringify({ url, apiKey, body }),
       });
 
@@ -386,10 +403,12 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
   const readLeaguesCacheFromSupabase = async (country?: string) => {
     try {
       const { projectId } = await import('/utils/supabase/info');
+      const headers = await getEdgeHeaders();
       const res = await fetch(
         `https://${projectId}.supabase.co/functions/v1/cache-server-1119702f/cache/api-football/leagues/get`,
         {
           method: 'POST',
+          headers,
           body: JSON.stringify({ country: country ?? null }),
         },
       );
@@ -408,10 +427,12 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
   const writeLeaguesCacheToSupabase = async (payload: { country?: string; fetchedAt: string; items: ApiFootballLeague[] }) => {
     try {
       const { projectId } = await import('/utils/supabase/info');
+      const headers = await getEdgeHeaders();
       await fetch(
         `https://${projectId}.supabase.co/functions/v1/cache-server-1119702f/cache/api-football/leagues/set`,
         {
           method: 'POST',
+          headers,
           body: JSON.stringify({
             country: payload.country ?? null,
             payload: { fetchedAt: payload.fetchedAt, items: payload.items },

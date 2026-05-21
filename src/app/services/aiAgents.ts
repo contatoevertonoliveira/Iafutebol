@@ -396,7 +396,12 @@ const isRetryableUpsertStatus = (status: number) => status === 429 || (status >=
 const upsertTrainingSamplesToServerOnce = async (
   items: TrainingSample[],
 ): Promise<{ added: number; upserted: number }> => {
-  const { baseUrl } = await getSupabaseEdgeAuth();
+  const { baseUrl, anonKey } = await getSupabaseEdgeAuth();
+  const headers = {
+    'Content-Type': 'application/json',
+    apikey: anonKey,
+    Authorization: `Bearer ${anonKey}`,
+  };
 
   const maxRetries = 6;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -404,6 +409,7 @@ const upsertTrainingSamplesToServerOnce = async (
     try {
       res = await fetch(`${baseUrl}/functions/v1/training-server-1119702f/training/samples/upsert`, {
         method: 'POST',
+        headers,
         body: JSON.stringify({ items }),
       });
     } catch (e) {
@@ -470,11 +476,17 @@ export async function upsertTrainingSamplesToServer(
 
 export async function getTrainingSamplesCountFromServer(): Promise<number | null> {
   try {
-    const { baseUrl } = await getSupabaseEdgeAuth();
+    const { baseUrl, anonKey } = await getSupabaseEdgeAuth();
+    const headers = {
+      'Content-Type': 'application/json',
+      apikey: anonKey,
+      Authorization: `Bearer ${anonKey}`,
+    };
     const res = await fetch(
       `${baseUrl}/functions/v1/training-server-1119702f/training/samples/count`,
       {
         method: 'POST',
+        headers,
         body: JSON.stringify({}),
       },
     );
@@ -492,7 +504,12 @@ export async function listTrainingSamplesFromServer(opts?: {
   maxRows?: number;
 }): Promise<TrainingSample[]> {
   const maxRows = Math.max(1, Math.floor(opts?.maxRows ?? 50000));
-  const { baseUrl } = await getSupabaseEdgeAuth();
+  const { baseUrl, anonKey } = await getSupabaseEdgeAuth();
+  const headers = {
+    'Content-Type': 'application/json',
+    apikey: anonKey,
+    Authorization: `Bearer ${anonKey}`,
+  };
 
   const out: TrainingSample[] = [];
   let offset = 0;
@@ -502,6 +519,7 @@ export async function listTrainingSamplesFromServer(opts?: {
       `${baseUrl}/functions/v1/training-server-1119702f/training/samples/list`,
       {
         method: 'POST',
+        headers,
         body: JSON.stringify({ offset, limit }),
       },
     );
@@ -871,11 +889,17 @@ export async function trainMetaModelFromLocalSamples(opts?: {
 
 export async function hydrateMetaModelFromServer(): Promise<boolean> {
   try {
-    const { baseUrl } = await getSupabaseEdgeAuth();
+    const { baseUrl, anonKey } = await getSupabaseEdgeAuth();
+    const headers = {
+      'Content-Type': 'application/json',
+      apikey: anonKey,
+      Authorization: `Bearer ${anonKey}`,
+    };
     const res = await fetch(
       `${baseUrl}/functions/v1/training-server-1119702f/training/meta/get`,
       {
         method: 'POST',
+        headers,
         body: JSON.stringify({}),
       },
     );
@@ -897,11 +921,17 @@ export async function pushLocalMetaModelToServer(): Promise<boolean> {
     const model = JSON.parse(raw) as any;
     if (!model || model.version !== 1) return false;
 
-    const { baseUrl } = await getSupabaseEdgeAuth();
+    const { baseUrl, anonKey } = await getSupabaseEdgeAuth();
+    const headers = {
+      'Content-Type': 'application/json',
+      apikey: anonKey,
+      Authorization: `Bearer ${anonKey}`,
+    };
     const res = await fetch(
       `${baseUrl}/functions/v1/training-server-1119702f/training/meta/set`,
       {
         method: 'POST',
+        headers,
         body: JSON.stringify({ model }),
       },
     );
