@@ -2099,7 +2099,7 @@ export class AgentEnsemble {
           overUnder: { prediction: ouPrediction, line: 2.5, confidence: ouConfidence },
           btts: { prediction: bttsPrediction, confidence: bttsConfidence },
           correctScore: predictions[bestCorrectScoreIndex]?.correctScore ?? predictions[0].correctScore,
-          asianHandicap: predictions[bestCorrectScoreIndex]?.asianHandicap ?? predictions[0].asianHandicap,
+          asianHandicap: this.getConsensusAsianHandicap(predictions, totalAccuracyLite),
           firstHalf: this.getConsensusHalf(predictions, 'first', totalAccuracyLite),
           secondHalf: this.getConsensusHalf(predictions, 'second', totalAccuracyLite),
           reasoning: `Meta-modelo treinado com ${meta.sampleCount} jogos (stacking) + consenso entre ${predictions.length} agentes`,
@@ -2174,7 +2174,7 @@ export class AgentEnsemble {
       overUnder: this.getConsensusOverUnder(predictions, totalAccuracy),
       btts: this.getConsensusBTTS(predictions, totalAccuracy),
       correctScore: predictions[bestCorrectScoreIndex]?.correctScore ?? predictions[0].correctScore,
-      asianHandicap: predictions[bestCorrectScoreIndex]?.asianHandicap ?? predictions[0].asianHandicap,
+      asianHandicap: this.getConsensusAsianHandicap(predictions, totalAccuracy),
       firstHalf: this.getConsensusHalf(predictions, 'first', totalAccuracy),
       secondHalf: this.getConsensusHalf(predictions, 'second', totalAccuracy),
       reasoning: `Consenso de ${predictions.length} agentes especialistas com accuracy média de ${(totalAccuracy / predictions.length).toFixed(1)}%`,
@@ -2227,6 +2227,81 @@ export class AgentEnsemble {
       prediction: votes.yes > votes.no ? 'yes' as const : 'no' as const,
       confidence: Math.max(votes.yes, votes.no),
     };
+  }
+
+  private getConsensusAsianHandicap(predictions: AgentPrediction[], totalAccuracy: number) {
+    const roundToQuarter = (v: number) => Math.round(v * 4) / 4;
+    const clampNum = (v: number, min: number, max: number) => Math.max(min, Math.min(max, v));
+
+    const rows = predictions
+      .map((p) => {
+        const agent = this.agents.find((a) => a.profile.name === p.agentName);
+        const acc = typeof agent?.profile?.accuracy === 'number' && Number.isFinite(agent.profile.accuracy) ? agent.profile.accuracy : 0;
+
+        const team = p.asianHandicap?.team;
+        const lineRaw = Number(p.asianHandicap?.line);
+        const confRaw = Number(p.asianHandicap?.confidence);
+
+        const conf = Number.isFinite(confRaw) ? clampNum(confRaw, 0, 100) : 0;
+        const line = Number.isFinite(lineRaw) ? clampNum(roundToQuarter(lineRaw), -3, 3) : NaN;
+        if ((team !== 'home' && team !== 'away') || !Number.isFinite(line)) return null;
+
+        const homeLine = team === 'home' ? line : -line;
+        const weight = (acc > 0 ? acc : 0) * (conf > 0 ? conf / 100 : 0.55);
+        return { homeLine, team, conf, weight };
+      })
+      .filter((x): x is NonNullable<typeof x> => Boolean(x) && x.weight > 0.0001);
+
+    if (rows.length === 0) {
+      return predictions[0]?.asianHandicap ?? { team: 'home' as const, line: 0, confidence: 50 };
+    }
+
+    const totalW = rows.reduce((s, r) => s + r.weight, 0);
+    const sorted = [...rows].sort((a, b) => a.homeLine - b.homeLine);
+
+    let cum = 0;
+    let medianHomeLine = sorted[0].homeLine;
+    for (const r of sorted) {
+      cum += r.weight;
+      if (cum >= totalW / 2) {
+        medianHomeLine = r.homeLine;
+        break;
+      }
+    }
+    medianHomeLine = clampNum(roundToQuarter(medianHomeLine), -2.5, 2.5);
+
+    let voteHome = 0;
+    let voteAway = 0;
+    for (const r of rows) {
+      if (r.team === 'home') voteHome += r.weight * (r.conf > 0 ? r.conf : 50);
+      else voteAway += r.weight * (r.conf > 0 ? r.conf : 50);
+    }
+
+    let team: 'home' | 'away';
+    if (voteHome === voteAway) {
+      team = medianHomeLine < 0 ? 'home' : medianHomeLine > 0 ? 'away' : 'home';
+    } else {
+      team = voteHome > voteAway ? 'home' : 'away';
+    }
+
+    let line: number;
+    if (medianHomeLine < 0) line = medianHomeLine;
+    else if (medianHomeLine > 0) line = -medianHomeLine;
+    else line = 0;
+
+    const baseConf = rows.reduce((s, r) => s + r.conf * (r.weight / totalW), 0);
+    const avgAbsDev = rows.reduce((s, r) => s + Math.abs(r.homeLine - medianHomeLine) * (r.weight / totalW), 0);
+    const devQuarters = avgAbsDev * 4;
+    const disagreementPenalty = Math.min(18, devQuarters * 4);
+
+    const voteTotal = voteHome + voteAway;
+    const voteMax = Math.max(voteHome, voteAway);
+    const voteRatio = voteTotal > 0 ? voteMax / voteTotal : 0.5;
+    const tiePenalty = voteRatio < 0.58 ? 6 : voteRatio < 0.64 ? 3 : 0;
+
+    const confidence = clampNum(Math.round(baseConf - disagreementPenalty - tiePenalty), 45, 92);
+
+    return { team, line, confidence };
   }
 
   private getConsensusHalf(
