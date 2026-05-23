@@ -1470,6 +1470,8 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
                   const scalping = (raw as any)?.scalpingGoals && typeof (raw as any).scalpingGoals === 'object' ? (raw as any).scalpingGoals : {};
                   const ticks = (raw as any)?.scalpingTicks && typeof (raw as any).scalpingTicks === 'object' ? (raw as any).scalpingTicks : {};
                   const over = (raw as any)?.overGoalsLimit && typeof (raw as any).overGoalsLimit === 'object' ? (raw as any).overGoalsLimit : {};
+                  const asian = (raw as any)?.asianHandicap && typeof (raw as any).asianHandicap === 'object' ? (raw as any).asianHandicap : {};
+                  const correctScore = (raw as any)?.correctScore && typeof (raw as any).correctScore === 'object' ? (raw as any).correctScore : {};
                   const favoriteRescue =
                     (raw as any)?.favoriteRescue && typeof (raw as any).favoriteRescue === 'object' ? (raw as any).favoriteRescue : {};
 
@@ -1508,6 +1510,24 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
                     });
                   };
 
+                  const setAsian = (patch: any) => {
+                    setLimits({
+                      asianHandicap: {
+                        ...(((config.betfairRobotLimits as any)?.asianHandicap ?? {}) as any),
+                        ...(patch ?? {}),
+                      },
+                    });
+                  };
+
+                  const setCorrectScore = (patch: any) => {
+                    setLimits({
+                      correctScore: {
+                        ...(((config.betfairRobotLimits as any)?.correctScore ?? {}) as any),
+                        ...(patch ?? {}),
+                      },
+                    });
+                  };
+
                   const setFavoriteRescue = (patch: any) => {
                     setLimits({
                       favoriteRescue: {
@@ -1523,11 +1543,24 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
                   const sgSecondsToWaitMatch = Number(scalping?.secondsToWaitMatch);
                   const stTargetTicks = Number(ticks?.targetTicks);
                   const stEntryOffsetTicks = Number(ticks?.entryOffsetTicks);
+                  const stEntryMaxWaitSeconds = Number((ticks as any)?.entryMaxWaitSeconds);
                   const stMaxSpreadTicks = Number(ticks?.maxSpreadTicks);
                   const stMinSecondsBetweenCycles = Number(ticks?.minSecondsBetweenCycles);
                   const stStakePct = Number(ticks?.stakePct);
                   const stMaxCycles = Number(ticks?.maxCycles);
                   const stSecondsToWaitMatch = Number(ticks?.secondsToWaitMatch);
+                  const stInvertVolumePct = Number(ticks?.invertVolumePct);
+                  const stMomentOverThreshold = Number(ticks?.momentOverThreshold);
+                  const stMomentOverThresholdLate = Number(ticks?.momentOverThresholdLate);
+                  const stMomentOverThresholdOffDelta = Number(ticks?.momentOverThresholdOffDelta);
+                  const stMomentWindowMinSec = Number(ticks?.momentWindowMinSec);
+                  const stMomentWindowMaxSec = Number(ticks?.momentWindowMaxSec);
+                  const stMinMarketMatched = Number(ticks?.minMarketMatched);
+                  const stMinRunnerMatched = Number(ticks?.minRunnerMatched);
+                  const stAfterGoalWaitSeconds = Number(ticks?.afterGoalWaitSeconds);
+                  const stRecoveryEnabled = Boolean((ticks as any)?.recoveryEnabled ?? true);
+                  const stRecoveryIncreasePct = Number((ticks as any)?.recoveryIncreasePct);
+                  const stRecoveryMaxStakeAbs = Number((ticks as any)?.recoveryMaxStakeAbs);
                   const ogMinOdds = Number(over?.minOdds);
                   const ogMaxEntries = Number(over?.maxEntries);
                   const ogProfitPct = Number(over?.profitTargetPct);
@@ -1537,12 +1570,28 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
                   const ogStakePct = Number(over?.stakePct);
                   const ogEntryOffsetTicks = Number(over?.entryOffsetTicks);
                   const ogSecondsToWaitMatch = Number(over?.secondsToWaitMatch);
+                  const ahTargetTicks = Number(asian?.targetTicks);
+                  const ahMaxSpreadTicks = Number(asian?.maxSpreadTicks);
+                  const ahMinMarketMatched = Number(asian?.minMarketMatched);
+                  const ahMinRunnerMatched = Number(asian?.minRunnerMatched);
+                  const ahStakePct = Number(asian?.stakePct);
+                  const ahProfitPct = Number(asian?.profitTargetPct);
+                  const ahSecondsToWaitMatch = Number(asian?.secondsToWaitMatch);
+                  const ahMaxEntries = Number((asian as any)?.maxEntries);
+                  const ahEntryMaxWaitSeconds = Number((asian as any)?.entryMaxWaitSeconds);
+                  const ahEntryOffsetTicks = Number((asian as any)?.entryOffsetTicks);
+                  const csMaxSelections = Number(correctScore?.maxSelections);
+                  const csMinProfitPct = Number(correctScore?.minProfitPct);
+                  const csEntryScoresCsv = String(correctScore?.entryScoresCsv ?? '0-0,0-1,1-0,1-1');
+                  const csMinMarketMatched = Number((correctScore as any)?.minMarketMatched);
 
                   const frEnabled = Boolean(favoriteRescue?.enabled ?? true);
                   const frMinFavProb = Number(favoriteRescue?.minFavWinProb);
                   const frMinHomeWinRate = Number(favoriteRescue?.minHomeWinRate);
                   const frAwayOdds01 = Number(favoriteRescue?.awayOddsMinLosing01);
                   const frAwayOdds02 = Number(favoriteRescue?.awayOddsMinLosing02);
+                  const frAwayOddsMax01 = Number((favoriteRescue as any)?.awayOddsMaxLosing01);
+                  const frAwayOddsMax02 = Number((favoriteRescue as any)?.awayOddsMaxLosing02);
                   const frStakeMO = Number(favoriteRescue?.matchOddsLayStakeAbs);
                   const frStakeCS = Number(favoriteRescue?.correctScoreLayStakeAbs);
                   const frTakeMin = Number(favoriteRescue?.matchOddsTakeProfitMinPct);
@@ -1662,6 +1711,23 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
                           </div>
 
                           <div>
+                            <Label htmlFor="st_entryMaxWaitSeconds">Reofertar entrada (s)</Label>
+                            <Input
+                              id="st_entryMaxWaitSeconds"
+                              inputMode="numeric"
+                              placeholder="Ex: 10"
+                              value={Number.isFinite(stEntryMaxWaitSeconds) ? String(Math.max(2, Math.min(120, Math.floor(stEntryMaxWaitSeconds)))) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(2, Math.min(120, Math.floor(n))) : 15;
+                                setTicks({ entryMaxWaitSeconds: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
                             <Label htmlFor="st_maxSpreadTicks">Spread máx. (ticks)</Label>
                             <Input
                               id="st_maxSpreadTicks"
@@ -1740,6 +1806,450 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
                                 const n = Number(raw);
                                 const v = Number.isFinite(n) ? Math.max(1, Math.min(500, Math.floor(n))) : 50;
                                 setTicks({ maxCycles: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="st_invertVolumePct">Inversão volume (%)</Label>
+                            <Input
+                              id="st_invertVolumePct"
+                              inputMode="numeric"
+                              placeholder="Ex: 300"
+                              value={Number.isFinite(stInvertVolumePct) ? String(Math.max(50, Math.floor(stInvertVolumePct))) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(50, Math.min(1000, Math.floor(n))) : 300;
+                                setTicks({ invertVolumePct: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="st_momentOverThreshold">Threshold momento OVER</Label>
+                            <Input
+                              id="st_momentOverThreshold"
+                              inputMode="decimal"
+                              placeholder="Ex: 0.70"
+                              value={Number.isFinite(stMomentOverThreshold) ? String(Math.round(stMomentOverThreshold * 10000) / 10000) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(0.1, Math.min(2, n)) : 0.7;
+                                setTicks({ momentOverThreshold: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="st_momentOverThresholdLate">Threshold 75+ (late)</Label>
+                            <Input
+                              id="st_momentOverThresholdLate"
+                              inputMode="decimal"
+                              placeholder="Ex: 0.85"
+                              value={Number.isFinite(stMomentOverThresholdLate) ? String(Math.round(stMomentOverThresholdLate * 10000) / 10000) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(0.1, Math.min(2, n)) : 0.85;
+                                setTicks({ momentOverThresholdLate: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="st_momentOverThresholdOffDelta">Histerese (desliga alerta)</Label>
+                            <Input
+                              id="st_momentOverThresholdOffDelta"
+                              inputMode="decimal"
+                              placeholder="Ex: 0.15"
+                              value={Number.isFinite(stMomentOverThresholdOffDelta) ? String(Math.round(stMomentOverThresholdOffDelta * 10000) / 10000) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : 0.15;
+                                setTicks({ momentOverThresholdOffDelta: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="st_momentWindowMinSec">Janela min (s)</Label>
+                            <Input
+                              id="st_momentWindowMinSec"
+                              inputMode="numeric"
+                              placeholder="Ex: 8"
+                              value={Number.isFinite(stMomentWindowMinSec) ? String(Math.max(1, Math.floor(stMomentWindowMinSec))) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(1, Math.min(300, Math.floor(n))) : 8;
+                                setTicks({ momentWindowMinSec: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="st_momentWindowMaxSec">Janela máx (s)</Label>
+                            <Input
+                              id="st_momentWindowMaxSec"
+                              inputMode="numeric"
+                              placeholder="Ex: 180"
+                              value={Number.isFinite(stMomentWindowMaxSec) ? String(Math.max(2, Math.floor(stMomentWindowMaxSec))) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(2, Math.min(600, Math.floor(n))) : 180;
+                                setTicks({ momentWindowMaxSec: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="st_minMarketMatched">Min. volume mercado</Label>
+                            <Input
+                              id="st_minMarketMatched"
+                              inputMode="numeric"
+                              placeholder="Ex: 15000"
+                              value={Number.isFinite(stMinMarketMatched) ? String(Math.max(0, Math.floor(stMinMarketMatched))) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(0, Math.min(10_000_000, Math.floor(n))) : 15000;
+                                setTicks({ minMarketMatched: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="st_minRunnerMatched">Min. volume runner</Label>
+                            <Input
+                              id="st_minRunnerMatched"
+                              inputMode="numeric"
+                              placeholder="Ex: 2500"
+                              value={Number.isFinite(stMinRunnerMatched) ? String(Math.max(0, Math.floor(stMinRunnerMatched))) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(0, Math.min(5_000_000, Math.floor(n))) : 2500;
+                                setTicks({ minRunnerMatched: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="st_afterGoalWaitSeconds">Pós-gol: esperar (s)</Label>
+                            <Input
+                              id="st_afterGoalWaitSeconds"
+                              inputMode="numeric"
+                              placeholder="Ex: 30"
+                              value={Number.isFinite(stAfterGoalWaitSeconds) ? String(Math.max(0, Math.floor(stAfterGoalWaitSeconds))) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(0, Math.min(600, Math.floor(n))) : 30;
+                                setTicks({ afterGoalWaitSeconds: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div className="md:col-span-3">
+                            <div className="flex items-start justify-between gap-3">
+                              <div>
+                                <div className="text-xs text-gray-600">Recuperação de perdas</div>
+                                <div className="text-[11px] text-gray-500 mt-1">Se tomar gol em operação, fecha e aumenta a próxima stake.</div>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <div className="text-xs text-gray-600">Ativo</div>
+                                <Switch checked={stRecoveryEnabled} onCheckedChange={(checked) => setTicks({ recoveryEnabled: checked })} />
+                              </div>
+                            </div>
+                          </div>
+
+                          <div>
+                            <Label htmlFor="st_recoveryIncreasePct">Aumento (%)</Label>
+                            <Input
+                              id="st_recoveryIncreasePct"
+                              inputMode="decimal"
+                              placeholder="Ex: 25"
+                              value={Number.isFinite(stRecoveryIncreasePct) ? String(Math.round(stRecoveryIncreasePct * 10000) / 100) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(0, Math.min(200, n)) / 100 : 0.25;
+                                setTicks({ recoveryIncreasePct: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="st_recoveryMaxStakeAbs">Stake máx. (R$)</Label>
+                            <Input
+                              id="st_recoveryMaxStakeAbs"
+                              inputMode="decimal"
+                              placeholder="Ex: 100"
+                              value={Number.isFinite(stRecoveryMaxStakeAbs) ? String(Math.round(stRecoveryMaxStakeAbs * 100) / 100) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(2, Math.min(10000, n)) : 100;
+                                setTicks({ recoveryMaxStakeAbs: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="rounded-lg border border-gray-200 bg-white p-3">
+                        <div className="text-sm font-semibold text-gray-900">Handicap Asiático</div>
+                        <div className="text-xs text-gray-600 mt-1">Scalping por ticks no mercado Asian Handicap com saída automática (TP).</div>
+                        <div className="mt-3 grid md:grid-cols-3 gap-3">
+                          <div>
+                            <Label htmlFor="ah_profitTargetPct">Meta de lucro (%)</Label>
+                            <Input
+                              id="ah_profitTargetPct"
+                              inputMode="decimal"
+                              placeholder="Ex: 3"
+                              value={Number.isFinite(ahProfitPct) ? String(Math.round(ahProfitPct * 10000) / 100) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(0, Math.min(50, n)) / 100 : 0.03;
+                                setAsian({ profitTargetPct: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="ah_stakePct">Stake (% banca do mercado)</Label>
+                            <Input
+                              id="ah_stakePct"
+                              inputMode="decimal"
+                              placeholder="Ex: 1"
+                              value={Number.isFinite(ahStakePct) ? String(Math.round(ahStakePct * 10000) / 100) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(0, Math.min(100, n)) : 1;
+                                setAsian({ stakePct: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="ah_targetTicks">Alvo (ticks)</Label>
+                            <Input
+                              id="ah_targetTicks"
+                              inputMode="numeric"
+                              placeholder="Ex: 10"
+                              value={Number.isFinite(ahTargetTicks) ? String(Math.max(1, Math.min(50, Math.floor(ahTargetTicks)))) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(1, Math.min(50, Math.floor(n))) : 10;
+                                setAsian({ targetTicks: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="ah_entryMaxWaitSeconds">Reapregoar (s)</Label>
+                            <Input
+                              id="ah_entryMaxWaitSeconds"
+                              inputMode="numeric"
+                              placeholder="Ex: 15"
+                              value={Number.isFinite(ahEntryMaxWaitSeconds) ? String(Math.max(2, Math.min(120, Math.floor(ahEntryMaxWaitSeconds)))) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(2, Math.min(120, Math.floor(n))) : 15;
+                                setAsian({ entryMaxWaitSeconds: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="ah_entryOffsetTicks">Offset entrada (ticks)</Label>
+                            <Input
+                              id="ah_entryOffsetTicks"
+                              inputMode="numeric"
+                              placeholder="Ex: 0"
+                              value={Number.isFinite(ahEntryOffsetTicks) ? String(Math.max(0, Math.min(10, Math.floor(ahEntryOffsetTicks)))) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(0, Math.min(10, Math.floor(n))) : 0;
+                                setAsian({ entryOffsetTicks: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="ah_maxEntries">Máx. entradas</Label>
+                            <Input
+                              id="ah_maxEntries"
+                              inputMode="numeric"
+                              placeholder="Ex: 3"
+                              value={Number.isFinite(ahMaxEntries) ? String(Math.max(1, Math.min(20, Math.floor(ahMaxEntries)))) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(1, Math.min(20, Math.floor(n))) : 3;
+                                setAsian({ maxEntries: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="ah_maxSpreadTicks">Spread máx (ticks)</Label>
+                            <Input
+                              id="ah_maxSpreadTicks"
+                              inputMode="numeric"
+                              placeholder="Ex: 2"
+                              value={Number.isFinite(ahMaxSpreadTicks) ? String(Math.max(0, Math.min(10, Math.floor(ahMaxSpreadTicks)))) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(0, Math.min(10, Math.floor(n))) : 2;
+                                setAsian({ maxSpreadTicks: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="ah_minMarketMatched">Min. volume mercado</Label>
+                            <Input
+                              id="ah_minMarketMatched"
+                              inputMode="numeric"
+                              placeholder="Ex: 120000"
+                              value={Number.isFinite(ahMinMarketMatched) ? String(Math.max(0, Math.floor(ahMinMarketMatched))) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(0, Math.min(50_000_000, Math.floor(n))) : 120000;
+                                setAsian({ minMarketMatched: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="ah_minRunnerMatched">Min. volume runner</Label>
+                            <Input
+                              id="ah_minRunnerMatched"
+                              inputMode="numeric"
+                              placeholder="Ex: 20000"
+                              value={Number.isFinite(ahMinRunnerMatched) ? String(Math.max(0, Math.floor(ahMinRunnerMatched))) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(0, Math.min(50_000_000, Math.floor(n))) : 20000;
+                                setAsian({ minRunnerMatched: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="ah_secondsToWaitMatch">Esperar jogo (s)</Label>
+                            <Input
+                              id="ah_secondsToWaitMatch"
+                              inputMode="numeric"
+                              placeholder="Ex: 10"
+                              value={Number.isFinite(ahSecondsToWaitMatch) ? String(Math.max(0, Math.min(600, Math.floor(ahSecondsToWaitMatch)))) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(0, Math.min(600, Math.floor(n))) : 10;
+                                setAsian({ secondsToWaitMatch: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="rounded-lg border border-gray-200 bg-white p-3">
+                        <div className="text-sm font-semibold text-gray-900">Correct Score (Dutching)</div>
+                        <div className="text-xs text-gray-600 mt-1">Entra com dutching nos placares definidos e distribui a stake pela inversa das odds.</div>
+                        <div className="mt-3 grid md:grid-cols-3 gap-3">
+                          <div>
+                            <Label htmlFor="cs_minProfitPct">Lucro p/ hedge (% banca)</Label>
+                            <Input
+                              id="cs_minProfitPct"
+                              inputMode="decimal"
+                              placeholder="Ex: 3"
+                              value={Number.isFinite(csMinProfitPct) ? String(Math.round(csMinProfitPct * 10000) / 100) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(0, Math.min(50, n)) / 100 : 0.03;
+                                setCorrectScore({ minProfitPct: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+                          <div>
+                            <Label htmlFor="cs_minMarketMatched">Mín. correspondido (R$)</Label>
+                            <Input
+                              id="cs_minMarketMatched"
+                              inputMode="numeric"
+                              placeholder="Ex: 1000"
+                              value={Number.isFinite(csMinMarketMatched) ? String(Math.max(0, Math.floor(csMinMarketMatched))) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(0, Math.floor(n)) : 1000;
+                                setCorrectScore({ minMarketMatched: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+                          <div className="md:col-span-2">
+                            <Label htmlFor="cs_entryScoresCsv">Placares iniciais (CSV)</Label>
+                            <Input
+                              id="cs_entryScoresCsv"
+                              placeholder="Ex: 0-0,0-1,1-0,1-1"
+                              value={csEntryScoresCsv}
+                              onChange={(e) => {
+                                const v = String(e.target.value ?? '').trim();
+                                setCorrectScore({ entryScoresCsv: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+                          <div>
+                            <Label htmlFor="cs_maxSelections">Máx. seleções</Label>
+                            <Input
+                              id="cs_maxSelections"
+                              inputMode="numeric"
+                              placeholder="Ex: 4"
+                              value={Number.isFinite(csMaxSelections) ? String(Math.max(1, Math.min(20, Math.floor(csMaxSelections)))) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(1, Math.min(20, Math.floor(n))) : 4;
+                                setCorrectScore({ maxSelections: v });
                               }}
                               className="mt-2"
                             />
@@ -1825,6 +2335,40 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
                                 const n = Number(raw);
                                 const v = Number.isFinite(n) ? Math.max(1.01, Math.min(50, n)) : 1.3;
                                 setFavoriteRescue({ awayOddsMinLosing02: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="fr_awayOddsMax01">Odds visitante (0x1) máx.</Label>
+                            <Input
+                              id="fr_awayOddsMax01"
+                              inputMode="decimal"
+                              placeholder="Ex: 4.00"
+                              value={Number.isFinite(frAwayOddsMax01) ? String(Math.round(frAwayOddsMax01 * 100) / 100) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(1.01, Math.min(50, n)) : 4;
+                                setFavoriteRescue({ awayOddsMaxLosing01: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="fr_awayOddsMax02">Odds visitante (0x2) máx.</Label>
+                            <Input
+                              id="fr_awayOddsMax02"
+                              inputMode="decimal"
+                              placeholder="Ex: 3.00"
+                              value={Number.isFinite(frAwayOddsMax02) ? String(Math.round(frAwayOddsMax02 * 100) / 100) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(1.01, Math.min(50, n)) : 3;
+                                setFavoriteRescue({ awayOddsMaxLosing02: v });
                               }}
                               className="mt-2"
                             />

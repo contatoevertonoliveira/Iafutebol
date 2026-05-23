@@ -27,11 +27,24 @@ export interface ApiConfig {
     scalpingTicks?: {
       targetTicks?: number;
       entryOffsetTicks?: number;
+      entryMaxWaitSeconds?: number;
       maxSpreadTicks?: number;
       minSecondsBetweenCycles?: number;
       stakePct?: number;
       maxCycles?: number;
       secondsToWaitMatch?: number;
+      invertVolumePct?: number;
+      momentOverThreshold?: number;
+      momentOverThresholdLate?: number;
+      momentOverThresholdOffDelta?: number;
+      momentWindowMinSec?: number;
+      momentWindowMaxSec?: number;
+      minMarketMatched?: number;
+      minRunnerMatched?: number;
+      afterGoalWaitSeconds?: number;
+      recoveryEnabled?: boolean;
+      recoveryIncreasePct?: number;
+      recoveryMaxStakeAbs?: number;
     };
     overGoalsLimit?: {
       minOdds?: number;
@@ -52,10 +65,15 @@ export interface ApiConfig {
       stakePct?: number;
       profitTargetPct?: number;
       secondsToWaitMatch?: number;
+      maxEntries?: number;
+      entryMaxWaitSeconds?: number;
+      entryOffsetTicks?: number;
     };
     correctScore?: {
       minProfitPct?: number;
       maxSelections?: number;
+      entryScoresCsv?: string;
+      minMarketMatched?: number;
     };
     favoriteRescue?: {
       enabled?: boolean;
@@ -63,6 +81,8 @@ export interface ApiConfig {
       minHomeWinRate?: number;
       awayOddsMinLosing01?: number;
       awayOddsMinLosing02?: number;
+      awayOddsMaxLosing01?: number;
+      awayOddsMaxLosing02?: number;
       matchOddsLayStakeAbs?: number;
       correctScoreLayStakeAbs?: number;
       matchOddsTakeProfitMinPct?: number;
@@ -346,11 +366,21 @@ export function loadApiConfig(): ApiConfig | null {
         scalpingTicks: {
           targetTicks: 10,
           entryOffsetTicks: 2,
+          entryMaxWaitSeconds: 15,
           maxSpreadTicks: 2,
           minSecondsBetweenCycles: 8,
           stakePct: 1,
           maxCycles: 50,
           secondsToWaitMatch: 10,
+          invertVolumePct: 300,
+          momentOverThreshold: 0.7,
+          momentOverThresholdLate: 0.85,
+          momentOverThresholdOffDelta: 0.15,
+          momentWindowMinSec: 8,
+          momentWindowMaxSec: 180,
+          minMarketMatched: 15000,
+          minRunnerMatched: 2500,
+          afterGoalWaitSeconds: 30,
         },
         overGoalsLimit: {
           minOdds: 1.3,
@@ -371,10 +401,14 @@ export function loadApiConfig(): ApiConfig | null {
           stakePct: 1,
           profitTargetPct: 0.03,
           secondsToWaitMatch: 10,
+          maxEntries: 3,
+          entryMaxWaitSeconds: 15,
+          entryOffsetTicks: 0,
         },
         correctScore: {
           minProfitPct: 0.03,
           maxSelections: 6,
+          minMarketMatched: 1000,
         },
         favoriteRescue: {
           enabled: false,
@@ -382,6 +416,8 @@ export function loadApiConfig(): ApiConfig | null {
           minHomeWinRate: 0.8,
           awayOddsMinLosing01: 1.65,
           awayOddsMinLosing02: 1.3,
+          awayOddsMaxLosing01: 4,
+          awayOddsMaxLosing02: 3,
           matchOddsLayStakeAbs: 10,
           correctScoreLayStakeAbs: 2,
           matchOddsTakeProfitMinPct: 0.1,
@@ -456,11 +492,24 @@ export function loadApiConfig(): ApiConfig | null {
     scalpingTicks: {
       targetTicks: 10,
       entryOffsetTicks: 2,
+      entryMaxWaitSeconds: 15,
       maxSpreadTicks: 2,
       minSecondsBetweenCycles: 8,
       stakePct: 1,
       maxCycles: 50,
       secondsToWaitMatch: 10,
+      invertVolumePct: 300,
+      momentOverThreshold: 0.7,
+      momentOverThresholdLate: 0.85,
+      momentOverThresholdOffDelta: 0.15,
+      momentWindowMinSec: 8,
+      momentWindowMaxSec: 180,
+      minMarketMatched: 15000,
+      minRunnerMatched: 2500,
+      afterGoalWaitSeconds: 30,
+      recoveryEnabled: true,
+      recoveryIncreasePct: 0.25,
+      recoveryMaxStakeAbs: 100,
     },
     overGoalsLimit: {
       minOdds: 1.3,
@@ -481,14 +530,19 @@ export function loadApiConfig(): ApiConfig | null {
       stakePct: 1,
       profitTargetPct: 0.03,
       secondsToWaitMatch: 10,
+      maxEntries: 3,
+      entryMaxWaitSeconds: 15,
+      entryOffsetTicks: 0,
     },
-    correctScore: { minProfitPct: 0.03, maxSelections: 6 },
+    correctScore: { minProfitPct: 0.03, maxSelections: 6, entryScoresCsv: "0-0,0-1,1-0,1-1", minMarketMatched: 1000 },
     favoriteRescue: {
       enabled: false,
       minFavWinProb: 0.55,
       minHomeWinRate: 0.8,
       awayOddsMinLosing01: 1.65,
       awayOddsMinLosing02: 1.3,
+      awayOddsMaxLosing01: 4,
+      awayOddsMaxLosing02: 3,
       matchOddsLayStakeAbs: 10,
       correctScoreLayStakeAbs: 2,
       matchOddsTakeProfitMinPct: 0.1,

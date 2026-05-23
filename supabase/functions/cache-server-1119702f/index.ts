@@ -2,7 +2,7 @@ import * as kv from "../make-server-1119702f/kv_store.ts";
 
 const CORS_HEADERS: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization, apikey, x-automation-token",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, apikey, x-automation-token, x-client-info",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
   "Access-Control-Max-Age": "600",
 };
@@ -67,10 +67,13 @@ const validateSmallJsonPayload = (payload: any, maxBytes = 200_000) => {
 };
 
 Deno.serve(async (req) => {
-  const method = String(req.method ?? "").toUpperCase();
-  const isPreflight = method === "OPTIONS" || (req.headers.has("origin") && req.headers.has("access-control-request-method"));
-  if (isPreflight) return new Response(null, { status: 204, headers: CORS_HEADERS });
-  const url = new URL(req.url);
+  try {
+    const method = req.method.toUpperCase();
+    if (method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: CORS_HEADERS });
+    }
+
+    const url = new URL(req.url);
   const path = url.pathname;
 
   if (req.method === "GET" && (path === "/health" || path.endsWith("/health"))) return json({ status: "ok" });
@@ -160,4 +163,8 @@ Deno.serve(async (req) => {
   }
 
   return json({ ok: false, error: "Not Found" }, 404);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return json({ ok: false, error: message || "Internal Server Error" }, 500);
+  }
 });

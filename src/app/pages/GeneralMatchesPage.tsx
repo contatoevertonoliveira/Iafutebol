@@ -1,13 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
-import { Clock, Dices, Eye, Globe, Loader2, RefreshCcw, Search, Star, Trophy } from 'lucide-react';
+import { Clock, Dices, Eye, Globe, Loader2, RefreshCcw, Search, Star } from 'lucide-react';
 import { toast } from 'sonner';
 import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
 import { Card } from '../components/ui/card';
 import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select';
+import { Tooltip, TooltipContent, TooltipTrigger } from '../components/ui/tooltip';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../components/ui/dialog';
 import { loadApiConfig } from '../services/apiConfig';
 import { ApiFootballLeague, ApiFootballMatch, ApiFootballService } from '../services/apiFootballService';
@@ -158,6 +158,35 @@ const readLeaguesCatalogCache = (): ApiFootballLeague[] => {
 
 const toBucket = (m: ApiFootballMatch): MatchBucket => {
   const short = String(m?.fixture?.status?.short ?? '').toUpperCase();
+  if (['FT', 'AET', 'PEN', 'FINISHED', 'CLOSED', 'SETTLED', 'ENDED', 'END', 'RESULT', 'ABANDONED', 'CANCELLED', 'CANCELED'].includes(short)) {
+    return 'finished';
+  }
+  if (
+    [
+      '1H',
+      '2H',
+      'HT',
+      'ET',
+      'BT',
+      'P',
+      'LIVE',
+      'IN_PLAY',
+      'INPLAY',
+      'PAUSED',
+      'BREAK',
+      'INT',
+      'SUSP',
+      'SUSPENDED',
+      'INTERRUPTED',
+    ].includes(short)
+  ) {
+    return 'live';
+  }
+  return 'scheduled';
+};
+
+const toMatchStatus = (status: string): Exclude<MatchBucket, 'all'> => {
+  const short = String(status ?? '').trim().toUpperCase();
   if (['FT', 'AET', 'PEN', 'FINISHED', 'CLOSED', 'SETTLED', 'ENDED', 'END', 'RESULT', 'ABANDONED', 'CANCELLED', 'CANCELED'].includes(short)) {
     return 'finished';
   }
@@ -353,21 +382,9 @@ const scoreTeams = (homeA: string, awayA: string, homeB: string, awayB: string) 
 export default function GeneralMatchesPage() {
   const navigate = useNavigate();
   const [config, setConfig] = useState(() => loadApiConfig());
-  const warnedManyLeaguesRef = useRef(false);
-  const warnTooManyActiveLeagues = (count: number) => {
-    if (!Number.isFinite(count) || count <= 30) return;
-    if (warnedManyLeaguesRef.current) return;
-    warnedManyLeaguesRef.current = true;
-    toast.warning(`Muitas ligas ativas (${count}).`, {
-      description: 'Isso pode consumir a cota diária da API-Football. Se necessário, desative ligas em Configurações → Campeonatos.',
-    });
-  };
   const [date, setDate] = useState(() => getDayKey(new Date()));
   const [bucket, setBucket] = useState<MatchBucket>('live');
-  const [country, setCountry] = useState<string>('all');
-  const [leagueKey, setLeagueKey] = useState<string>('all');
   const [search, setSearch] = useState('');
-  const [famousOnly, setFamousOnly] = useState(false);
 
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string>('');
@@ -385,6 +402,58 @@ export default function GeneralMatchesPage() {
     }
     return map;
   }, [betfairMatches]);
+
+  useEffect(() => {
+    const mode = (() => {
+      try {
+        return String(localStorage.getItem('favorite_rescue_runner_mode_v1') ?? '').trim().toLowerCase();
+      } catch {
+        return '';
+      }
+    })();
+    if (mode !== 'layout') return;
+
+    const feedKey = 'favorite_rescue_feed_v1';
+    const nowIso = new Date().toISOString();
+    const items: Record<string, any> = {};
+    for (const fx of fixtures) {
+      const fixtureId = Number((fx as any)?.fixture?.id ?? NaN);
+      if (!Number.isFinite(fixtureId)) continue;
+      const matchId = String(fixtureId);
+      const statusShort = String((fx as any)?.fixture?.status?.short ?? '').trim() || null;
+      const elapsedRaw = (fx as any)?.fixture?.status?.elapsed;
+      const liveElapsed = typeof elapsedRaw === 'number' ? elapsedRaw : typeof elapsedRaw === 'string' ? Number(elapsedRaw) : null;
+      const scoreHome = typeof (fx as any)?.goals?.home === 'number' ? (fx as any).goals.home : null;
+      const scoreAway = typeof (fx as any)?.goals?.away === 'number' ? (fx as any).goals.away : null;
+      const status = toMatchStatus(statusShort || 'NS');
+      const bf = betfairById.get(matchId) ?? null;
+
+      items[matchId] = {
+        updatedAt: nowIso,
+        status,
+        utcDate: typeof (fx as any)?.fixture?.date === 'string' ? (fx as any).fixture.date : null,
+        homeTeam: typeof (fx as any)?.teams?.home?.name === 'string' ? (fx as any).teams.home.name : null,
+        awayTeam: typeof (fx as any)?.teams?.away?.name === 'string' ? (fx as any).teams.away.name : null,
+        liveElapsed: Number.isFinite(Number(liveElapsed)) ? Number(liveElapsed) : null,
+        liveStatusShort: statusShort,
+        scoreHome,
+        scoreAway,
+        betfair: (bf as any)?.betfair ?? null,
+      };
+    }
+    try {
+      const raw = localStorage.getItem(feedKey);
+      const parsed = raw ? (JSON.parse(raw) as any) : null;
+      const prevItems = parsed?.version === 1 && parsed?.items && typeof parsed.items === 'object' ? parsed.items : {};
+      const nextItems = { ...prevItems, ...items };
+      const prunedEntries = Object.entries(nextItems)
+        .map(([id, v]) => [id, v] as const)
+        .filter(([, v]) => v && typeof v === 'object')
+        .slice(0, 1000);
+      localStorage.setItem(feedKey, JSON.stringify({ version: 1, updatedAt: nowIso, items: Object.fromEntries(prunedEntries) }));
+      window.dispatchEvent(new Event('favoriteRescueFeedChanged'));
+    } catch {}
+  }, [fixtures, betfairById]);
 
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [selected, setSelected] = useState<ApiFootballMatch | null>(null);
@@ -658,7 +727,12 @@ export default function GeneralMatchesPage() {
         for (let i = localStorage.length - 1; i >= 0; i -= 1) {
           const k = localStorage.key(i);
           if (!k) continue;
-          if (k.startsWith('generalFixturesCache_v1:') || k.startsWith('generalFixturesCache_v2:') || k.startsWith('generalFixturesCache_v3:')) {
+          if (
+            k.startsWith('generalFixturesCache_v1:') ||
+            k.startsWith('generalFixturesCache_v2:') ||
+            k.startsWith('generalFixturesCache_v3:') ||
+            k.startsWith('generalFixturesCache_v4:')
+          ) {
             localStorage.removeItem(k);
           }
         }
@@ -667,12 +741,6 @@ export default function GeneralMatchesPage() {
     window.addEventListener('apiConfigChanged' as any, onConfig as any);
     return () => window.removeEventListener('apiConfigChanged' as any, onConfig as any);
   }, [date]);
-
-  const disabledLeagueIds = useMemo(() => {
-    const cfg = config;
-    const ids = Array.isArray(cfg?.apiFootballDisabledLeagueIds) ? cfg?.apiFootballDisabledLeagueIds : [];
-    return new Set(ids.map(Number).filter(Number.isFinite));
-  }, [config?.apiFootballDisabledLeagueIds]);
 
   const apiFootballKey = useMemo(() => String(config?.apiFootballKey ?? '').trim(), [config?.apiFootballKey]);
   const warnedQuotaRef = useRef(false);
@@ -688,7 +756,7 @@ export default function GeneralMatchesPage() {
             apikey: publicAnonKey,
             Authorization: `Bearer ${publicAnonKey}`,
           },
-          body: JSON.stringify({ dateFrom: date, dateTo: date, maxResults: 150 }),
+          body: JSON.stringify({ dateFrom: date, dateTo: date, maxResults: 500 }),
         });
         const raw = await res.text().catch(() => '');
         const data = raw ? JSON.parse(raw) : null;
@@ -704,28 +772,6 @@ export default function GeneralMatchesPage() {
     };
     void run();
   }, [date]);
-
-  const cachedLeagues = useMemo(() => {
-    try {
-      return readLeaguesCatalogCache();
-    } catch {
-      return [] as ApiFootballLeague[];
-    }
-  }, [config?.apiFootballKey]);
-
-  const activeLeagues = useMemo(() => {
-    if (!cachedLeagues || cachedLeagues.length === 0) return [] as ApiFootballLeague[];
-    if (disabledLeagueIds.size === 0) return cachedLeagues;
-    return cachedLeagues.filter((l) => !disabledLeagueIds.has(Number(l.id)));
-  }, [cachedLeagues, disabledLeagueIds]);
-
-  const activeLeagueKey = useMemo(() => {
-    return activeLeagues
-      .map((l) => Number(l.id))
-      .filter(Number.isFinite)
-      .sort((a, b) => a - b)
-      .join(',');
-  }, [activeLeagues]);
 
   const loadFixtures = async (opts?: { force?: boolean }) => {
     const betfairFallback = Array.isArray(betfairMatches) ? betfairMatches.map(betfairToApiFootballMatch) : [];
@@ -744,25 +790,9 @@ export default function GeneralMatchesPage() {
       return;
     }
 
-    if (cachedLeagues.length === 0) {
-      if (betfairFallback.length > 0) {
-        setFixtures(betfairFallback);
-        setError('');
-        setLastUpdatedAt(new Date());
-        setDataSource('betfair');
-        toast.info('Catálogo de ligas não carregado. Exibindo Betfair como fallback.');
-        return;
-      }
-      setFixtures([]);
-      setError('Catálogo de ligas não carregado. Abra Configurações → Campeonatos para atualizar a lista.');
-      setDataSource('api-football');
-      toast.info('Abra Configurações → Campeonatos e clique em “Atualizar lista” para carregar o catálogo de ligas.');
-      return;
-    }
-
     const isToday = date === getDayKey(new Date());
     const includeLive = bucket === 'live' || isToday;
-    const cacheKey = `generalFixturesCache_v3:${date}:${activeLeagueKey || 'all'}:${includeLive ? 'live' : 'date'}`;
+    const cacheKey = `generalFixturesCache_v4:${date}:${includeLive ? 'live' : 'date'}`;
     const cacheMaxAgeMs = 1000 * 60 * 3;
 
     if (!opts?.force) {
@@ -790,85 +820,15 @@ export default function GeneralMatchesPage() {
     setError('');
     try {
       const service = new ApiFootballService(apiFootballKey);
-      const leagueIds = activeLeagues
-        .map((l) => Number(l.id))
-        .filter(Number.isFinite)
-        .slice();
+      const dateItems = await service.getFixtures({ date, timezone: TIME_ZONE, maxPages: 12 });
+      const dayItems = (Array.isArray(dateItems) ? dateItems : []).filter((m) => fixtureLocalDayKey(m) === date);
 
-      leagueIds.sort((a, b) => a - b);
-
-      if (cachedLeagues.length > 0 && leagueIds.length === 0) {
-        setFixtures([]);
-        const fetchedAt = new Date().toISOString();
-        setLastUpdatedAt(new Date(fetchedAt));
-        try {
-          localStorage.setItem(cacheKey, JSON.stringify({ fetchedAt, items: [] }));
-        } catch {}
-        toast.warning('Todos os campeonatos estão desativados. Ative pelo menos um em Configurações → Campeonatos.');
-        return;
-      }
-
-      warnTooManyActiveLeagues(leagueIds.length);
-
-      const mapWithConcurrency = async <TIn, TOut>(
-        items: TIn[],
-        limit: number,
-        fn: (item: TIn, index: number) => Promise<TOut>,
-      ) => {
-        const results: TOut[] = new Array(items.length);
-        let nextIndex = 0;
-        const workers = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
-          while (nextIndex < items.length) {
-            const i = nextIndex++;
-            results[i] = await fn(items[i], i);
-          }
-        });
-        await Promise.all(workers);
-        return results;
-      };
-
-      const tooManyLeagues = leagueIds.length > 18;
-      const activeLeagueSet = new Set(leagueIds);
-      const shouldSplitByLeague = leagueIds.length > 0 && !tooManyLeagues;
-
-      const dateItems = shouldSplitByLeague
-        ? (
-          await mapWithConcurrency(
-            leagueIds,
-            3,
-            async (leagueId) =>
-              await service.getFixtures({ date, league: leagueId, timezone: TIME_ZONE, maxPages: 2 }),
-          )
-        ).flat()
-        : await service.getFixtures({ date, timezone: TIME_ZONE, maxPages: 10 });
-
-      const dayItems = (Array.isArray(dateItems) ? dateItems : [])
-        .filter((m) => fixtureLocalDayKey(m) === date)
-        .filter((m) => {
-          if (!tooManyLeagues) return true;
-          const leagueId = Number((m as any)?.league?.id);
-          return Number.isFinite(leagueId) && activeLeagueSet.has(leagueId);
-        });
-
-      let merged = dayItems;
+      let merged = dayItems.slice();
       if (includeLive) {
-        const liveItems = shouldSplitByLeague
-          ? (
-            await mapWithConcurrency(
-              leagueIds,
-              3,
-              async (leagueId) =>
-                await service.getFixtures({ live: 'all', league: leagueId, timezone: TIME_ZONE, maxPages: 2 }),
-            )
-          ).flat()
-          : await service.getFixtures({ live: 'all', timezone: TIME_ZONE, maxPages: 5 }).catch(() => []);
-        const liveFiltered = (Array.isArray(liveItems) ? liveItems : []).filter((m) => {
-          if (!tooManyLeagues) return true;
-          const leagueId = Number((m as any)?.league?.id);
-          return Number.isFinite(leagueId) && activeLeagueSet.has(leagueId);
-        });
+        const liveItems = await service.getFixtures({ live: 'all', timezone: TIME_ZONE, maxPages: 6 }).catch(() => []);
+        const liveFiltered = (Array.isArray(liveItems) ? liveItems : []).filter((m) => fixtureLocalDayKey(m) === date);
         const unique = new Map<number, ApiFootballMatch>();
-        for (const m of dayItems) {
+        for (const m of merged) {
           const id = Number(m?.fixture?.id);
           if (!Number.isFinite(id)) continue;
           unique.set(id, m);
@@ -881,12 +841,27 @@ export default function GeneralMatchesPage() {
         merged = Array.from(unique.values());
       }
 
-      setFixtures(merged);
+      const mergedWithBetfair = (() => {
+        const unique = new Map<number, ApiFootballMatch>();
+        for (const m of merged) {
+          const id = Number(m?.fixture?.id);
+          if (!Number.isFinite(id)) continue;
+          unique.set(id, m);
+        }
+        for (const m of betfairFallback) {
+          const id = Number(m?.fixture?.id);
+          if (!Number.isFinite(id)) continue;
+          if (!unique.has(id)) unique.set(id, m);
+        }
+        return Array.from(unique.values());
+      })();
+
+      setFixtures(mergedWithBetfair);
       const fetchedAt = new Date().toISOString();
       setLastUpdatedAt(new Date(fetchedAt));
       setDataSource('api-football');
       try {
-        localStorage.setItem(cacheKey, JSON.stringify({ fetchedAt, items: merged }));
+        localStorage.setItem(cacheKey, JSON.stringify({ fetchedAt, items: mergedWithBetfair }));
       } catch {}
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Erro ao carregar jogos da API-Football';
@@ -911,26 +886,11 @@ export default function GeneralMatchesPage() {
 
   useEffect(() => {
     void loadFixtures();
-  }, [date, apiFootballKey, activeLeagueKey, bucket, betfairMatches]);
-
-  const allowedFixtures = useMemo(() => {
-    let items = fixtures;
-    if (disabledLeagueIds.size > 0) {
-      items = items.filter((m) => {
-        const id = Number(m?.league?.id);
-        if (!Number.isFinite(id)) return false;
-        return !disabledLeagueIds.has(id);
-      });
-    }
-    return items;
-  }, [fixtures, disabledLeagueIds]);
+  }, [date, apiFootballKey, bucket, betfairMatches]);
 
   const filtered = useMemo(() => {
-    let items = allowedFixtures;
+    let items = fixtures;
     if (bucket !== 'all') items = items.filter((m) => toBucket(m) === bucket);
-    if (famousOnly) items = items.filter(isFamousLeague);
-    if (country !== 'all') items = items.filter((m) => String(m?.league?.country ?? '') === country);
-    if (leagueKey !== 'all') items = items.filter((m) => `${m?.league?.id ?? ''}` === leagueKey);
     const q = search.trim().toLowerCase();
     if (q) {
       items = items.filter((m) => {
@@ -951,31 +911,7 @@ export default function GeneralMatchesPage() {
       if (al !== 0) return al;
       return String(a?.teams?.home?.name ?? '').localeCompare(String(b?.teams?.home?.name ?? ''));
     });
-  }, [allowedFixtures, bucket, country, leagueKey, search, famousOnly]);
-
-  const countries = useMemo(() => {
-    const s = new Set<string>();
-    for (const m of allowedFixtures) {
-      const c = String(m?.league?.country ?? '').trim();
-      if (c) s.add(c);
-    }
-    return Array.from(s).sort((a, b) => a.localeCompare(b));
-  }, [allowedFixtures]);
-
-  const leagues = useMemo(() => {
-    const byId = new Map<string, { id: string; name: string; country: string }>();
-    for (const m of allowedFixtures) {
-      const id = String(m?.league?.id ?? '').trim();
-      if (!id) continue;
-      if (byId.has(id)) continue;
-      byId.set(id, { id, name: String(m?.league?.name ?? 'Unknown'), country: String(m?.league?.country ?? '') });
-    }
-    return Array.from(byId.values()).sort((a, b) => {
-      const c = a.country.localeCompare(b.country);
-      if (c !== 0) return c;
-      return a.name.localeCompare(b.name);
-    });
-  }, [allowedFixtures]);
+  }, [fixtures, bucket, search]);
 
   const groups = useMemo(() => {
     const byCountry = new Map<string, Map<string, ApiFootballMatch[]>>();
@@ -999,14 +935,14 @@ export default function GeneralMatchesPage() {
     let live = 0;
     let scheduled = 0;
     let finished = 0;
-    for (const m of allowedFixtures) {
+    for (const m of fixtures) {
       const b = toBucket(m);
       if (b === 'live') live += 1;
       else if (b === 'finished') finished += 1;
       else scheduled += 1;
     }
-    return { live, scheduled, finished, total: allowedFixtures.length };
-  }, [allowedFixtures]);
+    return { live, scheduled, finished, total: fixtures.length };
+  }, [fixtures]);
 
   const openDetails = async (m: ApiFootballMatch) => {
     setSelected(m);
@@ -1068,11 +1004,11 @@ export default function GeneralMatchesPage() {
               <h1 className="text-2xl md:text-3xl font-bold text-gray-900">Jogos em Geral</h1>
             </div>
             <div className="text-sm text-gray-600 mt-1">
-              Panorama global de jogos (filtrado pelas ligas ativas em Configurações).
+              Todos os jogos do dia (sem filtros). Use para adicionar manualmente jogos ao dashboard/automação.
             </div>
             <div className="mt-2 flex items-center gap-2">
               <Badge variant={dataSource === 'betfair' ? 'secondary' : 'outline'}>
-                Fonte: {dataSource === 'betfair' ? 'Betfair (fallback)' : 'API-Football'}
+                Fonte: {!apiFootballKey || dataSource === 'betfair' ? 'Betfair' : 'API-Football + Betfair'}
               </Badge>
               {lastUpdatedAt ? (
                 <div className="text-[11px] text-gray-500 tabular-nums">
@@ -1119,18 +1055,6 @@ export default function GeneralMatchesPage() {
           </Card>
         ) : null}
 
-        {apiFootballKey && cachedLeagues.length === 0 ? (
-          <Card className="p-4 border border-yellow-200 bg-yellow-50 text-yellow-900">
-            Lista de ligas ainda não carregada. Vá em Configurações → Campeonatos e clique em “Atualizar lista” para sincronizar as ligas e permitir o filtro por ligas ativas.
-          </Card>
-        ) : null}
-
-        {apiFootballKey && cachedLeagues.length > 0 && activeLeagues.length === 0 ? (
-          <Card className="p-4 border border-yellow-200 bg-yellow-50 text-yellow-900">
-            Nenhuma liga ativa encontrada. Ajuste as ligas em Configurações → Campeonatos.
-          </Card>
-        ) : null}
-
         {error ? (
           <Card className="p-4 border border-red-200 bg-red-50 text-red-900">
             Erro: {error}
@@ -1138,8 +1062,6 @@ export default function GeneralMatchesPage() {
         ) : null}
 
         <div className="flex flex-wrap items-center gap-2">
-          <Badge variant="outline">Ligas no catálogo: {cachedLeagues.length}</Badge>
-          <Badge variant="outline">Ligas ativas: {activeLeagues.length}</Badge>
           <Badge variant="outline">Jogos carregados: {fixtures.length}</Badge>
         </div>
 
@@ -1159,7 +1081,7 @@ export default function GeneralMatchesPage() {
         </div>
 
         <Card className="p-4">
-          <div className="grid md:grid-cols-5 gap-3">
+          <div className="grid md:grid-cols-3 gap-3">
             <div className="md:col-span-1">
               <Label htmlFor="date">Data</Label>
               <Input
@@ -1181,38 +1103,6 @@ export default function GeneralMatchesPage() {
                 />
               </div>
             </div>
-            <div className="md:col-span-1">
-              <Label>País</Label>
-              <Select value={country} onValueChange={setCountry}>
-                <SelectTrigger>
-                  <SelectValue placeholder="Todos" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">Todos</SelectItem>
-                  {countries.map((c) => (
-                    <SelectItem key={c} value={c}>
-                      {c}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="md:col-span-1">
-              <Label>Liga</Label>
-              <Select value={leagueKey} onValueChange={setLeagueKey}>
-                <SelectTrigger>
-                  <SelectValue placeholder="Todas" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">Todas</SelectItem>
-                  {leagues.slice(0, 500).map((l) => (
-                    <SelectItem key={l.id} value={l.id}>
-                      {l.country ? `${l.country} • ` : ''}{l.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
           </div>
 
           <div className="flex flex-wrap items-center gap-2 mt-4">
@@ -1231,17 +1121,6 @@ export default function GeneralMatchesPage() {
                 {t.label}
               </Button>
             ))}
-
-            <Button
-              size="sm"
-              variant={famousOnly ? 'default' : 'outline'}
-              onClick={() => setFamousOnly((v) => !v)}
-              className={cn(famousOnly ? 'bg-orange-600 hover:bg-orange-700' : '')}
-            >
-              <Trophy className="w-4 h-4 mr-2" />
-              Ligas famosas
-            </Button>
-
             <div className="ml-auto text-xs text-gray-600 tabular-nums">
               {lastUpdatedAt ? `Atualizado: ${lastUpdatedAt.toLocaleString('pt-BR')}` : '—'}
               {' • '}
@@ -1257,15 +1136,9 @@ export default function GeneralMatchesPage() {
           </Card>
         ) : null}
 
-        {!isLoading && fixtures.length > 0 && allowedFixtures.length === 0 ? (
-          <Card className="p-6 text-gray-700">
-            Os jogos do dia foram carregados, mas todos foram filtrados pelas ligas desativadas. Ajuste as ligas ativas em Configurações → Campeonatos.
-          </Card>
-        ) : null}
-
         {!isLoading && filtered.length === 0 ? (
           <Card className="p-6 text-gray-700">
-            Nenhum jogo encontrado com os filtros atuais.
+            Nenhum jogo encontrado{search.trim() ? ' para a busca atual.' : ' para a data selecionada.'}
           </Card>
         ) : null}
 
@@ -1515,58 +1388,105 @@ export default function GeneralMatchesPage() {
                                 )}
 
                                 <div className="px-3 py-2 flex items-center justify-end gap-1.5">
-                                  <Button
-                                    aria-label={isInAutomation ? 'Remover da automação (Betfair)' : 'Adicionar à automação (Betfair)'}
-                                    variant="outline"
-                                    size="icon"
-                                    className={cn(
-                                      isInAutomation
-                                        ? 'border-red-300 bg-red-50 hover:bg-red-100'
-                                        : 'border-emerald-300 bg-emerald-50 hover:bg-emerald-100',
-                                    )}
-                                    onClick={(e) => {
-                                      e.preventDefault();
-                                      e.stopPropagation();
-                                      if (!fixtureId) return;
-                                      setAutomationTarget(m);
-                                      setAutomationActionOpen(true);
-                                    }}
-                                  >
-                                    <img src="/utils/betfair.png" alt="Betfair" className="w-4 h-4" />
-                                  </Button>
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>
+                                      <Button
+                                        aria-label={isInAutomation ? 'Remover da automação (Betfair)' : 'Adicionar à automação (Betfair)'}
+                                        variant="outline"
+                                        size="icon"
+                                        className={cn(
+                                          isInAutomation
+                                            ? 'border-red-300 bg-red-50 hover:bg-red-100'
+                                            : 'border-emerald-300 bg-emerald-50 hover:bg-emerald-100',
+                                        )}
+                                        onClick={(e) => {
+                                          e.preventDefault();
+                                          e.stopPropagation();
+                                          if (!fixtureId) return;
+                                          setAutomationTarget(m);
+                                          setAutomationActionOpen(true);
+                                        }}
+                                      >
+                                        <img src="/utils/betfair.png" alt="Betfair" className="w-4 h-4" />
+                                      </Button>
+                                    </TooltipTrigger>
+                                    <TooltipContent side="top" sideOffset={6}>
+                                      {isInAutomation ? 'Remover da automação (Betfair)' : 'Adicionar à automação (Betfair)'}
+                                    </TooltipContent>
+                                  </Tooltip>
 
-                                  <Button
-                                    aria-label="Ver detalhes"
-                                    variant="outline"
-                                    size="icon"
-                                    onClick={(e) => {
-                                      e.preventDefault();
-                                      e.stopPropagation();
-                                      void openDetails(m);
-                                    }}
-                                  >
-                                    <Eye className="w-4 h-4" />
-                                  </Button>
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>
+                                      <Button
+                                        aria-label="Ver detalhes"
+                                        variant="outline"
+                                        size="icon"
+                                        onClick={(e) => {
+                                          e.preventDefault();
+                                          e.stopPropagation();
+                                          void openDetails(m);
+                                        }}
+                                      >
+                                        <Eye className="w-4 h-4" />
+                                      </Button>
+                                    </TooltipTrigger>
+                                    <TooltipContent side="top" sideOffset={6}>
+                                      Ver detalhes
+                                    </TooltipContent>
+                                  </Tooltip>
 
-                                  <Button
-                                    aria-label="Previsão"
-                                    variant="outline"
-                                    size="icon"
-                                    onClick={(e) => {
-                                      e.preventDefault();
-                                      e.stopPropagation();
-                                      if (b === 'finished') {
-                                        void openDetails(m);
-                                        return;
-                                      }
-                                      if (!fixtureId) return;
-                                      if (!hasPrediction) requestFixturePrediction(fixtureId);
-                                      toast.success(hasPrediction ? 'Abrindo a análise...' : 'Previsão solicitada. Abrindo a análise...');
-                                      openPredictionShortcut(fixtureId);
-                                    }}
-                                  >
-                                    <Dices className="w-4 h-4" />
-                                  </Button>
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>
+                                      <Button
+                                        aria-label="Previsão"
+                                        variant="outline"
+                                        size="icon"
+                                        onClick={(e) => {
+                                          e.preventDefault();
+                                          e.stopPropagation();
+                                          if (b === 'finished') {
+                                            void openDetails(m);
+                                            return;
+                                          }
+                                          if (!fixtureId) return;
+                                          if (!hasPrediction) requestFixturePrediction(fixtureId);
+                                          toast.success(hasPrediction ? 'Abrindo a análise...' : 'Previsão solicitada. Abrindo a análise...');
+                                          openPredictionShortcut(fixtureId);
+                                        }}
+                                      >
+                                        <Dices className="w-4 h-4" />
+                                      </Button>
+                                    </TooltipTrigger>
+                                    <TooltipContent side="top" sideOffset={6}>
+                                      Abrir análise
+                                    </TooltipContent>
+                                  </Tooltip>
+
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>
+                                      <Button
+                                        aria-label="Solicitar análise e adicionar ao dashboard"
+                                        variant="outline"
+                                        size="icon"
+                                        onClick={(e) => {
+                                          e.preventDefault();
+                                          e.stopPropagation();
+                                          if (b === 'finished') {
+                                            toast.info('Partida finalizada. Use “Ver detalhes”.');
+                                            return;
+                                          }
+                                          if (!fixtureId) return;
+                                          requestFixturePrediction(fixtureId);
+                                          toast.success('Análise solicitada e card adicionado ao dashboard');
+                                        }}
+                                      >
+                                        <Star className="w-4 h-4" />
+                                      </Button>
+                                    </TooltipTrigger>
+                                    <TooltipContent side="top" sideOffset={6}>
+                                      Solicitar análise + adicionar card
+                                    </TooltipContent>
+                                  </Tooltip>
                                 </div>
                               </div>
                             );

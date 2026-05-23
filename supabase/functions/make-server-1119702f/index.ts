@@ -6,7 +6,7 @@ const app = new Hono();
 
 const CORS_HEADERS: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization, apikey, x-automation-token",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, apikey, x-automation-token, x-client-info, prefer",
   "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
   "Access-Control-Expose-Headers": "Content-Length",
   "Access-Control-Max-Age": "600",

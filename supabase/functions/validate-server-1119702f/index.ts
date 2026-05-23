@@ -71,7 +71,11 @@ const validateApiFootballKey = async (payload: any) => {
 };
 
 Deno.serve(async (req) => {
-  if (req.method === "OPTIONS") return new Response("", { status: 204, headers: CORS_HEADERS });
+  const method = String((req as any)?.method ?? "").toUpperCase();
+  const isPreflight =
+    method === "OPTIONS" || (req.headers.has("origin") && req.headers.has("access-control-request-method"));
+  if (isPreflight) return new Response(null, { status: 204, headers: CORS_HEADERS });
+
   const url = new URL(req.url);
   const path = url.pathname;
 

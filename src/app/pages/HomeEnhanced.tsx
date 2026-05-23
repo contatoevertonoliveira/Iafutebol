@@ -564,7 +564,6 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
         const fixture = Array.isArray(res) ? res[0] : null;
         if (!fixture) continue;
         const converted = convertApiFootballMatchToFootballMatch(fixture);
-        if (disabled.size > 0 && disabled.has(Number(converted.competition.id))) continue;
         fetched.push(converted);
       }
 
@@ -1991,6 +1990,62 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
   }, [realMatches]);
 
   useEffect(() => {
+    const mode = (() => {
+      try {
+        return String(localStorage.getItem('favorite_rescue_runner_mode_v1') ?? '').trim().toLowerCase();
+      } catch {
+        return '';
+      }
+    })();
+    if (mode !== 'layout') return;
+
+    const feedKey = 'favorite_rescue_feed_v1';
+    const nowIso = new Date().toISOString();
+    const items: Record<string, any> = {};
+    for (const m of filteredMatches) {
+      const matchId = String((m as any)?.id ?? '').trim();
+      if (!matchId) continue;
+      const status = String((m as any)?.status ?? '').trim() || 'scheduled';
+      const liveElapsed = typeof (m as any)?.liveElapsed === 'number' ? (m as any).liveElapsed : null;
+      const liveStatusShort = typeof (m as any)?.liveStatusShort === 'string' ? (m as any).liveStatusShort : null;
+      const scoreHome = typeof (m as any)?.result?.home === 'number' ? (m as any).result.home : null;
+      const scoreAway = typeof (m as any)?.result?.away === 'number' ? (m as any).result.away : null;
+      const fm = realMatchById[matchId] ?? null;
+      items[matchId] = {
+        updatedAt: nowIso,
+        status,
+        utcDate:
+          typeof (m as any)?.date === 'string'
+            ? (m as any).date
+            : (m as any)?.date instanceof Date && Number.isFinite((m as any).date.getTime())
+              ? (m as any).date.toISOString()
+              : null,
+        homeTeam: typeof (m as any)?.homeTeam === 'string' ? (m as any).homeTeam : null,
+        awayTeam: typeof (m as any)?.awayTeam === 'string' ? (m as any).awayTeam : null,
+        liveElapsed,
+        liveStatusShort,
+        scoreHome,
+        scoreAway,
+        betfair: (fm as any)?.betfair ?? null,
+        preLive: (fm as any)?.preLive ?? null,
+      };
+    }
+    try {
+      const raw = localStorage.getItem(feedKey);
+      const parsed = raw ? (JSON.parse(raw) as any) : null;
+      const prevItems = parsed?.version === 1 && parsed?.items && typeof parsed.items === 'object' ? parsed.items : {};
+      const nextItems = { ...prevItems, ...items };
+      const prunedEntries = Object.entries(nextItems)
+        .map(([id, v]) => [id, v] as const)
+        .filter(([, v]) => v && typeof v === 'object')
+        .slice(0, 1000);
+      const pruned = Object.fromEntries(prunedEntries);
+      localStorage.setItem(feedKey, JSON.stringify({ version: 1, updatedAt: nowIso, items: pruned }));
+      window.dispatchEvent(new Event('favoriteRescueFeedChanged'));
+    } catch {}
+  }, [filteredMatches, realMatchById]);
+
+  useEffect(() => {
     type MatchHistoryItem = {
       id: string;
       source: ApiSource;
@@ -2081,6 +2136,15 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
   };
 
   useEffect(() => {
+    const mode = (() => {
+      try {
+        return String(localStorage.getItem('favorite_rescue_runner_mode_v1') ?? '').trim().toLowerCase();
+      } catch {
+        return '';
+      }
+    })();
+    if (mode === 'layout') return;
+
     const cfg = loadApiConfig();
     const fr =
       (cfg?.betfairRobotLimits && typeof cfg.betfairRobotLimits === 'object' ? (cfg.betfairRobotLimits as any).favoriteRescue : null) ?? null;
@@ -2103,6 +2167,8 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
     const minHomeWinRate = Number(fr?.minHomeWinRate);
     const awayOddsMinLosing01 = Number(fr?.awayOddsMinLosing01);
     const awayOddsMinLosing02 = Number(fr?.awayOddsMinLosing02);
+    const awayOddsMaxLosing01 = Number((fr as any)?.awayOddsMaxLosing01);
+    const awayOddsMaxLosing02 = Number((fr as any)?.awayOddsMaxLosing02);
     const matchOddsLayStakeAbs = Number(fr?.matchOddsLayStakeAbs);
     const correctScoreLayStakeAbs = Number(fr?.correctScoreLayStakeAbs);
     const matchOddsTakeProfitMinPct = Number(fr?.matchOddsTakeProfitMinPct);
@@ -2112,8 +2178,10 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
 
     const safeMinFavWinProb = Number.isFinite(minFavWinProb) ? Math.max(0.05, Math.min(0.95, minFavWinProb)) : 0.55;
     const safeMinHomeWinRate = Number.isFinite(minHomeWinRate) ? Math.max(0.05, Math.min(0.95, minHomeWinRate)) : 0.8;
-    const safeAwayOdds01 = Number.isFinite(awayOddsMinLosing01) ? Math.max(1.01, Math.min(50, awayOddsMinLosing01)) : 1.65;
-    const safeAwayOdds02 = Number.isFinite(awayOddsMinLosing02) ? Math.max(1.01, Math.min(50, awayOddsMinLosing02)) : 1.3;
+    const safeAwayOddsMin01 = Number.isFinite(awayOddsMinLosing01) ? Math.max(1.01, Math.min(50, awayOddsMinLosing01)) : 1.65;
+    const safeAwayOddsMin02 = Number.isFinite(awayOddsMinLosing02) ? Math.max(1.01, Math.min(50, awayOddsMinLosing02)) : 1.3;
+    const safeAwayOddsMax01 = Number.isFinite(awayOddsMaxLosing01) ? Math.max(1.01, Math.min(50, awayOddsMaxLosing01)) : 4;
+    const safeAwayOddsMax02 = Number.isFinite(awayOddsMaxLosing02) ? Math.max(1.01, Math.min(50, awayOddsMaxLosing02)) : 3;
     const stakeMO = Number.isFinite(matchOddsLayStakeAbs) ? Math.max(2, Math.min(10000, matchOddsLayStakeAbs)) : 10;
     const stakeCS = Number.isFinite(correctScoreLayStakeAbs) ? Math.max(2, Math.min(10000, correctScoreLayStakeAbs)) : 2;
     const takeMinPct = Number.isFinite(matchOddsTakeProfitMinPct) ? Math.max(0, Math.min(1, matchOddsTakeProfitMinPct)) : 0.1;
@@ -2331,16 +2399,16 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
         const qualifiesFavorite = (homeFavProb != null && homeFavProb >= safeMinFavWinProb) || (homeWinRate != null && homeWinRate >= safeMinHomeWinRate);
         if (!qualifiesFavorite) continue;
 
-        const awayOdd = Number((fm as any)?.betfair?.odds?.away?.back);
-        if (!Number.isFinite(awayOdd) || awayOdd <= 1) continue;
-        if (sa === 1 && awayOdd < safeAwayOdds01) continue;
-        if (sa === 2 && awayOdd < safeAwayOdds02) continue;
-
         const betfair = (fm as any)?.betfair ?? null;
         const marketId = String(betfair?.marketId ?? '').trim();
         const selectionIdAway = Number(betfair?.runners?.awaySelectionId ?? NaN);
+        const awayBack = Number(betfair?.odds?.away?.back);
         const layPrice = Number(betfair?.odds?.away?.lay ?? betfair?.odds?.away?.back ?? NaN);
         if (!marketId || !Number.isFinite(selectionIdAway) || !Number.isFinite(layPrice) || layPrice <= 1) continue;
+        if (!Number.isFinite(awayBack) || awayBack <= 1) continue;
+        const entryOdd = layPrice;
+        if (sa === 1 && (entryOdd < safeAwayOddsMin01 || entryOdd > safeAwayOddsMax01)) continue;
+        if (sa === 2 && (entryOdd < safeAwayOddsMin02 || entryOdd > safeAwayOddsMax02)) continue;
 
         const takePct = (() => {
           const lo = Math.min(takeMinPct, takeMaxPct);
@@ -2359,7 +2427,7 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
           minute,
           scoreHome: sh,
           scoreAway: sa,
-          awayOddAtEntry: awayOdd,
+          awayOddAtEntry: awayBack,
           homeFavProb,
           homeWinRate,
           matchOdds: { marketId, selectionIdAway, layPrice, stake: stakeMO, takeProfitAbs },
@@ -2438,7 +2506,7 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
         const title = `Agente independente executou entrada`;
         const lines = [
           `${m.homeTeam} x ${m.awayTeam} • ${sh}x${sa} • ${minute != null ? `${minute}’` : 'Ao vivo'}`,
-          `Motivo: ${scenario === 'losing_0_2' ? 'Favorito 0x2 (1ºT)' : 'Favorito 0x1 (1ºT)'} • Odds visitante: ${awayOdd.toFixed(2)}`,
+          `Motivo: ${scenario === 'losing_0_2' ? 'Favorito 0x2 (1ºT)' : 'Favorito 0x1 (1ºT)'} • Odds visitante (LAY): ${layPrice.toFixed(2)}`,
           `Mercados: ${orders.map((o) => o.market).join(' + ')}`,
           `Stake: ${orders.map((o) => `£${o.stake}`).join(' / ')}`,
         ];

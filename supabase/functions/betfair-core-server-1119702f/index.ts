@@ -1,3 +1,5 @@
+import * as kv from "../make-server-1119702f/kv_store.ts";
+
 const CORS_HEADERS: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "Content-Type, Authorization, apikey, x-automation-token",
@@ -105,11 +107,123 @@ const getBetfairConfig = () => {
 };
 
 let cachedSession: { token: string; fetchedAtMs: number } | null = null;
+let cachedBanUntilMs = 0;
+
+const KV_SESSION_KEY = "betfair/session_v1";
+const KV_BAN_KEY = "betfair/ban_until_v1";
+const KV_LOCK_KEY = "betfair/session_lock_v1";
+
+const kvGetSafe = async <T>(key: string): Promise<T | null> => {
+  try {
+    return (await kv.get(key)) as T | null;
+  } catch {
+    return null;
+  }
+};
+
+const kvSetSafe = async (key: string, value: any) => {
+  try {
+    await kv.set(key, value);
+  } catch {}
+};
+
+const kvDelSafe = async (key: string) => {
+  try {
+    await kv.del(key);
+  } catch {}
+};
+
+const delay = async (ms: number) => {
+  const t = Math.max(0, Math.min(30_000, Math.floor(ms)));
+  if (!t) return;
+  await new Promise((r) => setTimeout(r, t));
+};
+
+const getEnvNum = (key: string, fallback: number, min: number, max: number) => {
+  const raw = String(Deno.env.get(key) ?? "").trim();
+  const n = raw ? Number(raw) : NaN;
+  const v = Number.isFinite(n) ? n : fallback;
+  return Math.max(min, Math.min(max, v));
+};
+
+const createRateLimiter = (rps: number, burst: number) => {
+  const rate = Math.max(0.01, rps);
+  const cap = Math.max(1, Math.floor(burst));
+  let tokens = cap;
+  let lastMs = Date.now();
+  let chain = Promise.resolve();
+  const acquire = async () => {
+    chain = chain.then(async () => {
+      const now = Date.now();
+      const elapsed = Math.max(0, now - lastMs);
+      tokens = Math.min(cap, tokens + (elapsed * rate) / 1000);
+      lastMs = now;
+      if (tokens < 1) {
+        const waitMs = ((1 - tokens) / rate) * 1000;
+        await delay(waitMs);
+        const now2 = Date.now();
+        const elapsed2 = Math.max(0, now2 - lastMs);
+        tokens = Math.min(cap, tokens + (elapsed2 * rate) / 1000);
+        lastMs = now2;
+      }
+      tokens = Math.max(0, tokens - 1);
+    });
+    await chain;
+  };
+  return { acquire };
+};
+
+const betfairRpcLimiter = createRateLimiter(getEnvNum("BETFAIR_RPC_RPS", 5, 0.2, 20), getEnvNum("BETFAIR_RPC_BURST", 2, 1, 20));
+const betfairLoginLimiter = createRateLimiter(getEnvNum("BETFAIR_LOGIN_RPS", 0.05, 0.01, 1), 1);
+
+const getBanUntilMs = async () => {
+  if (Number.isFinite(cachedBanUntilMs) && cachedBanUntilMs > Date.now()) return cachedBanUntilMs;
+  const res = await kvGetSafe<{ untilMs: number }>(KV_BAN_KEY);
+  const untilMs = Number(res?.untilMs);
+  if (Number.isFinite(untilMs) && untilMs > Date.now()) {
+    cachedBanUntilMs = untilMs;
+    return untilMs;
+  }
+  return 0;
+};
+
+const setBanUntilMs = async (untilMs: number) => {
+  const safeUntilMs = Number.isFinite(untilMs) ? Math.max(0, Math.floor(untilMs)) : 0;
+  cachedBanUntilMs = safeUntilMs;
+  await kvSetSafe(KV_BAN_KEY, { untilMs: safeUntilMs });
+};
+
+const acquireLoginLock = async (ttlMs: number) => {
+  const expireIn = Math.max(1000, Math.min(20_000, Math.floor(ttlMs)));
+  const now = Date.now();
+  const existing = await kvGetSafe<{ acquiredAtMs?: number; expiresAtMs?: number }>(KV_LOCK_KEY);
+  const existingExpiresAtMs = Number(existing?.expiresAtMs);
+  const isLocked = Number.isFinite(existingExpiresAtMs) && existingExpiresAtMs > now;
+  const acquired = !isLocked;
+  if (acquired) {
+    await kvSetSafe(KV_LOCK_KEY, { acquiredAtMs: now, expiresAtMs: now + expireIn });
+  }
+  return {
+    ok: acquired,
+    release: async () => {
+      if (!acquired) return;
+      await kvDelSafe(KV_LOCK_KEY);
+    },
+  };
+};
 
 const betfairCertLogin = async () => {
   const cfg = getBetfairConfig();
   if (!cfg.appKey || !cfg.username || !cfg.password) throw new Error("Betfair: credenciais ausentes (APP_KEY/USERNAME/PASSWORD)");
   if (!cfg.certPem || !cfg.keyPem) throw new Error("Betfair: certificado ausente (CERT_PEM/KEY_PEM)");
+
+  const banUntilMs = await getBanUntilMs();
+  if (banUntilMs && Date.now() < banUntilMs) {
+    const waitSec = Math.max(1, Math.ceil((banUntilMs - Date.now()) / 1000));
+    throw new Error(`Betfair login bloqueado temporariamente. Aguarde ${waitSec}s`);
+  }
+
+  await betfairLoginLimiter.acquire();
 
   const client = Deno.createHttpClient({ cert: cfg.certPem, key: cfg.keyPem } as any);
   const url = `https://${cfg.ssoHost}/api/certlogin`;
@@ -134,7 +248,12 @@ const betfairCertLogin = async () => {
   if (!res.ok) throw new Error(`Betfair login falhou (HTTP ${res.status}): ${text.slice(0, 260)}`);
   const status = String(data?.loginStatus ?? "").trim();
   const sessionToken = String(data?.sessionToken ?? "").trim();
-  if (status !== "SUCCESS" || !sessionToken) throw new Error(`Betfair login falhou: ${status || "UNKNOWN"}`);
+  if (status !== "SUCCESS" || !sessionToken) {
+    if (/TEMPORARY_BAN_TOO_MANY_REQUESTS/i.test(status)) {
+      await setBanUntilMs(Date.now() + 10 * 60 * 1000);
+    }
+    throw new Error(`Betfair login falhou: ${status || "UNKNOWN"}`);
+  }
 
   cachedSession = { token: sessionToken, fetchedAtMs: Date.now() };
   return sessionToken;
@@ -144,7 +263,45 @@ const getBetfairSessionToken = async (opts?: { force?: boolean }) => {
   if (!opts?.force && cachedSession?.token) {
     if (Date.now() - cachedSession.fetchedAtMs < 50 * 60 * 1000) return cachedSession.token;
   }
-  return await betfairCertLogin();
+
+  const banUntilMs = await getBanUntilMs();
+  if (banUntilMs && Date.now() < banUntilMs) {
+    const waitSec = Math.max(1, Math.ceil((banUntilMs - Date.now()) / 1000));
+    throw new Error(`Betfair login bloqueado temporariamente. Aguarde ${waitSec}s`);
+  }
+
+  if (!opts?.force) {
+    const v = await kvGetSafe<{ token: string; fetchedAtMs: number }>(KV_SESSION_KEY);
+    if (v?.token && typeof v.fetchedAtMs === "number") {
+      if (Date.now() - v.fetchedAtMs < 50 * 60 * 1000) {
+        cachedSession = { token: v.token, fetchedAtMs: v.fetchedAtMs };
+        return v.token;
+      }
+    }
+  }
+
+  const lock = await acquireLoginLock(12_000);
+  try {
+    if (!lock.ok && !opts?.force) {
+      const startedAt = Date.now();
+      while (Date.now() - startedAt < 12_000) {
+        await new Promise((r) => setTimeout(r, 250));
+        const v = await kvGetSafe<{ token: string; fetchedAtMs: number }>(KV_SESSION_KEY);
+        if (v?.token && typeof v.fetchedAtMs === "number") {
+          if (Date.now() - v.fetchedAtMs < 50 * 60 * 1000) {
+            cachedSession = { token: v.token, fetchedAtMs: v.fetchedAtMs };
+            return v.token;
+          }
+        }
+      }
+    }
+
+    const token = await betfairCertLogin();
+    await kvSetSafe(KV_SESSION_KEY, { token, fetchedAtMs: Date.now() });
+    return token;
+  } finally {
+    await lock.release();
+  }
 };
 
 const betfairJsonRpcRawWithUrl = async (params: { url: string; method: string; params: any; sessionToken: string }) => {
@@ -153,6 +310,8 @@ const betfairJsonRpcRawWithUrl = async (params: { url: string; method: string; p
   const url = String(params.url ?? "").trim();
   if (!url) throw new Error("Betfair: url ausente");
   const method = String(params.method ?? "").trim();
+
+  await betfairRpcLimiter.acquire();
 
   const res = await fetch(url, {
     method: "POST",
@@ -235,7 +394,11 @@ const validatePlaceOrdersPayload = (payload: any) => {
 };
 
 Deno.serve(async (req) => {
-  if (req.method === "OPTIONS") return new Response("", { status: 204, headers: CORS_HEADERS });
+  const method = String((req as any)?.method ?? "").toUpperCase();
+  const isPreflight =
+    method === "OPTIONS" || (req.headers.has("origin") && req.headers.has("access-control-request-method"));
+  if (isPreflight) return new Response(null, { status: 204, headers: CORS_HEADERS });
+
   const url = new URL(req.url);
   const path = url.pathname;
 
@@ -359,6 +522,63 @@ Deno.serve(async (req) => {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       return json({ ok: false, error: message || "Erro ao enviar placeOrders" }, 500);
+    }
+  }
+
+  if (req.method === "POST" && (path.endsWith("/betfair/listCurrentOrders") || path === "/betfair/listCurrentOrders")) {
+    try {
+      const body = await readJson(req);
+      const adminError = requireAutomationAdmin(req, body);
+      if (adminError) return adminError;
+      const betIds = Array.isArray((body as any)?.betIds) ? (body as any).betIds.map(String).filter(Boolean).slice(0, 50) : null;
+      const marketIds = Array.isArray((body as any)?.marketIds) ? (body as any).marketIds.map(String).filter(Boolean).slice(0, 50) : null;
+      const orderProjection = String((body as any)?.orderProjection ?? "").trim() || "ALL";
+      const sessionToken = await getBetfairSessionToken();
+      const result = await betfairJsonRpcTrading({
+        method: "SportsAPING/v1.0/listCurrentOrders",
+        params: {
+          ...(betIds && betIds.length > 0 ? { betIds } : {}),
+          ...(marketIds && marketIds.length > 0 ? { marketIds } : {}),
+          orderProjection,
+        },
+        sessionToken,
+      });
+      return json({ ok: true, result });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return json({ ok: false, error: message || "Erro ao listar ordens" }, 500);
+    }
+  }
+
+  if (req.method === "POST" && (path.endsWith("/betfair/cancelOrders") || path === "/betfair/cancelOrders")) {
+    try {
+      const body = await readJson(req);
+      const adminError = requireAutomationAdmin(req, body);
+      if (adminError) return adminError;
+      const marketId = String((body as any)?.marketId ?? "").trim() || null;
+      const rawInstructions = Array.isArray((body as any)?.instructions) ? (body as any).instructions : [];
+      const instructions = rawInstructions.slice(0, 50).map((i: any) => {
+        const betId = String(i?.betId ?? "").trim() || null;
+        const sizeReduction = i?.sizeReduction == null ? undefined : Number(i.sizeReduction);
+        return {
+          ...(betId ? { betId } : {}),
+          ...(Number.isFinite(sizeReduction) ? { sizeReduction } : {}),
+        };
+      }).filter((x: any) => x.betId);
+      if (instructions.length === 0) return json({ ok: false, error: "instructions (betId) obrigatório" }, 400);
+      const sessionToken = await getBetfairSessionToken();
+      const result = await betfairJsonRpcTrading({
+        method: "SportsAPING/v1.0/cancelOrders",
+        params: {
+          ...(marketId ? { marketId } : {}),
+          instructions,
+        },
+        sessionToken,
+      });
+      return json({ ok: true, result });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return json({ ok: false, error: message || "Erro ao cancelar ordens" }, 500);
     }
   }
 

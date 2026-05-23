@@ -1,6 +1,6 @@
 const CORS_HEADERS: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization, apikey, x-automation-token",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, apikey, x-automation-token, x-client-info",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
   "Access-Control-Max-Age": "600",
 };
@@ -47,8 +47,13 @@ const proxyPost = async (targetUrl: string, headers: Record<string, string>, bod
 };
 
 Deno.serve(async (req) => {
-  if (req.method === "OPTIONS") return new Response("", { status: 204, headers: CORS_HEADERS });
-  const url = new URL(req.url);
+  try {
+    const method = req.method.toUpperCase();
+    if (method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: CORS_HEADERS });
+    }
+
+    const url = new URL(req.url);
   const path = url.pathname;
 
   if (req.method === "GET" && (path === "/health" || path.endsWith("/health"))) return json({ status: "ok" });
@@ -100,5 +105,9 @@ Deno.serve(async (req) => {
     return await proxyPost(requestUrl, { "Content-Type": "application/json" }, body);
   }
 
-  return json({ ok: false, error: "Not Found" }, 404);
+    return json({ ok: false, error: "Not Found" }, 404);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return json({ ok: false, error: message || "Internal Server Error" }, 500);
+  }
 });

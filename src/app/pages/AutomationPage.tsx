@@ -91,6 +91,24 @@ type QueueItem = {
   } | null;
 };
 
+type BotOrderRow = {
+  key: string;
+  matchId: string;
+  agent: string | null;
+  betId: string | null;
+  customerRef: string | null;
+  placedAt: string | null;
+  marketId: string | null;
+  side: 'BACK' | 'LAY' | null;
+  price: number | null;
+  sizeMatched: number | null;
+  sizeRemaining: number | null;
+  averagePriceMatched: number | null;
+  status: string | null;
+  error: string | null;
+  updatedAt: string;
+};
+
 type MatchStatus = 'scheduled' | 'live' | 'finished';
 
 const TIME_ZONE = 'America/Sao_Paulo';
@@ -441,12 +459,35 @@ export default function AutomationPage() {
     Record<string, { risk: number | null; cashOut: number | null; profit: number | null; fetchedAt: string }>
   >({});
   const tradePreviewRef = useRef<Record<string, { risk: number | null; cashOut: number | null; profit: number | null; fetchedAt: string }>>({});
+  const apiFootballLiveRef = useRef<Record<string, any>>({});
   const lastFundsSyncAtRef = useRef(0);
   const isRefreshingOddsRef = useRef(false);
   const isRefreshingTradePreviewRef = useRef(false);
+  const isFastTickScalpingTicksRef = useRef(false);
+  const isFastTickCorrectScoreRef = useRef(false);
+  const isRefreshingBotOrdersRef = useRef(false);
+  const [botOrders, setBotOrders] = useState<BotOrderRow[]>([]);
+  const [botOrdersLastRefreshedAt, setBotOrdersLastRefreshedAt] = useState<string | null>(null);
+  const [marketNameByMarketId, setMarketNameByMarketId] = useState<Record<string, string>>({});
+  const marketNameByMarketIdRef = useRef<Record<string, string>>({});
+  const lastMarketNamesFetchAtRef = useRef(0);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('scalping_ticks_runner_mode_v1', 'page');
+    } catch {}
+    return () => {
+      try {
+        localStorage.setItem('scalping_ticks_runner_mode_v1', 'layout');
+      } catch {}
+    };
+  }, []);
 
   // #region debug-point A:init
   const dbg = (hypothesisId: 'A' | 'B' | 'C' | 'D' | 'E', msg: string, data?: Record<string, unknown>) => {
+    // Disabled by default to avoid net::ERR_CONNECTION_REFUSED
+    return;
+    /*
     try {
       if (localStorage.getItem('automation_debug_enabled_v1') !== '1') return;
     } catch {
@@ -464,6 +505,7 @@ export default function AutomationPage() {
         ts: Date.now(),
       }),
     }).catch(() => {});
+    */
   };
   // #endregion
 
@@ -557,8 +599,430 @@ export default function AutomationPage() {
   }, []);
 
   useEffect(() => {
+    const tickCorrectScoreFast = async () => {
+      if (isFastTickCorrectScoreRef.current) return;
+      if (isTestModeRef.current) return;
+      isFastTickCorrectScoreRef.current = true;
+      try {
+        const cfg = loadApiConfig();
+        const adminToken = String(cfg?.automationAdminToken ?? '').trim();
+        if (!adminToken) return;
+        const bankrollTotal = Number(cfg?.betfairBankroll ?? 0);
+        const marketPercents = (cfg?.betfairMarketPercents && typeof cfg.betfairMarketPercents === 'object') ? cfg.betfairMarketPercents : {};
+        const correctScorePct = Number(marketPercents.correctScore ?? 10);
+        const bankrollForCorrectScore =
+          Number.isFinite(bankrollTotal) && bankrollTotal > 0 && Number.isFinite(correctScorePct) && correctScorePct > 0
+            ? Math.round(((bankrollTotal * correctScorePct) / 100) * 100) / 100
+            : 50;
+
+        const robotLimits = (cfg?.betfairRobotLimits && typeof cfg.betfairRobotLimits === 'object') ? cfg.betfairRobotLimits : {};
+        const lim = (robotLimits as any)?.correctScore && typeof (robotLimits as any).correctScore === 'object' ? (robotLimits as any).correctScore : {};
+        const profitTargetPct = Number(lim?.minProfitPct);
+
+        const targets = itemsRef.current
+          .filter((x) => x.status === 'running')
+          .filter((x) => normalizeAgent(x.strategy?.agent) === 'correctScore')
+          .slice(0, 6);
+        if (targets.length === 0) return;
+
+        const { projectId } = await import('/utils/supabase/info');
+        const headers = await getEdgeHeaders();
+
+        for (const x of targets) {
+          const lastTick = String((x as any).strategy?.correctScore?.lastTickAt ?? '').trim();
+          const lastTickTs = lastTick ? new Date(lastTick).getTime() : 0;
+          if (lastTickTs && Number.isFinite(lastTickTs) && Date.now() - lastTickTs < 9_000) continue;
+
+          const tickRes = await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/strategy/correctScore/tick`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({
+              matchId: x.matchId,
+              adminToken,
+              config: {
+                bankroll: bankrollForCorrectScore,
+                ...(Number.isFinite(profitTargetPct) ? { profitTargetPct } : {}),
+              },
+            }),
+          }).catch(() => null);
+
+          if (tickRes && !tickRes.ok) {
+            const t = await tickRes.text().catch(() => '');
+            console.warn('correctScore fast tick HTTP error', { matchId: x.matchId, status: tickRes.status, body: t ? t.slice(0, 300) : '' });
+          }
+        }
+
+        await loadQueue({ silent: true });
+      } finally {
+        isFastTickCorrectScoreRef.current = false;
+      }
+    };
+
+    void tickCorrectScoreFast();
+    const id = window.setInterval(() => {
+      void tickCorrectScoreFast();
+    }, 10_000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  useEffect(() => {
     itemsRef.current = items;
   }, [items]);
+
+  useEffect(() => {
+    marketNameByMarketIdRef.current = marketNameByMarketId;
+  }, [marketNameByMarketId]);
+
+  useEffect(() => {
+    const normalizeAgentLite = (agentRaw: unknown) => {
+      const s = String(agentRaw ?? '').trim().toLowerCase();
+      if (s === 'scalpingticks' || s === 'scalping_ticks') return 'scalpingTicks';
+      if (s === 'scalpinggoals' || s === 'scalping_goals') return 'scalpingGoals';
+      if (s === 'overgoalslimit' || s === 'over_goals_limit') return 'overGoalsLimit';
+      if (s === 'asianhandicap' || s === 'asian_handicap' || s === 'handicap_asiatico' || s === 'handicapasiatico') return 'asianHandicap';
+      if (s === 'favoriterescue' || s === 'favorite_rescue' || s === 'lay_favorito_perdendo') return 'favoriteRescue';
+      if (s === 'correctscore' || s === 'correct_score') return 'correctScore';
+      return s || null;
+    };
+
+    const extractBetIdsFromUnknown = (value: unknown) => {
+      const out: string[] = [];
+      const seen = new Set<unknown>();
+
+      const walk = (v: unknown, depth: number) => {
+        if (depth > 7) return;
+        if (!v) return;
+        if (seen.has(v)) return;
+
+        if (typeof v === 'string') {
+          const s = String(v).trim();
+          if (s && /^[0-9]+$/.test(s)) out.push(s);
+          return;
+        }
+
+        if (typeof v !== 'object') return;
+        seen.add(v);
+
+        if (Array.isArray(v)) {
+          for (const it of v) walk(it, depth + 1);
+          return;
+        }
+
+        for (const [k, raw] of Object.entries(v as any)) {
+          const key = String(k ?? '').trim();
+          const isBetIdKey = /(^betId$|betId$|BetId$|^betIds$)/.test(key);
+          if (isBetIdKey) {
+            if (Array.isArray(raw)) {
+              for (const it of raw) walk(it, depth + 1);
+            } else if (typeof raw === 'string') {
+              const s = String(raw ?? '').trim();
+              if (s) out.push(s);
+            }
+          } else {
+            walk(raw, depth + 1);
+          }
+        }
+      };
+
+      walk(value, 0);
+      return Array.from(new Set(out.map((s) => String(s).trim()).filter(Boolean)));
+    };
+
+    const extractMarketIdsFromItem = (x: QueueItem) => {
+      const out: string[] = [];
+      const base = String(x?.betfair?.marketId ?? '').trim();
+      if (base) out.push(base);
+      const cs = String(x?.betfair?.correctScore?.marketId ?? '').trim();
+      if (cs) out.push(cs);
+
+      const st = (x as any)?.strategy?.scalpingTicks ?? null;
+      const mOver = String(st?.marketOver?.marketId ?? '').trim();
+      const mUnder = String(st?.marketUnder?.marketId ?? '').trim();
+      if (mOver) out.push(mOver);
+      if (mUnder) out.push(mUnder);
+
+      const og = (x as any)?.strategy?.overGoalsLimit ?? null;
+      const ogMid = String(og?.entryMarketId ?? '').trim();
+      if (ogMid) out.push(ogMid);
+
+      const ah = (x as any)?.strategy?.asianHandicap ?? null;
+      const ahMid = String(ah?.entryMarketId ?? '').trim();
+      if (ahMid) out.push(ahMid);
+
+      return Array.from(new Set(out.filter(Boolean)));
+    };
+
+    const buildSyntheticErrorRows = (x: QueueItem, nowIso: string) => {
+      const out: BotOrderRow[] = [];
+      const agent = normalizeAgentLite(x.strategy?.agent);
+      const st = agent === 'scalpingTicks' ? (x as any)?.strategy?.scalpingTicks ?? null : null;
+      if (!st) return out;
+
+      const entryBetId = String(st?.entryBetId ?? '').trim() || null;
+      const entryErrCode = String(st?.lastEntryErrorCode ?? '').trim() || null;
+      const entryStatus = String(st?.lastEntryStatus ?? '').trim() || null;
+      const entryAt = String(st?.lastEntryAt ?? st?.enteredAt ?? x.updatedAt ?? '').trim() || null;
+      const entryMarketId = String(st?.entryMarketId ?? '').trim() || null;
+      const entryPrice = Number(st?.entryPrice);
+      const entryStake = Number(st?.stakeAbs);
+
+      if (!entryBetId && (entryErrCode || (entryStatus && /fail|error/i.test(entryStatus)))) {
+        out.push({
+          key: `err-entry-${x.matchId}-${entryAt || nowIso}`,
+          matchId: x.matchId,
+          agent,
+          betId: null,
+          customerRef: null,
+          placedAt: entryAt,
+          marketId: entryMarketId,
+          side: 'BACK',
+          price: Number.isFinite(entryPrice) ? entryPrice : null,
+          sizeMatched: null,
+          sizeRemaining: Number.isFinite(entryStake) ? entryStake : null,
+          averagePriceMatched: null,
+          status: entryStatus,
+          error: entryErrCode || 'Falha ao enviar entrada',
+          updatedAt: nowIso,
+        });
+      }
+
+      const tpBetId = String(st?.takeProfit?.betId ?? '').trim() || null;
+      const tpErr = String(st?.lastTpPlaceError ?? '').trim() || null;
+      const tpAt = String(st?.lastTpPlaceAt ?? '').trim() || null;
+      const tpMarketId = String(st?.entryMarketId ?? '').trim() || null;
+      const tpPrice = Number(st?.targetPrice ?? st?.takeProfit?.price);
+      const tpSize = Number(st?.takeProfit?.size);
+
+      if (!tpBetId && tpErr) {
+        out.push({
+          key: `err-tp-${x.matchId}-${tpAt || nowIso}`,
+          matchId: x.matchId,
+          agent,
+          betId: null,
+          customerRef: null,
+          placedAt: tpAt,
+          marketId: tpMarketId,
+          side: 'LAY',
+          price: Number.isFinite(tpPrice) ? tpPrice : null,
+          sizeMatched: null,
+          sizeRemaining: Number.isFinite(tpSize) ? tpSize : null,
+          averagePriceMatched: null,
+          status: 'FAILURE',
+          error: tpErr,
+          updatedAt: nowIso,
+        });
+      }
+
+      return out;
+    };
+
+    const fetchCurrentOrders = async (args: { betIds?: string[]; marketIds?: string[] }) => {
+      const cfg = loadApiConfig();
+      const adminToken = String(cfg?.automationAdminToken ?? '').trim();
+      if (!adminToken) return [] as any[];
+      const { projectId } = await import('/utils/supabase/info');
+      const headers = await getEdgeHeaders();
+
+      const res = await fetch(`https://${projectId}.supabase.co/functions/v1/betfair-core-server-1119702f/betfair/listCurrentOrders`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          adminToken,
+          ...(Array.isArray(args.betIds) && args.betIds.length > 0 ? { betIds: args.betIds } : {}),
+          ...(Array.isArray(args.marketIds) && args.marketIds.length > 0 ? { marketIds: args.marketIds } : {}),
+        }),
+      }).catch(() => null);
+      if (!res) return [] as any[];
+      const raw = await res.text().catch(() => '');
+      let data: any = null;
+      try {
+        data = raw ? JSON.parse(raw) : null;
+      } catch {
+        return [] as any[];
+      }
+      if (!res.ok || !data?.ok) return [] as any[];
+      const cur = Array.isArray(data?.result?.currentOrders) ? data.result.currentOrders : [];
+      return cur;
+    };
+
+    const fetchMarketNames = async (marketIds: string[]) => {
+      const mids = Array.from(new Set(marketIds.map((m) => String(m ?? '').trim()).filter(Boolean)));
+      if (mids.length === 0) return;
+
+      const now = Date.now();
+      if (now - lastMarketNamesFetchAtRef.current < 25_000) return;
+      lastMarketNamesFetchAtRef.current = now;
+
+      const { projectId } = await import('/utils/supabase/info');
+      const headers = await getEdgeHeaders();
+
+      const chunkSize = 40;
+      const found: Record<string, string> = {};
+
+      for (let i = 0; i < mids.length; i += chunkSize) {
+        const chunk = mids.slice(i, i + chunkSize);
+        const res = await fetch(`https://${projectId}.supabase.co/functions/v1/betfair-core-server-1119702f/betfair/rpc`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            method: 'SportsAPING/v1.0/listMarketCatalogue',
+            params: {
+              filter: { marketIds: chunk },
+              maxResults: String(Math.max(1, Math.min(200, chunk.length))),
+              sort: 'MAXIMUM_TRADED',
+              marketProjection: ['MARKET_DESCRIPTION'],
+            },
+          }),
+        }).catch(() => null);
+        if (!res) continue;
+        const raw = await res.text().catch(() => '');
+        let data: any = null;
+        try {
+          data = raw ? JSON.parse(raw) : null;
+        } catch {
+          continue;
+        }
+        if (!res.ok || !data?.ok) continue;
+        const rows = Array.isArray(data?.result) ? data.result : [];
+        for (const r of rows) {
+          const marketId = String(r?.marketId ?? '').trim();
+          const marketName = String(r?.marketName ?? '').trim();
+          if (!marketId || !marketName) continue;
+          found[marketId] = marketName;
+        }
+      }
+
+      const keys = Object.keys(found);
+      if (keys.length === 0) return;
+      setMarketNameByMarketId((prev) => ({ ...prev, ...found }));
+    };
+
+    const refreshBotOrders = async () => {
+      if (isRefreshingBotOrdersRef.current) return;
+      if (isTestModeRef.current) return;
+      const rows = itemsRef.current;
+      if (!Array.isArray(rows) || rows.length === 0) return;
+
+      const active = rows.filter((x) => x.status === 'running' || x.status === 'paused');
+      if (active.length === 0) return;
+
+      isRefreshingBotOrdersRef.current = true;
+      const nowIso = new Date().toISOString();
+      try {
+        const betIdToMeta = new Map<string, { matchId: string; agent: string | null }>();
+        const marketIdToMeta = new Map<string, { matchId: string; agent: string | null }>();
+        const betIds: string[] = [];
+        const marketIds: string[] = [];
+        const synthetic: BotOrderRow[] = [];
+
+        for (const x of active) {
+          const agent = normalizeAgentLite(x.strategy?.agent);
+          synthetic.push(...buildSyntheticErrorRows(x, nowIso));
+
+          const extractedBetIds = extractBetIdsFromUnknown(x?.strategy ?? null);
+          for (const bid of extractedBetIds) {
+            const s = String(bid ?? '').trim();
+            if (!s) continue;
+            if (!betIdToMeta.has(s)) betIdToMeta.set(s, { matchId: x.matchId, agent });
+            betIds.push(s);
+          }
+
+          const extractedMarketIds = extractMarketIdsFromItem(x);
+          for (const mid of extractedMarketIds) {
+            const s = String(mid ?? '').trim();
+            if (!s) continue;
+            if (!marketIdToMeta.has(s)) marketIdToMeta.set(s, { matchId: x.matchId, agent });
+            marketIds.push(s);
+          }
+        }
+
+        const uniqBetIds = Array.from(new Set(betIds)).slice(0, 220);
+        const uniqMarketIds = Array.from(new Set(marketIds)).slice(0, 40);
+        const known = marketNameByMarketIdRef.current ?? {};
+        const missingMarketIds = uniqMarketIds.filter((m) => !known[String(m ?? '').trim()]);
+
+        const chunk = (arr: string[], size: number) => {
+          const out: string[][] = [];
+          for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+          return out;
+        };
+
+        const currentOrders: any[] = [];
+        for (const part of chunk(uniqBetIds, 75)) {
+          const cur = await fetchCurrentOrders({ betIds: part });
+          currentOrders.push(...cur);
+        }
+        if (uniqMarketIds.length > 0) {
+          const cur = await fetchCurrentOrders({ marketIds: uniqMarketIds });
+          currentOrders.push(...cur);
+        }
+
+        if (missingMarketIds.length > 0) {
+          await fetchMarketNames(missingMarketIds);
+        }
+
+        setBotOrders((prev) => {
+          const byKey = new Map<string, BotOrderRow>();
+          for (const p of prev) byKey.set(p.key, p);
+
+          for (const o of currentOrders) {
+            const betId = String(o?.betId ?? '').trim() || null;
+            if (!betId) continue;
+            const marketId = String(o?.marketId ?? '').trim() || null;
+            const meta = (betId ? betIdToMeta.get(betId) : null) ?? (marketId ? marketIdToMeta.get(marketId) : null) ?? null;
+            const matchId = meta?.matchId ?? '';
+            const agent = meta?.agent ?? null;
+
+            const placedAt = String(o?.placedDate ?? o?.placedAt ?? '').trim() || null;
+            const customerRef = String(o?.customerOrderRef ?? o?.customerRef ?? '').trim() || null;
+            const sideRaw = String(o?.side ?? '').trim().toUpperCase();
+            const side = sideRaw === 'LAY' ? 'LAY' : sideRaw === 'BACK' ? 'BACK' : null;
+            const priceRaw = Number(o?.priceSize?.price ?? o?.price);
+            const price = Number.isFinite(priceRaw) && priceRaw > 1 ? priceRaw : null;
+            const sizeMatchedRaw = Number(o?.sizeMatched);
+            const sizeMatched = Number.isFinite(sizeMatchedRaw) ? sizeMatchedRaw : null;
+            const sizeRemainingRaw = Number(o?.sizeRemaining);
+            const sizeRemaining = Number.isFinite(sizeRemainingRaw) ? sizeRemainingRaw : null;
+            const avgPriceMatchedRaw = Number(o?.averagePriceMatched);
+            const averagePriceMatched = Number.isFinite(avgPriceMatchedRaw) ? avgPriceMatchedRaw : null;
+            const status = String(o?.status ?? '').trim().toUpperCase() || null;
+
+            const next: BotOrderRow = {
+              key: betId,
+              matchId: matchId || '—',
+              agent,
+              betId,
+              customerRef,
+              placedAt,
+              marketId,
+              side,
+              price,
+              sizeMatched,
+              sizeRemaining,
+              averagePriceMatched,
+              status,
+              error: null,
+              updatedAt: nowIso,
+            };
+            byKey.set(next.key, next);
+          }
+
+          for (const s of synthetic) byKey.set(s.key, s);
+
+          return Array.from(byKey.values())
+            .filter((r) => Boolean(r.matchId))
+            .sort((a, b) => String(b.placedAt ?? b.updatedAt).localeCompare(String(a.placedAt ?? a.updatedAt)));
+        });
+        setBotOrdersLastRefreshedAt(nowIso);
+      } finally {
+        isRefreshingBotOrdersRef.current = false;
+      }
+    };
+
+    void refreshBotOrders();
+    const id = window.setInterval(() => void refreshBotOrders(), 10_000);
+    return () => window.clearInterval(id);
+  }, []);
 
   const apiFootballLiveFixtureIds = useMemo(() => {
     return items
@@ -586,10 +1050,14 @@ export default function AutomationPage() {
       .slice(0, 12);
   }, [items]);
 
-  const apiFootballLiveBaseRaw = useApiFootballLiveUpdates(apiFootballLiveFixtureIds, { enabled: apiFootballLiveFixtureIds.length > 0 });
+  const apiFootballLiveBaseRaw = useApiFootballLiveUpdates(apiFootballLiveFixtureIds, {
+    enabled: apiFootballLiveFixtureIds.length > 0,
+    fast: true,
+  });
   const apiFootballLiveDetailedRaw = useApiFootballLiveUpdates(apiFootballLiveDetailedFixtureIds, {
     enabled: apiFootballLiveDetailedFixtureIds.length > 0,
     includeDetails: true,
+    fast: true,
   });
   const apiFootballLiveRaw = useMemo(() => {
     return { ...apiFootballLiveBaseRaw, ...apiFootballLiveDetailedRaw };
@@ -639,6 +1107,83 @@ export default function AutomationPage() {
     }
     return out;
   }, [apiFootballLiveRaw]);
+
+  useEffect(() => {
+    const mode = (() => {
+      try {
+        return String(localStorage.getItem('favorite_rescue_runner_mode_v1') ?? '').trim().toLowerCase();
+      } catch {
+        return '';
+      }
+    })();
+    if (mode !== 'layout') return;
+
+    const feedKey = 'favorite_rescue_feed_v1';
+    const nowIso = new Date().toISOString();
+    const isLiveStatusShort = (s: string) => {
+      const k = String(s ?? '').trim().toUpperCase();
+      if (!k) return false;
+      return ['1H', '2H', 'HT', 'ET', 'LIVE', 'IN_PLAY', 'INPLAY', 'PAUSED', 'BREAK', 'INT', 'SUSP', 'SUSPENDED'].includes(k);
+    };
+    const isFinishedStatusShort = (s: string) => {
+      const k = String(s ?? '').trim().toUpperCase();
+      if (!k) return false;
+      return ['FT', 'AET', 'PEN', 'AWD', 'CANC', 'PST', 'ABD'].includes(k);
+    };
+
+    const itemsOut: Record<string, any> = {};
+    for (const x of items) {
+      const matchId = String(x.matchId ?? '').trim();
+      if (!matchId) continue;
+      if (x.status === 'stopped') continue;
+
+      const apiLive = apiFootballLiveByMatchId[matchId] ?? null;
+      const statusShort = String(apiLive?.statusShort ?? x.live?.statusShort ?? '').trim() || null;
+
+      const status =
+        (statusShort && isFinishedStatusShort(statusShort)) || String(x.betfair?.marketStatus ?? '').toUpperCase() === 'CLOSED'
+          ? 'finished'
+          : (statusShort && isLiveStatusShort(statusShort)) || Boolean(x.betfair?.inPlay) || typeof apiLive?.elapsed === 'number' || typeof x.live?.elapsed === 'number'
+            ? 'live'
+            : 'scheduled';
+
+      const scoreHome =
+        typeof apiLive?.goalsHome === 'number' ? apiLive.goalsHome : typeof x.scoreHome === 'number' ? x.scoreHome : null;
+      const scoreAway =
+        typeof apiLive?.goalsAway === 'number' ? apiLive.goalsAway : typeof x.scoreAway === 'number' ? x.scoreAway : null;
+
+      const liveElapsed =
+        typeof apiLive?.elapsed === 'number' ? apiLive.elapsed : typeof x.live?.elapsed === 'number' ? x.live.elapsed : null;
+
+      itemsOut[matchId] = {
+        updatedAt: nowIso,
+        status,
+        utcDate: typeof x.utcDate === 'string' ? x.utcDate : null,
+        homeTeam: typeof x.homeTeam === 'string' ? x.homeTeam : null,
+        awayTeam: typeof x.awayTeam === 'string' ? x.awayTeam : null,
+        liveElapsed,
+        liveStatusShort: statusShort,
+        scoreHome,
+        scoreAway,
+        betfair: x.betfair ?? null,
+      };
+    }
+
+    if (Object.keys(itemsOut).length === 0) return;
+
+    try {
+      const raw = localStorage.getItem(feedKey);
+      const parsed = raw ? (JSON.parse(raw) as any) : null;
+      const prevItems = parsed?.version === 1 && parsed?.items && typeof parsed.items === 'object' ? parsed.items : {};
+      const nextItems = { ...prevItems, ...itemsOut };
+      const prunedEntries = Object.entries(nextItems)
+        .map(([id, v]) => [id, v] as const)
+        .filter(([, v]) => v && typeof v === 'object')
+        .slice(0, 1000);
+      localStorage.setItem(feedKey, JSON.stringify({ version: 1, updatedAt: nowIso, items: Object.fromEntries(prunedEntries) }));
+      window.dispatchEvent(new Event('favoriteRescueFeedChanged'));
+    } catch {}
+  }, [apiFootballLiveByMatchId, items]);
 
   useEffect(() => {
     const expandedIds = Object.keys(expandedById).filter((id) => Boolean(expandedById[id]));
@@ -864,8 +1409,15 @@ export default function AutomationPage() {
       return true;
     };
 
-    return sorted.filter(byView);
+    return sorted.filter(byView).filter((x) => !isFinished(x));
   }, [sorted, view, now]);
+
+  const finishedItems = useMemo(() => {
+    return sorted
+      .filter((x) => isFinished(x))
+      .slice()
+      .sort((a, b) => String(b.updatedAt ?? b.createdAt ?? '').localeCompare(String(a.updatedAt ?? a.createdAt ?? '')));
+  }, [sorted]);
 
   const grouped = useMemo(() => {
     const groups = new Map<string, QueueItem[]>();
@@ -1047,22 +1599,42 @@ export default function AutomationPage() {
         // #endregion
 
         const nowTs = Date.now();
+        const csLim = (robotLimits as any)?.correctScore && typeof (robotLimits as any).correctScore === 'object' ? (robotLimits as any).correctScore : {};
+        const csMaxSelections = Number(csLim?.maxSelections);
+        const csEntryScoresCsv = String(csLim?.entryScoresCsv ?? '0-0,0-1,1-0,1-1');
+        const csMinMarketMatched = Number(csLim?.minMarketMatched);
+
         for (const x of targets) {
           const lastExec = String(x.strategy?.correctScore?.lastExecutionAt ?? '').trim();
-          const lastExecTs = lastExec ? new Date(lastExec).getTime() : 0;
-          if (lastExecTs && Number.isFinite(lastExecTs) && nowTs - lastExecTs < 15_000) continue;
-          const mode = String(x.strategy?.correctScore?.lastPlan?.mode ?? '').trim();
-          if (mode === 'skip') continue;
-          const hasInstructions = Array.isArray(x.strategy?.correctScore?.lastPlan?.instructions) && x.strategy?.correctScore?.lastPlan?.instructions.length > 0;
-          if (!hasInstructions) continue;
+          if (lastExec) continue;
+          const apiLive = apiFootballLiveByMatchId[String(x.matchId)] ?? null;
 
           // #region debug-point D:correctScore-exec
-          dbg('D', 'correctScore execute call', { matchId: x.matchId, mode });
+          dbg('D', 'correctScore execute call', { matchId: x.matchId, planType: 'coverage' });
           // #endregion
           const execRes = await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/strategy/correctScore/execute`, {
             method: 'POST',
             headers,
-            body: JSON.stringify({ matchId: x.matchId, dryRun: false, adminToken, config: { bankroll: bankrollForCorrectScore } }),
+            body: JSON.stringify({
+              matchId: x.matchId,
+              dryRun: false,
+              adminToken,
+              live: apiLive
+                ? {
+                    fetchedAt: apiLive.fetchedAt,
+                    elapsed: apiLive.elapsed,
+                    scoreHome: apiLive.goalsHome,
+                    scoreAway: apiLive.goalsAway,
+                  }
+                : null,
+              config: { bankroll: bankrollForCorrectScore },
+              planConfig: {
+                planType: 'coverage',
+                maxSelections: Number.isFinite(csMaxSelections) ? csMaxSelections : undefined,
+                entryScoresCsv: csEntryScoresCsv,
+                minMarketMatched: Number.isFinite(csMinMarketMatched) ? csMinMarketMatched : undefined,
+              },
+            }),
           }).catch((e) => {
             // #region debug-point E:correctScore-exec-error
             dbg('E', 'correctScore execute fetch error', { matchId: x.matchId, error: e instanceof Error ? e.message : String(e) });
@@ -1248,14 +1820,28 @@ export default function AutomationPage() {
           const lastTick = String((x as any).strategy?.scalpingTicks?.lastTickAt ?? '').trim();
           const lastTickTs = lastTick ? new Date(lastTick).getTime() : 0;
           if (lastTickTs && Number.isFinite(lastTickTs) && Date.now() - lastTickTs < 5_000) continue;
+          const live = apiFootballLiveByMatchId[String(x.matchId)] ?? null;
           const lim = (robotLimits as any)?.scalpingTicks && typeof (robotLimits as any).scalpingTicks === 'object' ? (robotLimits as any).scalpingTicks : {};
           const targetTicks = Number(lim?.targetTicks);
           const entryOffsetTicks = Number(lim?.entryOffsetTicks);
+          const entryMaxWaitSeconds = Number((lim as any)?.entryMaxWaitSeconds);
           const maxSpreadTicks = Number(lim?.maxSpreadTicks);
           const minSecondsBetweenCycles = Number(lim?.minSecondsBetweenCycles);
           const stakePct = Number(lim?.stakePct);
           const maxCycles = Number(lim?.maxCycles);
           const secondsToWaitMatch = Number(lim?.secondsToWaitMatch);
+          const invertVolumePct = Number(lim?.invertVolumePct);
+          const momentOverThreshold = Number(lim?.momentOverThreshold);
+          const momentOverThresholdLate = Number(lim?.momentOverThresholdLate);
+          const momentOverThresholdOffDelta = Number(lim?.momentOverThresholdOffDelta);
+          const momentWindowMinSec = Number(lim?.momentWindowMinSec);
+          const momentWindowMaxSec = Number(lim?.momentWindowMaxSec);
+          const minMarketMatched = Number(lim?.minMarketMatched);
+          const minRunnerMatched = Number(lim?.minRunnerMatched);
+          const afterGoalWaitSeconds = Number(lim?.afterGoalWaitSeconds);
+          const recoveryEnabled = typeof (lim as any)?.recoveryEnabled === 'boolean' ? Boolean((lim as any).recoveryEnabled) : null;
+          const recoveryIncreasePct = Number((lim as any)?.recoveryIncreasePct);
+          const recoveryMaxStakeAbs = Number((lim as any)?.recoveryMaxStakeAbs);
           // #region debug-point D:scalpingTicks-tick-call
           dbg('D', 'scalpingTicks tick call', { matchId: x.matchId });
           // #endregion
@@ -1265,15 +1851,36 @@ export default function AutomationPage() {
             body: JSON.stringify({
               matchId: x.matchId,
               adminToken,
+              live: live
+                ? {
+                    fetchedAt: live.fetchedAt,
+                    elapsed: live.elapsed,
+                    scoreHome: live.goalsHome,
+                    scoreAway: live.goalsAway,
+                  }
+                : null,
               config: {
                 bankroll: bankrollForOverUnder,
                 ...(Number.isFinite(targetTicks) ? { targetTicks } : {}),
                 ...(Number.isFinite(entryOffsetTicks) ? { entryOffsetTicks } : {}),
+                ...(Number.isFinite(entryMaxWaitSeconds) ? { entryMaxWaitSeconds } : {}),
                 ...(Number.isFinite(maxSpreadTicks) ? { maxSpreadTicks } : {}),
                 ...(Number.isFinite(minSecondsBetweenCycles) ? { minSecondsBetweenCycles } : {}),
                 ...(Number.isFinite(stakePct) ? { stakePct } : {}),
                 ...(Number.isFinite(maxCycles) ? { maxCycles } : {}),
                 ...(Number.isFinite(secondsToWaitMatch) ? { secondsToWaitMatch } : {}),
+                ...(Number.isFinite(invertVolumePct) ? { invertVolumePct } : {}),
+                ...(Number.isFinite(momentOverThreshold) ? { momentOverThreshold } : {}),
+                ...(Number.isFinite(momentOverThresholdLate) ? { momentOverThresholdLate } : {}),
+                ...(Number.isFinite(momentOverThresholdOffDelta) ? { momentOverThresholdOffDelta } : {}),
+                ...(Number.isFinite(momentWindowMinSec) ? { momentWindowMinSec } : {}),
+                ...(Number.isFinite(momentWindowMaxSec) ? { momentWindowMaxSec } : {}),
+                ...(Number.isFinite(minMarketMatched) ? { minMarketMatched } : {}),
+                ...(Number.isFinite(minRunnerMatched) ? { minRunnerMatched } : {}),
+                ...(Number.isFinite(afterGoalWaitSeconds) ? { afterGoalWaitSeconds } : {}),
+                ...(recoveryEnabled != null ? { recoveryEnabled } : {}),
+                ...(Number.isFinite(recoveryIncreasePct) ? { recoveryIncreasePct } : {}),
+                ...(Number.isFinite(recoveryMaxStakeAbs) ? { recoveryMaxStakeAbs } : {}),
               },
             }),
           }).catch((e) => {
@@ -1288,6 +1895,9 @@ export default function AutomationPage() {
             try {
               j = t ? JSON.parse(t) : null;
             } catch {}
+            if (!tickRes.ok) {
+              console.warn('scalpingTicks tick HTTP error', { matchId: x.matchId, status: tickRes.status, body: t ? t.slice(0, 600) : '' });
+            }
             // #region debug-point D:scalpingTicks-tick-response
             dbg('D', 'scalpingTicks tick response', {
               matchId: x.matchId,
@@ -1418,6 +2028,11 @@ export default function AutomationPage() {
           const entryOffsetTicks = Number(lim?.entryOffsetTicks);
           const targetTicks = Number(lim?.targetTicks);
           const maxEntries = Number(lim?.maxEntries);
+          const maxSpreadTicks = Number(lim?.maxSpreadTicks);
+          const minMarketMatched = Number(lim?.minMarketMatched);
+          const minRunnerMatched = Number(lim?.minRunnerMatched);
+          const secondsToWaitMatch = Number(lim?.secondsToWaitMatch);
+          const entryMaxWaitSeconds = Number(lim?.entryMaxWaitSeconds);
           // #region debug-point D:asianHandicap-tick-call
           dbg('D', 'asianHandicap tick call', { matchId: x.matchId, hasLive: Boolean(live) });
           // #endregion
@@ -1453,6 +2068,11 @@ export default function AutomationPage() {
                 ...(Number.isFinite(entryOffsetTicks) ? { entryOffsetTicks } : {}),
                 ...(Number.isFinite(targetTicks) ? { targetTicks } : {}),
                 ...(Number.isFinite(maxEntries) ? { maxEntries } : {}),
+                ...(Number.isFinite(maxSpreadTicks) ? { maxSpreadTicks } : {}),
+                ...(Number.isFinite(minMarketMatched) ? { minMarketMatched } : {}),
+                ...(Number.isFinite(minRunnerMatched) ? { minRunnerMatched } : {}),
+                ...(Number.isFinite(secondsToWaitMatch) ? { secondsToWaitMatch } : {}),
+                ...(Number.isFinite(entryMaxWaitSeconds) ? { entryMaxWaitSeconds } : {}),
               },
             }),
           }).catch((e) => {
@@ -1842,10 +2462,7 @@ export default function AutomationPage() {
                   ? 'favoriteRescue'
               : 'correctScore';
     setRobotType(agent);
-    const currentPlanType = String(x.strategy?.correctScore?.planType ?? '').trim().toLowerCase() === 'ladder_volume'
-      ? 'ladder_volume'
-      : 'coverage';
-    setCsPlanType(currentPlanType);
+    setCsPlanType('coverage');
     setMarketsOpen(true);
   };
 
@@ -1889,7 +2506,7 @@ export default function AutomationPage() {
       if (robotType === 'correctScore') {
         nextStrategy.correctScore = {
           ...(cur.strategy?.correctScore ?? {}),
-          planType: csPlanType === 'ladder_volume' ? 'ladder_volume' : 'coverage',
+          planType: 'coverage',
         };
       }
       const marketsToSave = robotType === 'correctScore' ? normalizeMarketsCorrectScoreOnly(marketsDraft) : marketsDraft;
@@ -1946,7 +2563,7 @@ export default function AutomationPage() {
     const { projectId } = await import('/utils/supabase/info');
     const headers = await getEdgeHeaders();
     const res = await fetch(
-      `https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/strategy/correctScore/openOrdersSummary`,
+      `https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/strategy/openOrdersSummary`,
       {
         method: 'POST',
         headers,
@@ -2020,7 +2637,7 @@ export default function AutomationPage() {
     if (!adminToken) return false;
     const { projectId } = await import('/utils/supabase/info');
     const headers = await getEdgeHeaders();
-    const res = await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/strategy/correctScore/cashout`, {
+    const res = await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/strategy/cashoutHedge`, {
       method: 'POST',
       headers,
       body: JSON.stringify({ matchId, adminToken }),
@@ -2031,7 +2648,10 @@ export default function AutomationPage() {
     return true;
   };
 
-  const executeCorrectScoreOnce = async (matchId: string, config?: { bankroll?: number }) => {
+  const executeCorrectScoreOnce = async (
+    matchId: string,
+    params?: { bankroll?: number; maxSelections?: number; entryScoresCsv?: string; live?: any },
+  ) => {
     const adminToken = getAdminTokenOrToast();
     if (!adminToken) return false;
     const { projectId } = await import('/utils/supabase/info');
@@ -2039,7 +2659,18 @@ export default function AutomationPage() {
     const res = await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/strategy/correctScore/execute`, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ matchId, dryRun: false, adminToken, config: config && typeof config === 'object' ? config : {} }),
+      body: JSON.stringify({
+        matchId,
+        dryRun: false,
+        adminToken,
+        live: params?.live ?? null,
+        config: { bankroll: Number(params?.bankroll) },
+        planConfig: {
+          planType: 'coverage',
+          maxSelections: params?.maxSelections,
+          entryScoresCsv: params?.entryScoresCsv,
+        },
+      }),
     });
     const raw = await res.text().catch(() => '');
     const data = raw ? JSON.parse(raw) : null;
@@ -2126,11 +2757,13 @@ export default function AutomationPage() {
       profitTargetPct?: number;
       stakePct?: number;
       entryOffsetTicks?: number;
+      entryMaxWaitSeconds?: number;
       targetTicks?: number;
       maxEntries?: number;
       maxSpreadTicks?: number;
       minMarketMatched?: number;
       minRunnerMatched?: number;
+      secondsToWaitMatch?: number;
       mode?: 'scalp' | 'swing' | 'hybrid';
     },
   ) => {
@@ -2162,11 +2795,24 @@ export default function AutomationPage() {
       bankroll: number;
       targetTicks?: number;
       entryOffsetTicks?: number;
+      entryMaxWaitSeconds?: number;
       maxSpreadTicks?: number;
       minSecondsBetweenCycles?: number;
       stakePct?: number;
       maxCycles?: number;
       secondsToWaitMatch?: number;
+      invertVolumePct?: number;
+      momentOverThreshold?: number;
+      momentOverThresholdLate?: number;
+      momentOverThresholdOffDelta?: number;
+      momentWindowMinSec?: number;
+      momentWindowMaxSec?: number;
+      minMarketMatched?: number;
+      minRunnerMatched?: number;
+      afterGoalWaitSeconds?: number;
+      recoveryEnabled?: boolean;
+      recoveryIncreasePct?: number;
+      recoveryMaxStakeAbs?: number;
     },
   ) => {
     const adminToken = getAdminTokenOrToast();
@@ -2319,11 +2965,13 @@ export default function AutomationPage() {
             profitTargetPct: Number(lim?.profitTargetPct),
             stakePct: Number(lim?.stakePct),
             entryOffsetTicks: Number(lim?.entryOffsetTicks),
+            entryMaxWaitSeconds: Number(lim?.entryMaxWaitSeconds),
             targetTicks: Number(lim?.targetTicks),
             maxEntries: Number(lim?.maxEntries),
             maxSpreadTicks: Number(lim?.maxSpreadTicks),
             minMarketMatched: Number(lim?.minMarketMatched),
             minRunnerMatched: Number(lim?.minRunnerMatched),
+            secondsToWaitMatch: Number(lim?.secondsToWaitMatch),
             ...(mode ? { mode } : {}),
           });
         } else if (agent === 'scalpingTicks') {
@@ -2332,11 +2980,24 @@ export default function AutomationPage() {
             bankroll,
             targetTicks: Number(lim?.targetTicks),
             entryOffsetTicks: Number(lim?.entryOffsetTicks),
+            entryMaxWaitSeconds: Number((lim as any)?.entryMaxWaitSeconds),
             maxSpreadTicks: Number(lim?.maxSpreadTicks),
             minSecondsBetweenCycles: Number(lim?.minSecondsBetweenCycles),
             stakePct: Number(lim?.stakePct),
             maxCycles: Number(lim?.maxCycles),
             secondsToWaitMatch: Number(lim?.secondsToWaitMatch),
+            invertVolumePct: Number(lim?.invertVolumePct),
+            momentOverThreshold: Number(lim?.momentOverThreshold),
+            momentOverThresholdLate: Number(lim?.momentOverThresholdLate),
+            momentOverThresholdOffDelta: Number(lim?.momentOverThresholdOffDelta),
+            momentWindowMinSec: Number(lim?.momentWindowMinSec),
+            momentWindowMaxSec: Number(lim?.momentWindowMaxSec),
+            minMarketMatched: Number(lim?.minMarketMatched),
+            minRunnerMatched: Number(lim?.minRunnerMatched),
+            afterGoalWaitSeconds: Number(lim?.afterGoalWaitSeconds),
+            recoveryEnabled: typeof (lim as any)?.recoveryEnabled === 'boolean' ? Boolean((lim as any).recoveryEnabled) : undefined,
+            recoveryIncreasePct: Number((lim as any)?.recoveryIncreasePct),
+            recoveryMaxStakeAbs: Number((lim as any)?.recoveryMaxStakeAbs),
           });
         } else {
           const lim = (robotLimits as any)?.scalpingGoals && typeof (robotLimits as any).scalpingGoals === 'object' ? (robotLimits as any).scalpingGoals : {};
@@ -2361,7 +3022,22 @@ export default function AutomationPage() {
           Number.isFinite(bankrollTotal) && bankrollTotal > 0 && Number.isFinite(correctScorePct) && correctScorePct > 0
             ? Math.round(((bankrollTotal * correctScorePct) / 100) * 100) / 100
             : 50;
-        await executeCorrectScoreOnce(x.matchId, { bankroll });
+        const robotLimits = (cfg?.betfairRobotLimits && typeof cfg.betfairRobotLimits === 'object') ? cfg.betfairRobotLimits : {};
+        const csLim = (robotLimits as any)?.correctScore && typeof (robotLimits as any).correctScore === 'object' ? (robotLimits as any).correctScore : {};
+        const apiLive = apiFootballLiveByMatchId[String(x.matchId)] ?? null;
+        await executeCorrectScoreOnce(x.matchId, {
+          bankroll,
+          maxSelections: Number(csLim?.maxSelections),
+          entryScoresCsv: String(csLim?.entryScoresCsv ?? '0-0,0-1,1-0,1-1'),
+          live: apiLive
+            ? {
+                fetchedAt: apiLive.fetchedAt,
+                elapsed: apiLive.elapsed,
+                scoreHome: apiLive.goalsHome,
+                scoreAway: apiLive.goalsAway,
+              }
+            : null,
+        });
       }
       await loadQueue({ silent: true });
     } catch (e) {
@@ -2428,8 +3104,105 @@ export default function AutomationPage() {
   }, []);
 
   useEffect(() => {
+    const tickScalpingTicksFast = async () => {
+      if (isFastTickScalpingTicksRef.current) return;
+      if (isTestModeRef.current) return;
+      isFastTickScalpingTicksRef.current = true;
+      try {
+        const cfg = loadApiConfig();
+        const adminToken = String(cfg?.automationAdminToken ?? '').trim();
+        if (!adminToken) return;
+        const bankrollTotal = Number(cfg?.betfairBankroll ?? 0);
+        const marketPercents = (cfg?.betfairMarketPercents && typeof cfg.betfairMarketPercents === 'object') ? cfg.betfairMarketPercents : {};
+        const overUnderPct = Number(marketPercents.overUnder ?? 10);
+        const bankrollForOverUnder =
+          Number.isFinite(bankrollTotal) && bankrollTotal > 0 && Number.isFinite(overUnderPct) && overUnderPct > 0
+            ? Math.round(((bankrollTotal * overUnderPct) / 100) * 100) / 100
+            : 50;
+        const robotLimits = (cfg?.betfairRobotLimits && typeof cfg.betfairRobotLimits === 'object') ? cfg.betfairRobotLimits : {};
+        const lim = (robotLimits as any)?.scalpingTicks && typeof (robotLimits as any).scalpingTicks === 'object' ? (robotLimits as any).scalpingTicks : {};
+
+        const targets = itemsRef.current
+          .filter((x) => x.status === 'running')
+          .filter((x) => normalizeAgent(x.strategy?.agent) === 'scalpingTicks')
+          .slice(0, 6);
+        if (targets.length === 0) return;
+
+        const { projectId } = await import('/utils/supabase/info');
+        const headers = await getEdgeHeaders();
+
+        for (const x of targets) {
+          const lastTick = String((x as any).strategy?.scalpingTicks?.lastTickAt ?? '').trim();
+          const lastTickTs = lastTick ? new Date(lastTick).getTime() : 0;
+          if (lastTickTs && Number.isFinite(lastTickTs) && Date.now() - lastTickTs < 9_000) continue;
+
+          const live = (apiFootballLiveRef.current as any)?.[String(x.matchId)] ?? null;
+          const tickRes = await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/strategy/scalpingTicks/tick`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({
+              matchId: x.matchId,
+              adminToken,
+              live: live
+                ? {
+                    fetchedAt: live.fetchedAt,
+                    elapsed: live.elapsed,
+                    scoreHome: live.goalsHome,
+                    scoreAway: live.goalsAway,
+                  }
+                : null,
+              config: {
+                bankroll: bankrollForOverUnder,
+                ...(Number.isFinite(Number(lim?.targetTicks)) ? { targetTicks: Number(lim?.targetTicks) } : {}),
+                ...(Number.isFinite(Number(lim?.entryOffsetTicks)) ? { entryOffsetTicks: Number(lim?.entryOffsetTicks) } : {}),
+                ...(Number.isFinite(Number((lim as any)?.entryMaxWaitSeconds)) ? { entryMaxWaitSeconds: Number((lim as any).entryMaxWaitSeconds) } : {}),
+                ...(Number.isFinite(Number(lim?.maxSpreadTicks)) ? { maxSpreadTicks: Number(lim?.maxSpreadTicks) } : {}),
+                ...(Number.isFinite(Number(lim?.minSecondsBetweenCycles)) ? { minSecondsBetweenCycles: Number(lim?.minSecondsBetweenCycles) } : {}),
+                ...(Number.isFinite(Number(lim?.stakePct)) ? { stakePct: Number(lim?.stakePct) } : {}),
+                ...(Number.isFinite(Number(lim?.maxCycles)) ? { maxCycles: Number(lim?.maxCycles) } : {}),
+                ...(Number.isFinite(Number(lim?.secondsToWaitMatch)) ? { secondsToWaitMatch: Number(lim?.secondsToWaitMatch) } : {}),
+                ...(Number.isFinite(Number(lim?.invertVolumePct)) ? { invertVolumePct: Number(lim?.invertVolumePct) } : {}),
+                ...(Number.isFinite(Number(lim?.momentOverThreshold)) ? { momentOverThreshold: Number(lim?.momentOverThreshold) } : {}),
+                ...(Number.isFinite(Number(lim?.momentOverThresholdLate)) ? { momentOverThresholdLate: Number(lim?.momentOverThresholdLate) } : {}),
+                ...(Number.isFinite(Number(lim?.momentOverThresholdOffDelta)) ? { momentOverThresholdOffDelta: Number(lim?.momentOverThresholdOffDelta) } : {}),
+                ...(Number.isFinite(Number(lim?.momentWindowMinSec)) ? { momentWindowMinSec: Number(lim?.momentWindowMinSec) } : {}),
+                ...(Number.isFinite(Number(lim?.momentWindowMaxSec)) ? { momentWindowMaxSec: Number(lim?.momentWindowMaxSec) } : {}),
+                ...(Number.isFinite(Number(lim?.minMarketMatched)) ? { minMarketMatched: Number(lim?.minMarketMatched) } : {}),
+                ...(Number.isFinite(Number(lim?.minRunnerMatched)) ? { minRunnerMatched: Number(lim?.minRunnerMatched) } : {}),
+                ...(Number.isFinite(Number(lim?.afterGoalWaitSeconds)) ? { afterGoalWaitSeconds: Number(lim?.afterGoalWaitSeconds) } : {}),
+                ...(typeof (lim as any)?.recoveryEnabled === 'boolean' ? { recoveryEnabled: Boolean((lim as any).recoveryEnabled) } : {}),
+                ...(Number.isFinite(Number((lim as any)?.recoveryIncreasePct)) ? { recoveryIncreasePct: Number((lim as any).recoveryIncreasePct) } : {}),
+                ...(Number.isFinite(Number((lim as any)?.recoveryMaxStakeAbs)) ? { recoveryMaxStakeAbs: Number((lim as any).recoveryMaxStakeAbs) } : {}),
+              },
+            }),
+          }).catch(() => null);
+
+          if (tickRes && !tickRes.ok) {
+            const t = await tickRes.text().catch(() => '');
+            console.warn('scalpingTicks fast tick HTTP error', { matchId: x.matchId, status: tickRes.status, body: t ? t.slice(0, 300) : '' });
+          }
+        }
+
+        await loadQueue({ silent: true });
+      } finally {
+        isFastTickScalpingTicksRef.current = false;
+      }
+    };
+
+    void tickScalpingTicksFast();
+    const id = window.setInterval(() => {
+      void tickScalpingTicksFast();
+    }, 10_000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  useEffect(() => {
     tradePreviewRef.current = tradePreviewByMatchId;
   }, [tradePreviewByMatchId]);
+
+  useEffect(() => {
+    apiFootballLiveRef.current = apiFootballLiveByMatchId as any;
+  }, [apiFootballLiveByMatchId]);
 
   useEffect(() => {
     const tick = async () => {
@@ -2515,24 +3288,8 @@ export default function AutomationPage() {
 
               {robotType === 'correctScore' ? (
                 <div className="mt-4">
-                  <div className="text-sm font-semibold text-gray-900">Plano (Correct Score)</div>
-                  <div className="mt-1 text-xs text-gray-600">Escolha como a automação vai planejar entradas no mercado de Placar Correto.</div>
-                  <div className="mt-3">
-                    <Label htmlFor="csPlanType">Estratégia</Label>
-                    <select
-                      id="csPlanType"
-                      value={csPlanType}
-                      onChange={(e) => {
-                        if (!marketsItemId) return;
-                        const v = e.target.value === 'ladder_volume' ? 'ladder_volume' : 'coverage';
-                        setCsPlanType(v);
-                      }}
-                      className="mt-2 h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-                    >
-                      <option value="coverage">Dutching (Cobertura)</option>
-                      <option value="ladder_volume">Escada por Volume (Scalping)</option>
-                    </select>
-                  </div>
+                  <div className="text-sm font-semibold text-gray-900">Estratégia (Correct Score)</div>
+                  <div className="mt-1 text-xs text-gray-600">Modo único: Dutching (Cobertura).</div>
                 </div>
               ) : robotType === 'scalpingGoals' ? (
                 <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
@@ -2592,8 +3349,6 @@ export default function AutomationPage() {
           {(() => {
             const x = startConfirmItem;
             const agent = normalizeAgent(x?.strategy?.agent);
-            const planType = String(x?.strategy?.correctScore?.planType ?? 'coverage');
-            const csStrategyLabel = planType === 'ladder_volume' ? 'Escada por Volume (Scalping)' : 'Dutching (Cobertura)';
             const title = x ? `${x.homeTeam ?? '—'} x ${x.awayTeam ?? '—'}` : null;
             return (
               <>
@@ -2624,7 +3379,7 @@ export default function AutomationPage() {
                     </div>
                   ) : (
                     <div className="text-sm text-gray-700">
-                      Estratégia (Correct Score): <span className="font-semibold">{csStrategyLabel}</span>
+                      Estratégia (Correct Score): <span className="font-semibold">Dutching (Cobertura)</span>
                     </div>
                   )}
                   <div className="text-xs text-gray-600">
@@ -2743,7 +3498,7 @@ export default function AutomationPage() {
           <DialogHeader>
             <DialogTitle>Ordens abertas detectadas</DialogTitle>
             <DialogDescription>
-              Há {guardOrdersCount} ordem(ns) aberta(s) e {guardMatchedCount} ordem(ns) executada(s) no mercado de Placar Correto. Confirme a ação.
+            Há {guardOrdersCount} ordem(ns) aberta(s) e {guardMatchedCount} ordem(ns) executada(s) vinculadas ao robô desta partida. Confirme a ação.
             </DialogDescription>
           </DialogHeader>
 
@@ -2799,28 +3554,27 @@ export default function AutomationPage() {
                     }
                   }}
                 >
-                  Cancelar ordens e pausar
+                  Cashout (hedge) e pausar
                 </Button>
               </>
             ) : guardAction === 'remove' ? (
               <>
                 <Button
                   variant="outline"
-                  disabled={guardIsBusy || !guardMatchId || guardMatchedCount > 0}
+                  disabled={guardIsBusy || !guardMatchId}
                   onClick={async () => {
                     if (!guardMatchId) return;
                     setGuardIsBusy(true);
                     try {
-                      await cancelOpenOrdersCorrectScore(guardMatchId);
                       await removeItem(guardMatchId);
                       setGuardOpen(false);
-                      toast.success('Ordens canceladas e item removido');
+                      toast.success('Item removido');
                     } finally {
                       setGuardIsBusy(false);
                     }
                   }}
                 >
-                  Cancelar ordens e remover
+                  Remover mesmo assim
                 </Button>
                 <Button
                   variant="destructive"
@@ -2841,7 +3595,7 @@ export default function AutomationPage() {
                     }
                   }}
                 >
-                  Cashout e remover
+                  Cashout (hedge) e remover
                 </Button>
               </>
             ) : null}
@@ -3381,7 +4135,33 @@ export default function AutomationPage() {
                                 const expanded = Boolean(expandedById[x.matchId]);
                                 const homeName = x.homeTeam ?? '—';
                                 const awayName = x.awayTeam ?? '—';
-                                const preview = tradePreviewByMatchId[x.matchId] ?? null;
+                                const computedScalpingTicksPreview = (() => {
+                                  if (agent !== 'scalpingTicks') return null;
+                                  const st = (x as any)?.strategy?.scalpingTicks ?? null;
+                                  const phase = String(st?.phase ?? '').trim().toLowerCase();
+                                  if (!phase || !phase.includes('entered')) return null;
+                                  const entryMatchedSize = Number(st?.entryMatchedSize);
+                                  if (!(Number.isFinite(entryMatchedSize) && entryMatchedSize > 0)) return null;
+                                  const stakeAbs = Number(st?.stakeAbs);
+                                  const entryPrice = Number(st?.entryPrice);
+                                  const side = String(st?.side ?? '').trim().toLowerCase() === 'over' ? 'over' : 'under';
+                                  const market = side === 'over' ? st?.marketOver : st?.marketUnder;
+                                  const layPrice = Number(side === 'over' ? market?.odds?.over?.lay : market?.odds?.under?.lay);
+                                  if (!(Number.isFinite(stakeAbs) && stakeAbs > 0)) return null;
+                                  if (!(Number.isFinite(entryPrice) && entryPrice > 1)) return null;
+                                  if (!(Number.isFinite(layPrice) && layPrice > 1)) return null;
+                                  const cashOut = Math.round(((entryPrice * stakeAbs) / layPrice) * 100) / 100;
+                                  const risk = Math.round(stakeAbs * 100) / 100;
+                                  const profit = Math.round((cashOut - risk) * 100) / 100;
+                                  return {
+                                    risk,
+                                    cashOut,
+                                    profit,
+                                    fetchedAt: String(st?.lastTickAt ?? x.updatedAt ?? new Date().toISOString()),
+                                  };
+                                })();
+
+                                const preview = computedScalpingTicksPreview ?? tradePreviewByMatchId[x.matchId] ?? null;
                                 const showPreview = x.status === 'running' && preview && (typeof preview.profit === 'number' || typeof preview.risk === 'number');
                                 const money = (v: number | null) => (typeof v === 'number' && Number.isFinite(v) ? formatMoneyBR(v) : '—');
                                 const profitValue = typeof preview?.profit === 'number' && Number.isFinite(preview.profit) ? preview.profit : null;
@@ -3417,8 +4197,11 @@ export default function AutomationPage() {
                                   if (p.includes('exit_placed') || p.includes('waiting_exit')) {
                                     return { text: 'Tentando sair da operação...', className: 'text-amber-700' };
                                   }
-                                  if (p.includes('entered') || p.includes('entry')) {
+                                  if (p.includes('entered')) {
                                     return { text: 'Entrada efetuada...', className: 'text-emerald-700' };
+                                  }
+                                  if (p.includes('entering') || p.includes('waiting_entry_fill') || p.includes('reprice_entry')) {
+                                    return { text: 'Aguardando correspondência da entrada...', className: 'text-amber-700' };
                                   }
                                   if (p.includes('cooldown') || p.includes('post_goal_wait')) {
                                     return { text: 'Aguardando o jogo normalizar para Scalpes...', className: 'text-purple-700' };
@@ -3717,6 +4500,331 @@ export default function AutomationPage() {
                   </div>
                 );
               })}
+            </div>
+          )}
+        </Card>
+
+        <Card className="p-4 mt-4">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <div className="font-semibold text-gray-900">Ordens (bots/agentes)</div>
+              <div className="text-sm text-gray-600 mt-1">
+                Atualiza automaticamente a cada 10s enquanto houver operação ativa.
+              </div>
+            </div>
+            <div className="text-right">
+              <div className="text-xs text-gray-600">Última checagem</div>
+              <div className="text-xs tabular-nums text-gray-900">
+                {botOrdersLastRefreshedAt ? new Date(botOrdersLastRefreshedAt).toLocaleTimeString('pt-BR', { hour12: false }) : '—'}
+              </div>
+            </div>
+          </div>
+
+          {(() => {
+            const rows = botOrders;
+            if (rows.length === 0) {
+              return <div className="mt-3 text-sm text-gray-600">Nenhuma ordem encontrada.</div>;
+            }
+
+            const isOpenOrder = (r: BotOrderRow) => {
+              const sm = Number(r.sizeMatched);
+              const sr = Number(r.sizeRemaining);
+              const hasMatched = Number.isFinite(sm) && sm > 0;
+              const hasRemaining = Number.isFinite(sr) && sr > 0;
+              const st = String(r.status ?? '').trim().toUpperCase();
+              if (r.error) return true;
+              if (st && /FAIL|ERROR|REJECT|VIOLATION/.test(st)) return true;
+              if (hasRemaining) return true;
+              if (st === 'EXECUTABLE') return true;
+              if (hasMatched) return false;
+              return false;
+            };
+
+            const openRows = rows.filter(isOpenOrder);
+            const finishedRows = rows.filter((r) => !isOpenOrder(r));
+
+            const statusLabel = (r: BotOrderRow) => {
+              const sm = Number(r.sizeMatched);
+              const sr = Number(r.sizeRemaining);
+              const hasMatched = Number.isFinite(sm) && sm > 0;
+              const hasRemaining = Number.isFinite(sr) && sr > 0;
+              const st = String(r.status ?? '').trim().toUpperCase();
+              if (r.error) return 'ERRO';
+              if (st && /FAIL|ERROR|REJECT|VIOLATION/.test(st)) return 'ERRO';
+              if (st === 'EXECUTION_COMPLETE' || (!hasRemaining && hasMatched)) return 'CORRESPONDIDA';
+              if (hasMatched && hasRemaining) return 'PARCIAL';
+              if (!hasMatched && hasRemaining) return 'PENDENTE';
+              if (!hasMatched && !hasRemaining) return 'ENCERRADA';
+              return st || '—';
+            };
+
+            const rowTone = (r: BotOrderRow) => {
+              const sm = Number(r.sizeMatched);
+              const sr = Number(r.sizeRemaining);
+              const hasMatched = Number.isFinite(sm) && sm > 0;
+              const hasRemaining = Number.isFinite(sr) && sr > 0;
+              const st = String(r.status ?? '').trim().toUpperCase();
+              if (r.error) return 'bg-red-100';
+              if (st && /FAIL|ERROR|REJECT|VIOLATION/.test(st)) return 'bg-red-100';
+              if (hasMatched) return 'bg-emerald-100';
+              if (hasRemaining) return 'bg-amber-100';
+              return 'bg-gray-50';
+            };
+
+            const fmtTime = (iso: string | null) => {
+              const s = String(iso ?? '').trim();
+              if (!s) return '—';
+              const d = new Date(s);
+              if (!Number.isFinite(d.getTime())) return '—';
+              return d.toLocaleTimeString('pt-BR', { hour12: false });
+            };
+
+            const fmtSignedMoney = (v: number | null) => {
+              if (typeof v !== 'number' || !Number.isFinite(v)) return '—';
+              const abs = Math.abs(v);
+              const sign = v > 0 ? '+' : v < 0 ? '-' : '';
+              return `${sign}${formatMoneyBR(abs)}`;
+            };
+
+            const potentialPnl = (r: BotOrderRow) => {
+              const p = Number(r.price);
+              const side = r.side;
+              const sm = Number(r.sizeMatched);
+              const sr = Number(r.sizeRemaining);
+              const size = Number.isFinite(sm) && sm > 0 ? sm : Number.isFinite(sr) && sr > 0 ? sr : NaN;
+              if (!(Number.isFinite(p) && p > 1)) return null;
+              if (!(Number.isFinite(size) && size > 0)) return null;
+              const v = (p - 1) * size;
+              if (side === 'BACK') return Math.round(v * 100) / 100;
+              if (side === 'LAY') return -Math.round(v * 100) / 100;
+              return null;
+            };
+
+            const marketLabel = (r: BotOrderRow) => {
+              const match = items.find((x) => x.matchId === r.matchId) ?? null;
+              const mid = String(r.marketId ?? '').trim();
+              if (!match || !mid) return { text: mid || '—', className: 'text-gray-900', sub: mid || null };
+              const base = String(match.betfair?.marketId ?? '').trim();
+              const cs = String(match.betfair?.correctScore?.marketId ?? '').trim();
+              const resolvedName = marketNameByMarketId[mid] ? String(marketNameByMarketId[mid] ?? '').trim() : '';
+
+              const humanize = (name: string) => {
+                const raw = String(name ?? '').trim();
+                if (!raw) return '';
+                if (/^match\s*odds$/i.test(raw)) return 'Resultado da Partida';
+                if (/correct\s*score/i.test(raw)) return 'Placar Correto';
+                const ou = raw.match(/over\s*\/\s*under\s*([0-9]+(?:\.[0-9]+)?)/i) || raw.match(/overunder\s*([0-9]+(?:\.[0-9]+)?)/i);
+                if (ou) {
+                  const line = String(ou[1] ?? '').trim();
+                  return `Mais/Menos ${line} Gols`;
+                }
+                return raw;
+              };
+
+              const baseLabel =
+                mid && base && mid === base
+                  ? 'Resultado da Partida'
+                  : mid && cs && mid === cs
+                    ? 'Placar Correto'
+                    : humanize(resolvedName) || resolvedName || mid;
+
+              const side = r.side;
+              const prefix = side === 'BACK' ? 'À favor em ' : side === 'LAY' ? 'Contra ' : '';
+              const color = side === 'BACK' ? 'text-emerald-700' : side === 'LAY' ? 'text-red-700' : 'text-gray-900';
+              return { text: `${prefix}${baseLabel}`, className: color, sub: mid };
+            };
+
+            const agentLabel = (r: BotOrderRow) => {
+              if (r.agent === 'scalpingTicks') return 'Scalping Ticks';
+              if (r.agent === 'scalpingGoals') return 'Scalping Gols';
+              if (r.agent === 'overGoalsLimit') return 'Over Limite';
+              if (r.agent === 'asianHandicap') return 'Handicap';
+              if (r.agent === 'correctScore') return 'Correct Score';
+              return r.agent || '—';
+            };
+
+            const renderOrdersTable = (tableRows: BotOrderRow[]) => {
+              if (tableRows.length === 0) {
+                return <div className="mt-2 text-sm text-gray-600">Nenhuma.</div>;
+              }
+              return (
+                <div className="mt-3 overflow-x-auto border border-gray-200 rounded-lg bg-white">
+                  <div className="min-w-[980px]">
+                    <div className="grid grid-cols-[180px_92px_1fr_92px_120px_160px_140px] text-xs font-semibold text-gray-700 bg-gray-100 border-b border-gray-200">
+                      <div className="px-3 py-2">ID/Refª</div>
+                      <div className="px-3 py-2 text-center">Hora</div>
+                      <div className="px-3 py-2">Mercado</div>
+                      <div className="px-3 py-2 text-center">Cotação</div>
+                      <div className="px-3 py-2 text-right">Apostado</div>
+                      <div className="px-3 py-2 text-right">Possível Lucro/Perda</div>
+                      <div className="px-3 py-2 text-right">Status</div>
+                    </div>
+
+                    {tableRows.map((r) => {
+                      const match = items.find((x) => x.matchId === r.matchId) ?? null;
+                      const title = match ? `${match.homeTeam ?? '—'} x ${match.awayTeam ?? '—'} • ${agentLabel(r)}` : agentLabel(r);
+                      const sm = Number(r.sizeMatched);
+                      const sr = Number(r.sizeRemaining);
+                      const matchedSafe = Number.isFinite(sm) && sm >= 0 ? sm : 0;
+                      const remainingSafe = Number.isFinite(sr) && sr >= 0 ? sr : 0;
+                      const total = matchedSafe + remainingSafe;
+                      const st = statusLabel(r);
+                      const statusText = r.error ? `${st} (${String(r.error).slice(0, 120)})` : st;
+
+                      return (
+                        <Tooltip key={r.key}>
+                          <TooltipTrigger asChild>
+                            <div
+                              className={cn(
+                                'grid grid-cols-[180px_92px_1fr_92px_120px_160px_140px] border-b border-gray-100 text-sm',
+                                rowTone(r),
+                              )}
+                            >
+                              <div className="px-3 py-2">
+                                <div className="font-semibold tabular-nums truncate">{r.betId ?? r.customerRef ?? '—'}</div>
+                                <div className="text-[11px] text-gray-700 tabular-nums truncate">{r.customerRef ? `Ref: ${r.customerRef}` : `Bot: ${agentLabel(r)}`}</div>
+                              </div>
+                              <div className="px-3 py-2 text-center tabular-nums">{fmtTime(r.placedAt ?? r.updatedAt)}</div>
+                              {(() => {
+                                const m = marketLabel(r);
+                                return (
+                                  <div className="px-3 py-2 truncate tabular-nums">
+                                    <div className={cn('truncate', m.className)}>{m.text}</div>
+                                    {m.sub ? <div className="text-[11px] text-gray-600 truncate">{m.sub}</div> : null}
+                                  </div>
+                                );
+                              })()}
+                              <div className="px-3 py-2 text-center tabular-nums">{formatOdd(r.price)}</div>
+                              <div className="px-3 py-2 text-right tabular-nums">
+                                {total > 0 ? `${matchedSafe.toFixed(2)}/${total.toFixed(2)}` : '—'}
+                              </div>
+                              <div className="px-3 py-2 text-right tabular-nums">{fmtSignedMoney(potentialPnl(r))}</div>
+                              <div
+                                className={cn(
+                                  'px-3 py-2 text-right tabular-nums font-semibold',
+                                  r.error ? 'text-red-900' : st === 'PENDENTE' ? 'text-amber-900' : st === 'CORRESPONDIDA' ? 'text-emerald-900' : 'text-gray-900',
+                                )}
+                              >
+                                {statusText}
+                              </div>
+                            </div>
+                          </TooltipTrigger>
+                          <TooltipContent side="top" sideOffset={6}>
+                            {title}
+                          </TooltipContent>
+                        </Tooltip>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            };
+
+            return (
+              <div className="mt-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="text-xs font-semibold text-gray-700">Ordens em aberto</div>
+                  <Badge variant="outline" className="tabular-nums">
+                    {openRows.length}
+                  </Badge>
+                </div>
+                {renderOrdersTable(openRows)}
+
+                <div className="mt-5 flex items-center justify-between gap-3">
+                  <div className="text-xs font-semibold text-gray-700">Ordens finalizadas</div>
+                  <Badge variant="outline" className="tabular-nums">
+                    {finishedRows.length}
+                  </Badge>
+                </div>
+                {renderOrdersTable(finishedRows)}
+              </div>
+            );
+          })()}
+        </Card>
+
+        <Card className="p-4 mt-4">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <div className="font-semibold text-gray-900">Jogos finalizados</div>
+              <div className="text-sm text-gray-600 mt-1">Histórico de jogos que já terminaram e dados finais para auditoria.</div>
+            </div>
+            <Badge variant="outline" className="tabular-nums">
+              {finishedItems.length}
+            </Badge>
+          </div>
+
+          {finishedItems.length === 0 ? (
+            <div className="mt-3 text-sm text-gray-600">Nenhum jogo finalizado ainda.</div>
+          ) : (
+            <div className="mt-4 overflow-x-auto border border-gray-200 rounded-lg bg-white">
+              <div className="min-w-[980px]">
+                <div className="grid grid-cols-[92px_1fr_92px_140px_200px_160px_140px] text-xs font-semibold text-gray-700 bg-gray-100 border-b border-gray-200">
+                  <div className="px-3 py-2 text-center">Data</div>
+                  <div className="px-3 py-2">Jogo</div>
+                  <div className="px-3 py-2 text-center">Placar</div>
+                  <div className="px-3 py-2">Robô</div>
+                  <div className="px-3 py-2 text-right">Ordens (T/M/E)</div>
+                  <div className="px-3 py-2 text-right">Atualizado</div>
+                  <div className="px-3 py-2 text-right">Status</div>
+                </div>
+
+                {finishedItems.map((x) => {
+                  const agent = normalizeAgent(x.strategy?.agent);
+                  const d = kickoffDate(x);
+                  const day = d ? d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' }) : '—';
+                  const apiLive = apiFootballLiveByMatchId[x.matchId] ?? null;
+                  const h = typeof apiLive?.goalsHome === 'number' ? apiLive.goalsHome : x.scoreHome;
+                  const a = typeof apiLive?.goalsAway === 'number' ? apiLive.goalsAway : x.scoreAway;
+
+                  const rows = botOrders.filter((r) => r.matchId === x.matchId);
+                  const total = rows.length;
+                  const matched = rows.filter((r) => Number(r.sizeMatched) > 0).length;
+                  const err = rows.filter((r) => Boolean(r.error) || /FAIL|ERROR|REJECT|VIOLATION/.test(String(r.status ?? '').toUpperCase())).length;
+
+                  const updatedIso = String(x.updatedAt ?? x.createdAt ?? '').trim();
+                  const updatedAt = (() => {
+                    if (!updatedIso) return '—';
+                    const dt = new Date(updatedIso);
+                    if (!Number.isFinite(dt.getTime())) return '—';
+                    return dt.toLocaleString('pt-BR', { hour12: false });
+                  })();
+
+                  const agentLabel =
+                    agent === 'scalpingGoals'
+                      ? 'Scalping Gols'
+                      : agent === 'scalpingTicks'
+                        ? 'Scalping Ticks'
+                        : agent === 'overGoalsLimit'
+                          ? 'Over Limite'
+                          : agent === 'asianHandicap'
+                            ? 'Handicap'
+                            : agent === 'correctScore'
+                              ? 'Correct Score'
+                              : agent || '—';
+
+                  return (
+                    <div key={x.matchId} className="grid grid-cols-[92px_1fr_92px_140px_200px_160px_140px] border-b border-gray-100 text-sm">
+                      <div className="px-3 py-2 text-center tabular-nums">{day}</div>
+                      <div className="px-3 py-2 truncate">
+                        <span className="font-semibold text-gray-900">{x.homeTeam ?? '—'}</span>
+                        <span className="mx-2 opacity-60">x</span>
+                        <span className="font-semibold text-gray-900">{x.awayTeam ?? '—'}</span>
+                      </div>
+                      <div className="px-3 py-2 text-center tabular-nums">{typeof h === 'number' && typeof a === 'number' ? `${h}-${a}` : '—'}</div>
+                      <div className="px-3 py-2 truncate">{agentLabel}</div>
+                      <div className="px-3 py-2 text-right tabular-nums">
+                        {total}/{matched}/{err}
+                      </div>
+                      <div className="px-3 py-2 text-right tabular-nums">{updatedAt}</div>
+                      <div className="px-3 py-2 text-right">
+                        <Badge variant="secondary" className="tabular-nums">
+                          Finalizado
+                        </Badge>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           )}
         </Card>

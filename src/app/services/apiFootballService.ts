@@ -326,9 +326,13 @@ export class ApiFootballService {
         this.clearQuotaLock();
         return data;
       } catch (proxyError) {
-        if (!this.isUnsupportedPageParamError(proxyError)) {
-          console.warn('⚠️ Proxy via servidor falhou, tentando requisição direta...', proxyError);
-        }
+        // Se for erro de cota ou parâmetro inválido, não adianta tentar direto
+        if (this.isUnsupportedPageParamError(proxyError)) throw proxyError;
+        
+        const errs = proxyError instanceof Error ? [proxyError.message] : [String(proxyError)];
+        if (this.isQuotaErrorList(errs)) throw proxyError;
+
+        console.warn('⚠️ Proxy via servidor falhou, tentando requisição direta...', proxyError);
       }
 
       const controller = new AbortController();
@@ -845,10 +849,12 @@ const enrichLiveUpdate = async (
 const liveHub = (() => {
   const tracked = new Map<number, number>();
   const detailedTracked = new Map<number, number>();
+  const fastTracked = new Map<number, number>();
   const listeners = new Set<LiveHubListener>();
   let timerId: number | null = null;
   let inFlight = false;
   let lastPollAt = 0;
+  let currentIntervalMs = 30_000;
   let state: Record<number, ApiFootballLiveUpdate> = {};
   const detailedAt = new Map<number, number>();
 
@@ -861,10 +867,16 @@ const liveHub = (() => {
   };
 
   const ensureTimer = () => {
-    if (timerId != null) return;
+    const desired = fastTracked.size > 0 ? 10_000 : 30_000;
+    if (timerId != null && desired === currentIntervalMs) return;
+    if (timerId != null) {
+      window.clearInterval(timerId);
+      timerId = null;
+    }
+    currentIntervalMs = desired;
     timerId = window.setInterval(() => {
       void poll();
-    }, 30_000);
+    }, currentIntervalMs);
   };
 
   const poll = async () => {
@@ -899,6 +911,31 @@ const liveHub = (() => {
         if (!m) continue;
         liveTracked.push({ id, m });
         next[id] = buildBaseLiveUpdate(m);
+      }
+
+      const missingIds = ids.filter((id) => !liveById.has(id));
+      if (missingIds.length > 0) {
+        const cap = fastTracked.size > 0 ? 12 : 4;
+        const toFetch = missingIds
+          .filter((id) => {
+            const prev = next[id];
+            const prevAt = prev?.fetchedAt ? new Date(prev.fetchedAt).getTime() : 0;
+            if (prevAt && Number.isFinite(prevAt) && now - prevAt < 20_000) return false;
+            return true;
+          })
+          .slice(0, cap);
+
+        if (toFetch.length > 0) {
+          const fetched = await mapWithConcurrency(toFetch, 2, async (id) => {
+            const rows = await service.getFixturesOnce({ fixtureId: id }).catch(() => []);
+            const m = Array.isArray(rows) ? rows[0] : null;
+            if (!m) return null;
+            return buildBaseLiveUpdate(m);
+          });
+          for (const u of fetched) {
+            if (u && Number.isFinite(u.fixtureId)) next[u.fixtureId] = u;
+          }
+        }
       }
 
       if (detailedTracked.size > 0) {
@@ -938,6 +975,9 @@ const liveHub = (() => {
     if (opts?.includeDetails) {
       for (const id of ids) detailedTracked.set(id, (detailedTracked.get(id) ?? 0) + 1);
     }
+    if ((opts as any)?.fast) {
+      for (const id of ids) fastTracked.set(id, (fastTracked.get(id) ?? 0) + 1);
+    }
     ensureTimer();
     listener(state);
     return () => {
@@ -954,6 +994,14 @@ const liveHub = (() => {
           else detailedTracked.set(id, n);
         }
       }
+      if ((opts as any)?.fast) {
+        for (const id of ids) {
+          const n = (fastTracked.get(id) ?? 0) - 1;
+          if (n <= 0) fastTracked.delete(id);
+          else fastTracked.set(id, n);
+        }
+      }
+      ensureTimer();
     };
   };
 
@@ -964,10 +1012,11 @@ const liveHub = (() => {
 
 export function useApiFootballLiveUpdates(
   fixtureIds: Array<number | string>,
-  opts?: { enabled?: boolean; includeDetails?: boolean },
+  opts?: { enabled?: boolean; includeDetails?: boolean; fast?: boolean },
 ): Record<string, ApiFootballLiveUpdate> {
   const enabled = opts?.enabled ?? true;
   const includeDetails = opts?.includeDetails ?? false;
+  const fast = opts?.fast ?? false;
   const ids = useMemo(() => normalizeFixtureIds(fixtureIds), [fixtureIds]);
   const idsKey = useMemo(() => ids.join(','), [ids]);
   const [snap, setSnap] = useState<Record<string, ApiFootballLiveUpdate>>({});
@@ -989,8 +1038,8 @@ export function useApiFootballLiveUpdates(
       }
       setSnap(out);
     };
-    return liveHub.subscribe(ids, listener, { includeDetails });
-  }, [enabled, idsKey, includeDetails]);
+    return liveHub.subscribe(ids, listener, { includeDetails, fast } as any);
+  }, [enabled, idsKey, includeDetails, fast]);
 
   return snap;
 }

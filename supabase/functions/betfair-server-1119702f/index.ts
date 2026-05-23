@@ -1,3 +1,5 @@
+import * as kv from "../make-server-1119702f/kv_store.ts";
+
 const CORS_HEADERS: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-automation-token",
@@ -70,12 +72,30 @@ const getBetfairConfig = () => {
 };
 
 let cachedSession: { token: string; fetchedAtMs: number } | null = null;
-let kvPromise: Promise<Deno.Kv | null> | null = null;
+let cachedBanUntilMs = 0;
 
-const getKv = async () => {
-  if (kvPromise) return kvPromise;
-  kvPromise = Deno.openKv().catch(() => null);
-  return kvPromise;
+const KV_SESSION_KEY = "betfair/session_v1";
+const KV_BAN_KEY = "betfair/ban_until_v1";
+const KV_LOCK_KEY = "betfair/session_lock_v1";
+
+const kvGetSafe = async <T>(key: string): Promise<T | null> => {
+  try {
+    return (await kv.get(key)) as T | null;
+  } catch {
+    return null;
+  }
+};
+
+const kvSetSafe = async (key: string, value: any) => {
+  try {
+    await kv.set(key, value);
+  } catch {}
+};
+
+const kvDelSafe = async (key: string) => {
+  try {
+    await kv.del(key);
+  } catch {}
 };
 
 const delay = async (ms: number) => {
@@ -123,47 +143,38 @@ const betfairLoginLimiter = createRateLimiter(getEnvNum("BETFAIR_LOGIN_RPS", 0.0
 const betfairIpsLimiter = createRateLimiter(getEnvNum("BETFAIR_IPS_RPS", 3, 0.2, 20), getEnvNum("BETFAIR_IPS_BURST", 2, 1, 20));
 
 const getBanUntilMs = async () => {
-  try {
-    const kv = await getKv();
-    if (!kv) return 0;
-    const res = await kv.get<{ untilMs: number }>(["betfair", "ban_until"]);
-    const untilMs = Number(res?.value?.untilMs);
-    return Number.isFinite(untilMs) ? untilMs : 0;
-  } catch {
-    return 0;
+  if (Number.isFinite(cachedBanUntilMs) && cachedBanUntilMs > Date.now()) return cachedBanUntilMs;
+  const res = await kvGetSafe<{ untilMs: number }>(KV_BAN_KEY);
+  const untilMs = Number(res?.untilMs);
+  if (Number.isFinite(untilMs) && untilMs > Date.now()) {
+    cachedBanUntilMs = untilMs;
+    return untilMs;
   }
+  return 0;
 };
 
 const setBanUntilMs = async (untilMs: number) => {
-  try {
-    const kv = await getKv();
-    if (!kv) return;
-    const safeUntilMs = Number.isFinite(untilMs) ? Math.max(0, Math.floor(untilMs)) : 0;
-    const ttl = Math.max(0, safeUntilMs - Date.now());
-    await kv.set(["betfair", "ban_until"], { untilMs: safeUntilMs }, { expireIn: Math.min(60 * 60 * 1000, Math.max(30_000, ttl)) });
-  } catch {}
+  const safeUntilMs = Number.isFinite(untilMs) ? Math.max(0, Math.floor(untilMs)) : 0;
+  cachedBanUntilMs = safeUntilMs;
+  await kvSetSafe(KV_BAN_KEY, { untilMs: safeUntilMs });
 };
 
 const acquireLoginLock = async (ttlMs: number) => {
-  const kv = await getKv();
-  if (!kv) return { ok: true, release: async () => {} };
-
-  const lockKey: Deno.KvKey = ["betfair", "session_lock"];
   const expireIn = Math.max(1000, Math.min(20_000, Math.floor(ttlMs)));
-  const acquired = await kv
-    .atomic()
-    .check({ key: lockKey, versionstamp: null })
-    .set(lockKey, { acquiredAtMs: Date.now() }, { expireIn })
-    .commit()
-    .then((r) => Boolean((r as any)?.ok))
-    .catch(() => false);
+  const now = Date.now();
+  const existing = await kvGetSafe<{ acquiredAtMs?: number; expiresAtMs?: number }>(KV_LOCK_KEY);
+  const existingExpiresAtMs = Number(existing?.expiresAtMs);
+  const isLocked = Number.isFinite(existingExpiresAtMs) && existingExpiresAtMs > now;
+  const acquired = !isLocked;
+  if (acquired) {
+    await kvSetSafe(KV_LOCK_KEY, { acquiredAtMs: now, expiresAtMs: now + expireIn });
+  }
 
   return {
     ok: acquired,
     release: async () => {
-      try {
-        if (acquired) await kv.delete(lockKey);
-      } catch {}
+      if (!acquired) return;
+      await kvDelSafe(KV_LOCK_KEY);
     },
   };
 };
@@ -233,29 +244,23 @@ const getBetfairSessionToken = async (opts?: { force?: boolean }) => {
     throw new Error(`Betfair login bloqueado temporariamente. Aguarde ${waitSec}s`);
   }
 
-  try {
-    const kv = await getKv();
-    if (kv && !opts?.force) {
-      const cached = await kv.get<{ token: string; fetchedAtMs: number }>(["betfair", "session"]);
-      const v = cached?.value ?? null;
-      if (v?.token && typeof v.fetchedAtMs === "number") {
-        if (Date.now() - v.fetchedAtMs < 50 * 60 * 1000) {
-          cachedSession = { token: v.token, fetchedAtMs: v.fetchedAtMs };
-          return v.token;
-        }
+  if (!opts?.force) {
+    const v = await kvGetSafe<{ token: string; fetchedAtMs: number }>(KV_SESSION_KEY);
+    if (v?.token && typeof v.fetchedAtMs === "number") {
+      if (Date.now() - v.fetchedAtMs < 50 * 60 * 1000) {
+        cachedSession = { token: v.token, fetchedAtMs: v.fetchedAtMs };
+        return v.token;
       }
     }
-  } catch {}
+  }
 
-  const kv = await getKv();
   const lock = await acquireLoginLock(12_000);
   try {
-    if (!lock.ok && kv && !opts?.force) {
+    if (!lock.ok && !opts?.force) {
       const startedAt = Date.now();
       while (Date.now() - startedAt < 12_000) {
         await new Promise((r) => setTimeout(r, 250));
-        const cached = await kv.get<{ token: string; fetchedAtMs: number }>(["betfair", "session"]);
-        const v = cached?.value ?? null;
+        const v = await kvGetSafe<{ token: string; fetchedAtMs: number }>(KV_SESSION_KEY);
         if (v?.token && typeof v.fetchedAtMs === "number") {
           if (Date.now() - v.fetchedAtMs < 50 * 60 * 1000) {
             cachedSession = { token: v.token, fetchedAtMs: v.fetchedAtMs };
@@ -266,9 +271,7 @@ const getBetfairSessionToken = async (opts?: { force?: boolean }) => {
     }
 
     const token = await betfairCertLogin();
-    try {
-      if (kv) await kv.set(["betfair", "session"], { token, fetchedAtMs: Date.now() }, { expireIn: 55 * 60 * 1000 });
-    } catch {}
+    await kvSetSafe(KV_SESSION_KEY, { token, fetchedAtMs: Date.now() });
     return token;
   } finally {
     await lock.release();
@@ -415,10 +418,16 @@ const splitEventTeams = (eventName: string) => {
   return { home, away };
 };
 
-const listBetfairSoccerMatchOddsRange = async (params: { fromIso: string; toIso: string; maxResults: number }) => {
+const listBetfairSoccerMatchOddsRange = async (params: {
+  fromIso: string;
+  toIso: string;
+  maxResults: number;
+  inPlayOnly?: boolean;
+}) => {
   const fromIso = String(params.fromIso ?? "").trim();
   const toIso = String(params.toIso ?? "").trim();
   const maxResults = Math.max(1, Math.min(400, Number(params.maxResults ?? 200) || 200));
+  const inPlayOnly = Boolean(params.inPlayOnly ?? false);
   if (!fromIso || !toIso) throw new Error("Betfair: período inválido");
 
   const asInt = (value: unknown): number | null => {
@@ -516,7 +525,12 @@ const listBetfairSoccerMatchOddsRange = async (params: { fromIso: string; toIso:
     const cats = await withTimeout(
       () =>
         call("SportsAPING/v1.0/listMarketCatalogue", {
-          filter: { eventTypeIds: ["1"], marketTypeCodes: ["MATCH_ODDS"], marketStartTime: { from: chunkFromIso, to: chunkToIso } },
+          filter: {
+            eventTypeIds: ["1"],
+            marketTypeCodes: ["MATCH_ODDS"],
+            marketStartTime: { from: chunkFromIso, to: chunkToIso },
+            ...(inPlayOnly ? { inPlayOnly: true } : {}),
+          },
           maxResults: maxCatalogueResults,
           sort: "FIRST_TO_START",
           marketProjection: ["EVENT", "COMPETITION", "RUNNER_DESCRIPTION", "MARKET_START_TIME"],
@@ -815,6 +829,76 @@ const resolveBetfairMatchOdds = async (params: { homeTeam: string; awayTeam: str
   const marketId = String(mk?.marketId ?? "").trim();
   if (!eventId || !marketId) throw new Error("Betfair: eventId não encontrado");
 
+  const fetchIps = async (url: string) => {
+    await betfairIpsLimiter.acquire();
+    const res = await fetch(url, {
+      method: "GET",
+      redirect: "follow",
+      headers: {
+        accept: "application/json",
+        "cache-control": "no-cache",
+        "user-agent": "Mozilla/5.0",
+      },
+    });
+    if (!res.ok) throw new Error(`IPS HTTP ${res.status}`);
+    const text = await res.text();
+    try {
+      return text ? JSON.parse(text) : null;
+    } catch {
+      throw new Error("IPS JSON parse error");
+    }
+  };
+
+  const timeline = await (async () => {
+    try {
+      const idsParam = encodeURIComponent(eventId);
+      const url1 = `https://ips.betfair.com/inplayservice/v1.1/eventTimelines?eventIds=${idsParam}&alt=json&regionCode=UK&locale=en_GB`;
+      const url2 = `https://ips.betfair.com/inplayservice/v1.1/eventTimelines?eventIds=${idsParam}&alt=json`;
+      const timelines = await withTimeout(async () => {
+        const t1 = await fetchIps(url1).catch(() => null);
+        if (Array.isArray(t1) && t1.length > 0) return t1;
+        const t2 = await fetchIps(url2).catch(() => null);
+        return t2;
+      }, 6500);
+      const arr = Array.isArray(timelines) ? timelines : [];
+      const found = arr.find((t: any) => String(t?.eventId ?? "").trim() === eventId) ?? null;
+      return found;
+    } catch {
+      return null;
+    }
+  })();
+
+  const parseScorePairFromString = (value: unknown): { home: number; away: number } | null => {
+    const s = String(value ?? "").trim();
+    if (!s) return null;
+    const m = s.match(/(\d+)\D+(\d+)/);
+    if (!m) return null;
+    const h = Number(m[1]);
+    const a = Number(m[2]);
+    if (!Number.isFinite(h) || !Number.isFinite(a)) return null;
+    return { home: h, away: a };
+  };
+
+  const timelineScore = (() => {
+    if (!timeline) return { home: null as number | null, away: null as number | null };
+    const pair =
+      parseScorePairFromString((timeline as any)?.currentScore) ??
+      parseScorePairFromString((timeline as any)?.scoreString) ??
+      parseScorePairFromString((timeline as any)?.score) ??
+      parseScorePairFromString((timeline as any)?.score?.current) ??
+      null;
+    if (pair) return { home: pair.home, away: pair.away };
+    return { home: null, away: null };
+  })();
+
+  const timelineElapsed = (() => {
+    const n = Number((timeline as any)?.timeElapsed);
+    return Number.isFinite(n) ? Math.max(0, Math.floor(n)) : null;
+  })();
+
+  const timelineStatusRaw = String((timeline as any)?.status ?? "").trim().toUpperCase() || null;
+  const timelineStatusShort = timelineStatusRaw === "ENDED" ? "FINISHED" : timelineStatusRaw;
+
   const runners = Array.isArray(mk?.runners) ? mk.runners : [];
   const selectionByRole: Record<string, number> = {};
   for (const r of runners) {
@@ -867,6 +951,15 @@ const resolveBetfairMatchOdds = async (params: { homeTeam: string; awayTeam: str
     marketStartTime: String(mk?.marketStartTime ?? "").trim() || null,
     inPlay,
     marketStatus,
+    timeline: timeline
+      ? {
+          elapsed: timelineElapsed,
+          statusShort: timelineStatusShort,
+          scoreHome: timelineScore.home,
+          scoreAway: timelineScore.away,
+          fetchedAt: new Date().toISOString(),
+        }
+      : null,
     runners: {
       homeSelectionId: Number.isFinite(selectionByRole.home) ? selectionByRole.home : null,
       drawSelectionId: Number.isFinite(selectionByRole.draw) ? selectionByRole.draw : null,
@@ -955,18 +1048,12 @@ const resolveBetfairCorrectScoreMarket = async (params: { eventId: string }) => 
 
 Deno.serve(async (req) => {
   try {
-    const method = String((req as any)?.method ?? "").toUpperCase();
-    const isPreflight =
-      method === "OPTIONS" || (req.headers.has("origin") && req.headers.has("access-control-request-method"));
-    if (isPreflight) return new Response(null, { status: 204, headers: CORS_HEADERS });
+    const method = req.method.toUpperCase();
+    if (method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: CORS_HEADERS });
+    }
 
-    const url = (() => {
-      try {
-        return new URL(String((req as any)?.url ?? ""), "http://localhost");
-      } catch {
-        return new URL("http://localhost/");
-      }
-    })();
+    const url = new URL(req.url);
     const path = url.pathname;
 
     if (method === "POST" && (path.endsWith("/health") || path === "/health")) return json({ status: "ok" });
@@ -978,6 +1065,7 @@ Deno.serve(async (req) => {
         const dateTo = String((body as any)?.dateTo ?? "").trim();
         const maxResultsRaw = Number((body as any)?.maxResults ?? (body as any)?.maxEvents ?? 120);
         const maxResults = Number.isFinite(maxResultsRaw) ? Math.max(1, Math.min(150, Math.floor(maxResultsRaw))) : 120;
+        const inPlayOnly = Boolean((body as any)?.inPlayOnly ?? false);
 
         if (!/^\d{4}-\d{2}-\d{2}$/.test(dateFrom) || !/^\d{4}-\d{2}-\d{2}$/.test(dateTo)) {
           return json({ ok: false, error: "dateFrom/dateTo devem estar no formato YYYY-MM-DD" }, 400);
@@ -1016,6 +1104,7 @@ Deno.serve(async (req) => {
             fromIso,
             toIso,
             maxResults: perDayLimit,
+            inPlayOnly,
           });
           out.push(...(Array.isArray(chunk) ? chunk : []));
         }
