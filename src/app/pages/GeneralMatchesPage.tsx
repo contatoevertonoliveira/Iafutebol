@@ -64,13 +64,28 @@ const requestFixturePrediction = (fixtureId: string) => {
     const storeKey = 'requested_fixtures_v1';
     const raw = localStorage.getItem(storeKey);
     const parsed = raw ? (JSON.parse(raw) as unknown) : null;
-    const store =
-      parsed && typeof parsed === 'object' && (parsed as any).version === 1 && (parsed as any).items
-        ? (parsed as { version: 1; items: Record<string, { fixtureId: number; requestedAt: string; source: string }> })
-        : { version: 1 as const, items: {} as Record<string, { fixtureId: number; requestedAt: string; source: string }> };
+    const nextStore = (() => {
+      if (parsed && typeof parsed === 'object' && (parsed as any).version === 2 && (parsed as any).items && typeof (parsed as any).items === 'object') {
+        return { version: 2 as const, items: { ...((parsed as any).items as Record<string, any>) } };
+      }
+      if (parsed && typeof parsed === 'object' && (parsed as any).version === 1 && (parsed as any).items && typeof (parsed as any).items === 'object') {
+        const v1 = (parsed as any).items as Record<string, { fixtureId?: number }>;
+        const items: Record<string, { source: 'api-football'; fixtureId: number }> = {};
+        for (const k of Object.keys(v1)) {
+          const fid = Number(v1[k]?.fixtureId ?? k);
+          if (!Number.isFinite(fid) || fid <= 0) continue;
+          items[String(fid)] = { source: 'api-football', fixtureId: fid };
+        }
+        return { version: 2 as const, items };
+      }
+      return { version: 2 as const, items: {} as Record<string, { source: 'api-football'; fixtureId: number }> };
+    })();
 
-    store.items[id] = { fixtureId: Number(id), requestedAt: new Date().toISOString(), source: 'api-football' };
-    localStorage.setItem(storeKey, JSON.stringify(store));
+    const fid = Number(id);
+    if (Number.isFinite(fid) && fid > 0) {
+      nextStore.items[id] = { source: 'api-football', fixtureId: fid };
+    }
+    localStorage.setItem(storeKey, JSON.stringify(nextStore));
     window.dispatchEvent(new Event('requestedFixturesChanged'));
   } catch {}
 
@@ -91,8 +106,9 @@ const readRequestedFixtureIds = (): Set<string> => {
   try {
     const raw = localStorage.getItem('requested_fixtures_v1');
     if (!raw) return new Set();
-    const parsed = JSON.parse(raw) as { version?: number; items?: Record<string, { fixtureId?: number }> };
-    if (!parsed || parsed.version !== 1 || !parsed.items) return new Set();
+    const parsed = JSON.parse(raw) as { version?: number; items?: Record<string, any> };
+    if (!parsed || !parsed.items || typeof parsed.items !== 'object') return new Set();
+    if (parsed.version !== 1 && parsed.version !== 2) return new Set();
     return new Set(Object.keys(parsed.items).map(String));
   } catch {
     return new Set();
@@ -706,8 +722,8 @@ export default function GeneralMatchesPage() {
 
     requestFixturePrediction(id);
     const startedAt = Date.now();
-    const timeoutMs = 45_000;
-    const intervalMs = 1_500;
+    const timeoutMs = 6_000;
+    const intervalMs = 1_000;
     while (Date.now() - startedAt < timeoutMs) {
       await new Promise((r) => setTimeout(r, intervalMs));
       const cache = readPredictionsCache();
@@ -1634,7 +1650,8 @@ export default function GeneralMatchesPage() {
                     if (!automationTarget || !fixtureId) return;
                     setAutomationIsBusy(true);
                     try {
-                      const p = predictionsByMatchId[fixtureId] ?? (await ensurePredictionForFixture(fixtureId));
+                      const p = predictionsByMatchId[fixtureId] ?? null;
+                      if (!p) requestFixturePrediction(fixtureId);
                       setAutomationActionOpen(false);
                       const ok = await enqueueAutomation(automationTarget, p);
                       if (!ok) return;
