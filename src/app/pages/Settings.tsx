@@ -1580,6 +1580,11 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
                   const ahMaxEntries = Number((asian as any)?.maxEntries);
                   const ahEntryMaxWaitSeconds = Number((asian as any)?.entryMaxWaitSeconds);
                   const ahEntryOffsetTicks = Number((asian as any)?.entryOffsetTicks);
+                  const ahAutoEnabled = Boolean((asian as any)?.autoEnabled ?? false);
+                  const ahAutoOnlyRequestedFixtures = Boolean((asian as any)?.autoOnlyRequestedFixtures ?? true);
+                  const ahAutoMinConfidence = Number((asian as any)?.autoMinConfidence);
+                  const ahAutoCooldownMinutes = Number((asian as any)?.autoCooldownMinutes);
+                  const ahAutoMaxPerDay = Number((asian as any)?.autoMaxPerDay);
                   const csMaxSelections = Number(correctScore?.maxSelections);
                   const csMinProfitPct = Number(correctScore?.minProfitPct);
                   const csEntryScoresCsv = String(correctScore?.entryScoresCsv ?? '0-0,0-1,1-0,1-1');
@@ -2185,6 +2190,85 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
                               }}
                               className="mt-2"
                             />
+                          </div>
+                        </div>
+
+                        <div className="mt-3 border-t pt-3">
+                          <div className="text-xs font-semibold text-gray-800">Auto (agente independente)</div>
+                          <div className="text-xs text-gray-600 mt-1">
+                            Quando ativado, o agente independente pode iniciar o robô automaticamente em jogos selecionados.
+                          </div>
+
+                          <div className="mt-3 grid md:grid-cols-3 gap-3">
+                            <div className="flex items-center justify-between gap-3 rounded-md border border-gray-200 px-3 py-2">
+                              <div className="min-w-0">
+                                <div className="text-sm font-medium text-gray-900">Auto iniciar</div>
+                                <div className="text-xs text-gray-600">Enfileira na Automação e começa sozinho</div>
+                              </div>
+                              <Switch checked={ahAutoEnabled} onCheckedChange={(checked) => setAsian({ autoEnabled: checked })} />
+                            </div>
+
+                            <div className="flex items-center justify-between gap-3 rounded-md border border-gray-200 px-3 py-2">
+                              <div className="min-w-0">
+                                <div className="text-sm font-medium text-gray-900">Somente selecionados</div>
+                                <div className="text-xs text-gray-600">Só jogos marcados/solicitados</div>
+                              </div>
+                              <Switch
+                                checked={ahAutoOnlyRequestedFixtures}
+                                onCheckedChange={(checked) => setAsian({ autoOnlyRequestedFixtures: checked })}
+                              />
+                            </div>
+
+                            <div>
+                              <Label htmlFor="ah_autoMinConfidence">Confiança mín. (%)</Label>
+                              <Input
+                                id="ah_autoMinConfidence"
+                                inputMode="numeric"
+                                placeholder="Ex: 75"
+                                value={Number.isFinite(ahAutoMinConfidence) ? String(Math.max(50, Math.min(95, Math.floor(ahAutoMinConfidence)))) : ''}
+                                onChange={(e) => {
+                                  const raw = String(e.target.value ?? '').replace(',', '.');
+                                  const n = Number(raw);
+                                  const v = Number.isFinite(n) ? Math.max(50, Math.min(95, Math.floor(n))) : 75;
+                                  setAsian({ autoMinConfidence: v });
+                                }}
+                                className="mt-2"
+                              />
+                            </div>
+
+                            <div>
+                              <Label htmlFor="ah_autoCooldownMinutes">Cooldown (min)</Label>
+                              <Input
+                                id="ah_autoCooldownMinutes"
+                                inputMode="numeric"
+                                placeholder="Ex: 20"
+                                value={Number.isFinite(ahAutoCooldownMinutes) ? String(Math.max(0, Math.min(240, Math.floor(ahAutoCooldownMinutes)))) : ''}
+                                onChange={(e) => {
+                                  const raw = String(e.target.value ?? '').replace(',', '.');
+                                  const n = Number(raw);
+                                  const v = Number.isFinite(n) ? Math.max(0, Math.min(240, Math.floor(n))) : 20;
+                                  setAsian({ autoCooldownMinutes: v });
+                                }}
+                                className="mt-2"
+                              />
+                            </div>
+
+                            <div>
+                              <Label htmlFor="ah_autoMaxPerDay">Máx. por dia</Label>
+                              <Input
+                                id="ah_autoMaxPerDay"
+                                inputMode="numeric"
+                                placeholder="Ex: 8"
+                                value={Number.isFinite(ahAutoMaxPerDay) ? String(Math.max(0, Math.min(50, Math.floor(ahAutoMaxPerDay)))) : ''}
+                                onChange={(e) => {
+                                  const raw = String(e.target.value ?? '').replace(',', '.');
+                                  const n = Number(raw);
+                                  const v = Number.isFinite(n) ? Math.max(0, Math.min(50, Math.floor(n))) : 8;
+                                  setAsian({ autoMaxPerDay: v });
+                                }}
+                                className="mt-2"
+                              />
+                            </div>
                           </div>
                         </div>
                       </div>

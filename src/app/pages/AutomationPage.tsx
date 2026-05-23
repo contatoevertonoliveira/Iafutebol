@@ -475,10 +475,12 @@ export default function AutomationPage() {
   useEffect(() => {
     try {
       localStorage.setItem('scalping_ticks_runner_mode_v1', 'page');
+      localStorage.setItem('asian_handicap_runner_mode_v1', 'page');
     } catch {}
     return () => {
       try {
         localStorage.setItem('scalping_ticks_runner_mode_v1', 'layout');
+        localStorage.setItem('asian_handicap_runner_mode_v1', 'layout');
       } catch {}
     };
   }, []);

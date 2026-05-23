@@ -68,6 +68,11 @@ export interface ApiConfig {
       maxEntries?: number;
       entryMaxWaitSeconds?: number;
       entryOffsetTicks?: number;
+      autoEnabled?: boolean;
+      autoOnlyRequestedFixtures?: boolean;
+      autoMinConfidence?: number;
+      autoCooldownMinutes?: number;
+      autoMaxPerDay?: number;
     };
     correctScore?: {
       minProfitPct?: number;
@@ -533,6 +538,11 @@ export function loadApiConfig(): ApiConfig | null {
       maxEntries: 3,
       entryMaxWaitSeconds: 15,
       entryOffsetTicks: 0,
+      autoEnabled: false,
+      autoOnlyRequestedFixtures: true,
+      autoMinConfidence: 75,
+      autoCooldownMinutes: 20,
+      autoMaxPerDay: 8,
     },
     correctScore: { minProfitPct: 0.03, maxSelections: 6, entryScoresCsv: "0-0,0-1,1-0,1-1", minMarketMatched: 1000 },
     favoriteRescue: {

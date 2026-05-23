@@ -104,6 +104,100 @@ export function Layout() {
       }
     };
 
+    const requestedFixturesKey = 'requested_fixtures_v1';
+    const readRequestedFixtureIds = () => {
+      try {
+        const raw = localStorage.getItem(requestedFixturesKey);
+        if (!raw) return new Set<string>();
+        const parsed = JSON.parse(raw) as any;
+        if (!parsed || !parsed.items || typeof parsed.items !== 'object') return new Set<string>();
+        const version = Number(parsed.version);
+        if (version !== 1 && version !== 2) return new Set<string>();
+        return new Set(Object.keys(parsed.items).map(String));
+      } catch {
+        return new Set<string>();
+      }
+    };
+
+    const ensureRequestedFixture = (fixtureId: string) => {
+      const id = String(fixtureId ?? '').trim();
+      if (!id) return;
+      try {
+        const raw = localStorage.getItem(requestedFixturesKey);
+        const parsed = raw ? (JSON.parse(raw) as any) : null;
+        const nextStore = (() => {
+          if (parsed && typeof parsed === 'object' && parsed.version === 2 && parsed.items && typeof parsed.items === 'object') {
+            return { version: 2 as const, items: { ...parsed.items } } as any;
+          }
+          if (parsed && typeof parsed === 'object' && parsed.version === 1 && parsed.items && typeof parsed.items === 'object') {
+            const v1 = parsed.items as Record<string, { fixtureId?: number }>;
+            const items: Record<string, { source: 'api-football'; fixtureId: number }> = {};
+            for (const k of Object.keys(v1)) {
+              const fid = Number(v1[k]?.fixtureId ?? k);
+              if (!Number.isFinite(fid) || fid <= 0) continue;
+              items[String(fid)] = { source: 'api-football', fixtureId: fid };
+            }
+            return { version: 2 as const, items };
+          }
+          return { version: 2 as const, items: {} as Record<string, { source: 'api-football'; fixtureId: number }> };
+        })();
+
+        const fid = Number(id);
+        if (Number.isFinite(fid) && fid > 0) {
+          nextStore.items[id] = { source: 'api-football', fixtureId: fid };
+        }
+        localStorage.setItem(requestedFixturesKey, JSON.stringify(nextStore));
+        window.dispatchEvent(new Event('requestedFixturesChanged'));
+      } catch {}
+    };
+
+    const readPredictionFromCache = (matchId: string) => {
+      try {
+        const raw = localStorage.getItem('matchesCache_v3');
+        if (!raw) return null;
+        const parsed = JSON.parse(raw) as any;
+        if (!parsed || parsed.version !== 3) return null;
+        const preds = parsed.predictions && typeof parsed.predictions === 'object' ? parsed.predictions : null;
+        if (!preds) return null;
+        const p = preds[String(matchId)] ?? null;
+        return p && typeof p === 'object' ? p : null;
+      } catch {
+        return null;
+      }
+    };
+
+    const ahAutoKey = 'asian_handicap_auto_state_v1';
+    const dayKeySp = () =>
+      new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+
+    type AhAutoState = {
+      version: 1;
+      dayKey: string;
+      lastEnqueuedAt?: string;
+      items: Record<string, { enqueuedAt: string; team: 'home' | 'away'; line: number; confidence: number }>;
+    };
+
+    const readAhAuto = (): AhAutoState => {
+      const today = dayKeySp();
+      try {
+        const raw = localStorage.getItem(ahAutoKey);
+        const parsed = raw ? (JSON.parse(raw) as any) : null;
+        if (!parsed || parsed.version !== 1 || !parsed.items || typeof parsed.items !== 'object') {
+          return { version: 1, dayKey: today, items: {} };
+        }
+        if (String(parsed.dayKey) !== today) return { version: 1, dayKey: today, items: {} };
+        return parsed as AhAutoState;
+      } catch {
+        return { version: 1, dayKey: today, items: {} };
+      }
+    };
+
+    const writeAhAuto = (next: AhAutoState) => {
+      try {
+        localStorage.setItem(ahAutoKey, JSON.stringify(next));
+      } catch {}
+    };
+
     type RescueState = {
       version: 1;
       items: Record<
@@ -185,6 +279,7 @@ export function Layout() {
       awayTeam: string | null;
       scoreHome: number | null;
       scoreAway: number | null;
+      prediction?: any;
     }) => {
       const { projectId } = await import('/utils/supabase/info');
       const headers = await getEdgeHeaders();
@@ -201,7 +296,7 @@ export function Layout() {
           awayCrest: null,
           scoreHome: args.scoreHome,
           scoreAway: args.scoreAway,
-          prediction: null,
+          prediction: args.prediction ?? null,
         }),
       });
       const raw = await res.text().catch(() => '');
@@ -433,6 +528,116 @@ export function Layout() {
         writeStatus({ enabled: true, kind: 'entry', text: `Entrada efetuada (${(v as any)?.homeTeam ?? ''} x ${(v as any)?.awayTeam ?? ''})` });
       }
 
+      const maybeStartAsianHandicapAuto = async () => {
+        const rawLimits =
+          (cfgNow?.betfairRobotLimits && typeof cfgNow.betfairRobotLimits === 'object' ? (cfgNow.betfairRobotLimits as any).asianHandicap : null) ?? null;
+        if (!rawLimits || typeof rawLimits !== 'object') return;
+
+        const autoEnabled = Boolean((rawLimits as any)?.autoEnabled ?? false);
+        if (!autoEnabled) return;
+
+        const autoOnlyRequested = Boolean((rawLimits as any)?.autoOnlyRequestedFixtures ?? true);
+        const autoMinConfidenceRaw = Number((rawLimits as any)?.autoMinConfidence ?? 75);
+        const autoMinConfidence = Number.isFinite(autoMinConfidenceRaw) ? Math.max(50, Math.min(95, Math.floor(autoMinConfidenceRaw))) : 75;
+        const autoCooldownMinutesRaw = Number((rawLimits as any)?.autoCooldownMinutes ?? 20);
+        const autoCooldownMinutes = Number.isFinite(autoCooldownMinutesRaw) ? Math.max(0, Math.min(240, Math.floor(autoCooldownMinutesRaw))) : 20;
+        const autoMaxPerDayRaw = Number((rawLimits as any)?.autoMaxPerDay ?? 8);
+        const autoMaxPerDay = Number.isFinite(autoMaxPerDayRaw) ? Math.max(0, Math.min(50, Math.floor(autoMaxPerDayRaw))) : 8;
+
+        const ahAuto = readAhAuto();
+        const lastEnqIso = String(ahAuto.lastEnqueuedAt ?? '').trim();
+        const lastEnqMs = lastEnqIso ? new Date(lastEnqIso).getTime() : 0;
+        if (autoCooldownMinutes > 0 && lastEnqMs && Number.isFinite(lastEnqMs) && Date.now() - lastEnqMs < autoCooldownMinutes * 60_000) return;
+        if (autoMaxPerDay > 0 && Object.keys(ahAuto.items).length >= autoMaxPerDay) return;
+
+        const requestedIds = autoOnlyRequested ? readRequestedFixtureIds() : null;
+
+        const { projectId } = await import('/utils/supabase/info');
+        const headers = await getEdgeHeaders();
+        const qRes = await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/queue/list`, {
+          method: 'POST',
+          headers,
+          body: '{}',
+        }).catch(() => null);
+        const qRaw = qRes ? await qRes.text().catch(() => '') : '';
+        const qData = qRaw ? JSON.parse(qRaw) : null;
+        const existingQueueIds = new Set<string>(
+          Array.isArray(qData?.items) ? (qData.items as any[]).map((x) => String((x as any)?.matchId ?? '').trim()).filter(Boolean) : [],
+        );
+
+        const marketPercents =
+          (cfgNow?.betfairMarketPercents && typeof cfgNow.betfairMarketPercents === 'object') ? cfgNow.betfairMarketPercents : {};
+        const ahPct = Number(marketPercents.asianHandicap ?? 0);
+        const bankrollForAh =
+          Number.isFinite(bankrollTotal) && bankrollTotal > 0 && Number.isFinite(ahPct) && ahPct > 0
+            ? Math.round(((bankrollTotal * ahPct) / 100) * 100) / 100
+            : 50;
+
+        for (const [matchId, v] of Object.entries(feed.items)) {
+          const status = String((v as any)?.status ?? '').trim();
+          if (status !== 'live') continue;
+          if (autoOnlyRequested && requestedIds && !requestedIds.has(matchId)) continue;
+          if (ahAuto.items[matchId]) continue;
+          if (existingQueueIds.has(matchId)) continue;
+
+          const prediction = readPredictionFromCache(matchId);
+          if (!prediction) {
+            ensureRequestedFixture(matchId);
+            continue;
+          }
+
+          const pAh = (prediction as any)?.asianHandicap ?? null;
+          const team = String(pAh?.team ?? '').trim();
+          const line = Number(pAh?.line);
+          const confidence = Number(pAh?.confidence);
+          if ((team !== 'home' && team !== 'away') || !Number.isFinite(line) || !Number.isFinite(confidence)) continue;
+          if (confidence < autoMinConfidence) continue;
+
+          const utcDate = (v as any)?.utcDate ?? null;
+          const homeTeam = (v as any)?.homeTeam ?? null;
+          const awayTeam = (v as any)?.awayTeam ?? null;
+          const scoreHome = typeof (v as any)?.scoreHome === 'number' ? (v as any).scoreHome : null;
+          const scoreAway = typeof (v as any)?.scoreAway === 'number' ? (v as any).scoreAway : null;
+
+          await enqueueAutomation({
+            matchId,
+            source: 'api-football',
+            utcDate,
+            homeTeam,
+            awayTeam,
+            scoreHome,
+            scoreAway,
+            prediction,
+          }).catch(() => null);
+
+          await updateAutomationItem(matchId, {
+            status: 'running',
+            strategy: { agent: 'asianHandicap', asianHandicap: { phase: 'monitoring', startedAt: new Date().toISOString(), startedBy: 'independent' } },
+            markets: [{ key: 'asianHandicap', label: 'Handicap Asiático', enabled: true, details: null }],
+          }).catch(() => null);
+
+          ahAuto.items[matchId] = { enqueuedAt: new Date().toISOString(), team: team as any, line, confidence };
+          ahAuto.lastEnqueuedAt = new Date().toISOString();
+          writeAhAuto(ahAuto);
+
+          const live = {
+            fetchedAt: String(feed.updatedAt),
+            elapsed: typeof (v as any)?.liveElapsed === 'number' ? (v as any).liveElapsed : null,
+            scoreHome,
+            scoreAway,
+          };
+          await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/strategy/asianHandicap/tick`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({ matchId, adminToken, live, config: { bankroll: bankrollForAh, ...(rawLimits as any) } }),
+          }).catch(() => null);
+
+          return;
+        }
+      };
+
+      await maybeStartAsianHandicapAuto().catch(() => null);
+
       const next = readStore();
       const ids = Object.keys(next.items);
       if (ids.length === 0) return;
@@ -624,6 +829,124 @@ export function Layout() {
             adminToken,
             live,
             config: { bankroll: bankrollForOverUnder, ...(ticksLimits as any) },
+          }),
+        }).catch(() => null);
+      }
+    };
+
+    const tick = () => {
+      if (inFlight) return;
+      inFlight = true;
+      void runOnce().finally(() => {
+        inFlight = false;
+      });
+    };
+
+    tick();
+    const t = window.setInterval(tick, 10_000);
+    return () => window.clearInterval(t);
+  }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('asian_handicap_runner_mode_v1', 'layout');
+    } catch {}
+
+    let inFlight = false;
+
+    const getEdgeHeaders = async () => {
+      const { publicAnonKey } = await import('/utils/supabase/info');
+      return {
+        'Content-Type': 'application/json',
+        apikey: publicAnonKey,
+        Authorization: `Bearer ${publicAnonKey}`,
+      } as const;
+    };
+
+    const readFeed = () => {
+      try {
+        const raw = localStorage.getItem('favorite_rescue_feed_v1');
+        const parsed = raw ? (JSON.parse(raw) as any) : null;
+        if (!parsed || parsed.version !== 1 || !parsed.items || typeof parsed.items !== 'object') {
+          return { version: 1 as const, updatedAt: new Date(0).toISOString(), items: {} as Record<string, any> };
+        }
+        return parsed as { version: 1; updatedAt: string; items: Record<string, any> };
+      } catch {
+        return { version: 1 as const, updatedAt: new Date(0).toISOString(), items: {} as Record<string, any> };
+      }
+    };
+
+    const runOnce = async () => {
+      const mode = (() => {
+        try {
+          return String(localStorage.getItem('asian_handicap_runner_mode_v1') ?? '').trim();
+        } catch {
+          return '';
+        }
+      })();
+      if (mode === 'page') return;
+
+      const cfg = loadApiConfig();
+      const adminToken = String(cfg?.automationAdminToken ?? '').trim();
+      if (!adminToken) return;
+
+      const bankrollTotalRaw = Number(cfg?.betfairBankroll ?? 0);
+      const bankrollTotal = Number.isFinite(bankrollTotalRaw) && bankrollTotalRaw > 0 ? bankrollTotalRaw : 0;
+      const marketPercents = (cfg?.betfairMarketPercents && typeof cfg.betfairMarketPercents === 'object') ? cfg.betfairMarketPercents : {};
+      const ahPct = Number(marketPercents.asianHandicap ?? 0);
+      const bankrollForAh =
+        Number.isFinite(bankrollTotal) && bankrollTotal > 0 && Number.isFinite(ahPct) && ahPct > 0
+          ? Math.round(((bankrollTotal * ahPct) / 100) * 100) / 100
+          : 50;
+
+      const robotLimits = (cfg?.betfairRobotLimits && typeof cfg.betfairRobotLimits === 'object') ? cfg.betfairRobotLimits : {};
+      const ahLimits = (robotLimits as any)?.asianHandicap && typeof (robotLimits as any).asianHandicap === 'object' ? (robotLimits as any).asianHandicap : {};
+
+      const { projectId } = await import('/utils/supabase/info');
+      const headers = await getEdgeHeaders();
+
+      const feed = readFeed();
+      const feedUpdatedAtMs = new Date(feed.updatedAt).getTime();
+      const feedAgeMs = Number.isFinite(feedUpdatedAtMs) ? Date.now() - feedUpdatedAtMs : Number.POSITIVE_INFINITY;
+      const feedOk = feedAgeMs >= 0 && feedAgeMs <= 65_000;
+
+      const qRes = await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/queue/list`, {
+        method: 'POST',
+        headers,
+        body: '{}',
+      });
+      const qRaw = await qRes.text().catch(() => '');
+      const qData = qRaw ? JSON.parse(qRaw) : null;
+      if (!qRes.ok || !qData?.ok) return;
+      const items = Array.isArray(qData?.items) ? (qData.items as any[]) : [];
+
+      const targets = items
+        .filter((x) => String((x as any)?.status ?? '').trim() === 'running')
+        .filter((x) => String((x as any)?.strategy?.agent ?? '').trim() === 'asianHandicap')
+        .slice(0, 6);
+
+      for (const x of targets) {
+        const matchId = String((x as any)?.matchId ?? '').trim();
+        if (!matchId) continue;
+        const feedItem = feedOk ? ((feed.items as any)[matchId] ?? null) : null;
+        const live =
+          feedItem && typeof feedItem === 'object'
+            ? {
+                fetchedAt: String(feed.updatedAt),
+                elapsed: typeof (feedItem as any)?.liveElapsed === 'number' ? (feedItem as any).liveElapsed : null,
+                scoreHome: typeof (feedItem as any)?.scoreHome === 'number' ? (feedItem as any).scoreHome : null,
+                scoreAway: typeof (feedItem as any)?.scoreAway === 'number' ? (feedItem as any).scoreAway : null,
+              }
+            : null;
+
+        await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/strategy/asianHandicap/tick`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            matchId,
+            adminToken,
+            live,
+            config: { bankroll: bankrollForAh, ...(ahLimits as any) },
           }),
         }).catch(() => null);
       }
