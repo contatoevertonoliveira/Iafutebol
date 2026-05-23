@@ -1634,6 +1634,103 @@ export class AIAgent {
       correctScoreConfidence = 48 + pseudoRandom() * 22;
     }
 
+    const toValidOdd = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) && v > 1 ? v : null);
+    const midOdd = (back: unknown, lay: unknown) => {
+      const b = toValidOdd(back);
+      const l = toValidOdd(lay);
+      if (b != null && l != null) return (b + l) / 2;
+      return b ?? l ?? null;
+    };
+
+    const computeImpliedProbs = () => {
+      const odds = match.betfair?.odds ?? null;
+      if (!odds) return null;
+
+      const oH = midOdd(odds.home?.back, odds.home?.lay);
+      const oD = midOdd(odds.draw?.back, odds.draw?.lay);
+      const oA = midOdd(odds.away?.back, odds.away?.lay);
+
+      if (oH == null || oD == null || oA == null) return null;
+
+      const iH = 1 / oH;
+      const iD = 1 / oD;
+      const iA = 1 / oA;
+      const s = iH + iD + iA;
+      if (!Number.isFinite(s) || s <= 0) return null;
+
+      return { home: iH / s, draw: iD / s, away: iA / s };
+    };
+
+    const roundToQuarter = (v: number) => Math.round(v * 4) / 4;
+
+    const computeAsianHandicap = () => {
+      const probs = computeImpliedProbs();
+
+      const scoreDelta = clamp(homeScore - awayScore, -2, 2);
+      const baseTeam: 'home' | 'away' = scoreDelta >= 0 ? 'home' : 'away';
+
+      let team: 'home' | 'away' = baseTeam;
+      let lineAbs = 0;
+      let confidenceAh = 55;
+
+      if (probs) {
+        const pHome = probs.home;
+        const pAway = probs.away;
+        const pDraw = probs.draw;
+
+        team = pHome >= pAway ? 'home' : 'away';
+        const pFav = team === 'home' ? pHome : pAway;
+        const pDog = team === 'home' ? pAway : pHome;
+
+        const denom = pFav + pDog;
+        const condWin = denom > 0 ? pFav / denom : 0.5;
+
+        if (pDraw >= 0.3 && Math.abs(pHome - pAway) <= 0.05) lineAbs = 0;
+        else if (condWin < 0.54) lineAbs = pDraw >= 0.26 ? 0 : 0.25;
+        else if (condWin < 0.6) lineAbs = 0.5;
+        else if (condWin < 0.66) lineAbs = 0.75;
+        else if (condWin < 0.72) lineAbs = 1.0;
+        else if (condWin < 0.78) lineAbs = 1.25;
+        else lineAbs = 1.5;
+
+        const deltaBoost = Math.abs(scoreDelta);
+        if (deltaBoost >= 0.6) lineAbs += 0.25;
+        else if (deltaBoost >= 0.35) lineAbs += 0.25;
+
+        if (expTotalGoals != null) {
+          if (expTotalGoals >= 3.15) lineAbs += 0.25;
+          else if (expTotalGoals <= 2.05) lineAbs -= 0.25;
+        }
+
+        lineAbs = clamp(roundToQuarter(lineAbs), 0, 2);
+
+        const edgeNoDraw = condWin - 0.5;
+        confidenceAh = clamp(55 + edgeNoDraw * 220 - lineAbs * 4 - (pDraw >= 0.32 ? 3 : 0), 50, 92);
+      } else {
+        team = winner === 'away' ? 'away' : 'home';
+        const wc = clamp(winnerConfidence, 45, 92);
+        if (wc < 58) lineAbs = 0;
+        else if (wc < 64) lineAbs = 0.25;
+        else if (wc < 70) lineAbs = 0.5;
+        else if (wc < 76) lineAbs = 0.75;
+        else if (wc < 82) lineAbs = 1.0;
+        else lineAbs = 1.25;
+
+        if (expTotalGoals != null) {
+          if (expTotalGoals >= 3.2) lineAbs += 0.25;
+          else if (expTotalGoals <= 2.0) lineAbs -= 0.25;
+        }
+
+        lineAbs = clamp(roundToQuarter(lineAbs), 0, 2);
+        confidenceAh = clamp(wc - lineAbs * 3, 50, 90);
+      }
+
+      const line = lineAbs === 0 ? 0 : -lineAbs;
+      return { team, line, confidence: confidenceAh };
+    };
+
+    const ah = computeAsianHandicap();
+
     return {
       agentName: this.profile.name,
       agentType: this.profile.type,
@@ -1654,9 +1751,9 @@ export class AIAgent {
         confidence: correctScoreConfidence,
       },
       asianHandicap: {
-        team: winner === 'draw' ? 'home' : winner,
-        line: winner === 'home' ? -0.5 : 0.5,
-        confidence: 55 + pseudoRandom() * 25,
+        team: ah.team,
+        line: ah.line,
+        confidence: ah.confidence,
       },
       firstHalf: {
         prediction: pseudoRandom() > 0.6 ? 'draw' : winner,
