@@ -88,6 +88,30 @@ export default function DailyOverviewPage() {
     return 'scheduled';
   };
 
+  const formatLineKey = (line: number) => {
+    if (!Number.isFinite(line)) return '0';
+    const s = Math.abs(line % 1) < 1e-9 ? line.toFixed(0) : line.toFixed(2);
+    return s.replace(/0+$/g, '').replace(/\.$/g, '');
+  };
+
+  const asianHandicapProfitUnits = (teamGoals: number, oppGoals: number, line: number) => {
+    if (!Number.isFinite(line)) return null;
+    const diff = teamGoals - oppGoals;
+    const q = Math.round(line * 4) / 4;
+    const frac = ((q % 1) + 1) % 1;
+
+    const settleSingle = (ln: number) => {
+      const v = diff + ln;
+      if (v > 0) return 1;
+      if (v < 0) return -1;
+      return 0;
+    };
+
+    if (Math.abs(frac - 0.25) < 1e-9) return 0.5 * settleSingle(q - 0.25) + 0.5 * settleSingle(q + 0.25);
+    if (Math.abs(frac - 0.75) < 1e-9) return 0.5 * settleSingle(q - 0.25) + 0.5 * settleSingle(q + 0.25);
+    return settleSingle(q);
+  };
+
   const finishedToday = useMemo(() => {
     if (!cache) return [] as FootballMatch[];
     const todayKey = getDayKey(new Date());
@@ -111,11 +135,24 @@ export default function DailyOverviewPage() {
       const actualOverUnder = prediction ? (totalGoals > prediction.overUnder.line ? 'over' : 'under') : null;
       const actualBtts = home > 0 && away > 0 ? 'yes' : 'no';
 
-      const marketTotal = prediction ? 3 : 0;
+      const ahOk = (() => {
+        if (!prediction) return null;
+        const team = prediction.asianHandicap?.team;
+        const line = Number(prediction.asianHandicap?.line);
+        if (!(team === 'home' || team === 'away')) return null;
+        if (!Number.isFinite(line)) return null;
+        const profitUnits =
+          team === 'home' ? asianHandicapProfitUnits(home, away, line) : asianHandicapProfitUnits(away, home, line);
+        if (typeof profitUnits !== 'number' || !Number.isFinite(profitUnits)) return null;
+        return profitUnits >= 0;
+      })();
+
+      const marketTotal = prediction ? 4 : 0;
       const marketCorrect = prediction
         ? Number(prediction.winner.prediction === actualWinner) +
           Number(prediction.overUnder.prediction === actualOverUnder) +
-          Number(prediction.btts.prediction === actualBtts)
+          Number(prediction.btts.prediction === actualBtts) +
+          Number(Boolean(ahOk))
         : 0;
       const marketPercent = marketTotal === 0 ? 0 : Math.round((marketCorrect / marketTotal) * 100);
 
@@ -152,6 +189,26 @@ export default function DailyOverviewPage() {
   }, [matchRows]);
 
   const readLearningSummary = () => {
+    const rawV3 = localStorage.getItem('agent_learning_history_v3');
+    if (rawV3) {
+      try {
+        const parsed = JSON.parse(rawV3) as any;
+        if (parsed && parsed.version === 3 && parsed.agents && typeof parsed.agents === 'object') {
+          let total = 0;
+          let correct = 0;
+          for (const a of Object.values(parsed.agents)) {
+            const byMarket = (a as any)?.byMarket;
+            if (!byMarket || typeof byMarket !== 'object') continue;
+            for (const v of Object.values(byMarket)) {
+              total += Number((v as any)?.total ?? 0) || 0;
+              correct += Number((v as any)?.correct ?? 0) || 0;
+            }
+          }
+          return { total, correct };
+        }
+      } catch {}
+    }
+
     const raw = localStorage.getItem('agent_learning_history');
     if (!raw) return { total: 0, correct: 0 };
     try {
@@ -174,7 +231,7 @@ export default function DailyOverviewPage() {
     };
     const onStorage = (e: StorageEvent) => {
       if (!e.key) return;
-      if (e.key.startsWith('matchesCache_v') || e.key === 'agent_learning_history') refresh();
+      if (e.key.startsWith('matchesCache_v') || e.key === 'agent_learning_history' || e.key === 'agent_learning_history_v3') refresh();
     };
     const onFocus = () => refresh();
     const onVisibility = () => {
@@ -222,10 +279,23 @@ export default function DailyOverviewPage() {
             if (!totalsByAgent[p.agentName]) totalsByAgent[p.agentName] = { total: 0, correct: 0 };
 
             const actualOverUnder = totalGoals > p.overUnder.line ? 'over' : 'under';
+            const ahOk = (() => {
+              const team = (p as any)?.asianHandicap?.team;
+              const line = Number((p as any)?.asianHandicap?.line);
+              if (!(team === 'home' || team === 'away')) return 0;
+              if (!Number.isFinite(line)) return 0;
+              const profitUnits =
+                team === 'home' ? asianHandicapProfitUnits(home, away, line) : asianHandicapProfitUnits(away, home, line);
+              if (typeof profitUnits !== 'number' || !Number.isFinite(profitUnits)) return 0;
+              return Number(profitUnits >= 0);
+            })();
             const hits =
-              Number(p.winner === actualWinner) + Number(p.overUnder.prediction === actualOverUnder) + Number(p.btts.prediction === actualBtts);
+              Number(p.winner === actualWinner) +
+              Number(p.overUnder.prediction === actualOverUnder) +
+              Number(p.btts.prediction === actualBtts) +
+              ahOk;
 
-            totalsByAgent[p.agentName].total += 3;
+            totalsByAgent[p.agentName].total += 4;
             totalsByAgent[p.agentName].correct += hits;
           }
         }
@@ -392,7 +462,8 @@ export default function DailyOverviewPage() {
                           <div className="mt-2 text-xs text-gray-600">
                             Consenso: {r.prediction.winner.prediction === 'home' ? 'Casa' : r.prediction.winner.prediction === 'away' ? 'Fora' : 'Empate'} •{' '}
                             OU {r.prediction.overUnder.prediction === 'over' ? 'Over' : 'Under'} {r.prediction.overUnder.line} •{' '}
-                            Ambos {r.prediction.btts.prediction === 'yes' ? 'Sim' : 'Não'}
+                            Ambos {r.prediction.btts.prediction === 'yes' ? 'Sim' : 'Não'} •{' '}
+                            AH {r.prediction.asianHandicap.team === 'home' ? 'Casa' : 'Fora'} {`${Number(r.prediction.asianHandicap.line) > 0 ? '+' : ''}${formatLineKey(r.prediction.asianHandicap.line)}`}
                           </div>
                         )}
                       </div>

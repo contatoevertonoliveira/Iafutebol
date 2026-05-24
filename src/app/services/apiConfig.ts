@@ -18,12 +18,6 @@ export interface ApiConfig {
   betfairBankroll?: number;
   betfairMarketPercents?: Record<string, number>;
   betfairRobotLimits?: {
-    scalpingGoals?: {
-      profitTargetPct?: number;
-      stakePct?: number;
-      entryOffsetTicks?: number;
-      secondsToWaitMatch?: number;
-    };
     scalpingTicks?: {
       targetTicks?: number;
       entryOffsetTicks?: number;
@@ -31,9 +25,24 @@ export interface ApiConfig {
       maxSpreadTicks?: number;
       minSecondsBetweenCycles?: number;
       stakePct?: number;
+      stakeAbs?: number;
       maxCycles?: number;
       secondsToWaitMatch?: number;
       invertVolumePct?: number;
+      overReevalMinMinutes?: number;
+      overReevalMaxMinutes?: number;
+      lateNoGoalEnabled?: boolean;
+      lateNoGoalMinMinute?: number;
+      lateUnderLimitEnabled?: boolean;
+      lateUnderLimitMinMinute?: number;
+      lateUnderLimitTargetTicksMin?: number;
+      lateUnderLimitTargetTicksMax?: number;
+      lateUnderLimitMinSecondsBetweenCycles?: number;
+      hedgeUnderEnabled?: boolean;
+      hedgeUnderAboveGoals?: number;
+      hedgeUnderMinMinute?: number;
+      hedgeUnderStakePct?: number;
+      hedgeUnderTargetTicks?: number;
       momentOverThreshold?: number;
       momentOverThresholdLate?: number;
       momentOverThresholdOffDelta?: number;
@@ -54,6 +63,7 @@ export interface ApiConfig {
       dominanceRatio?: number;
       minSecondsBetweenEntries?: number;
       stakePct?: number;
+      stakeAbs?: number;
       entryOffsetTicks?: number;
       secondsToWaitMatch?: number;
     };
@@ -63,6 +73,7 @@ export interface ApiConfig {
       minMarketMatched?: number;
       minRunnerMatched?: number;
       stakePct?: number;
+      stakeAbs?: number;
       profitTargetPct?: number;
       secondsToWaitMatch?: number;
       maxEntries?: number;
@@ -79,6 +90,7 @@ export interface ApiConfig {
       maxSelections?: number;
       entryScoresCsv?: string;
       minMarketMatched?: number;
+      stakeAbs?: number;
     };
     favoriteRescue?: {
       enabled?: boolean;
@@ -362,12 +374,6 @@ export function loadApiConfig(): ApiConfig | null {
         secondHalf: 0,
       } as Record<string, number>,
       betfairRobotLimits: {
-        scalpingGoals: {
-          profitTargetPct: 0.1,
-          stakePct: 1,
-          entryOffsetTicks: 2,
-          secondsToWaitMatch: 10,
-        },
         scalpingTicks: {
           targetTicks: 10,
           entryOffsetTicks: 2,
@@ -375,17 +381,33 @@ export function loadApiConfig(): ApiConfig | null {
           maxSpreadTicks: 2,
           minSecondsBetweenCycles: 8,
           stakePct: 1,
+          stakeAbs: 2,
           maxCycles: 50,
           secondsToWaitMatch: 10,
           invertVolumePct: 300,
+          overReevalMinMinutes: 5,
+          overReevalMaxMinutes: 10,
+          lateNoGoalEnabled: true,
+          lateNoGoalMinMinute: 80,
+          lateUnderLimitEnabled: true,
+          lateUnderLimitMinMinute: 75,
+          lateUnderLimitTargetTicksMin: 5,
+          lateUnderLimitTargetTicksMax: 10,
+          lateUnderLimitMinSecondsBetweenCycles: 4,
+          hedgeUnderEnabled: true,
+          hedgeUnderAboveGoals: 2,
+          hedgeUnderMinMinute: 70,
+          hedgeUnderStakePct: 0.25,
+          hedgeUnderTargetTicks: 6,
           momentOverThreshold: 0.7,
           momentOverThresholdLate: 0.85,
           momentOverThresholdOffDelta: 0.15,
           momentWindowMinSec: 8,
           momentWindowMaxSec: 180,
-          minMarketMatched: 15000,
-          minRunnerMatched: 2500,
+          minMarketMatched: 0,
+          minRunnerMatched: 0,
           afterGoalWaitSeconds: 30,
+          recoveryEnabled: false,
         },
         overGoalsLimit: {
           minOdds: 1.3,
@@ -395,6 +417,7 @@ export function loadApiConfig(): ApiConfig | null {
           dominanceRatio: 1.25,
           minSecondsBetweenEntries: 30,
           stakePct: 1,
+          stakeAbs: 2,
           entryOffsetTicks: 2,
           secondsToWaitMatch: 10,
         },
@@ -404,6 +427,7 @@ export function loadApiConfig(): ApiConfig | null {
           minMarketMatched: 120000,
           minRunnerMatched: 20000,
           stakePct: 1,
+          stakeAbs: 2,
           profitTargetPct: 0.03,
           secondsToWaitMatch: 10,
           maxEntries: 3,
@@ -413,7 +437,8 @@ export function loadApiConfig(): ApiConfig | null {
         correctScore: {
           minProfitPct: 0.03,
           maxSelections: 6,
-          minMarketMatched: 1000,
+          minMarketMatched: 0,
+          stakeAbs: 2,
         },
         favoriteRescue: {
           enabled: false,
@@ -423,7 +448,7 @@ export function loadApiConfig(): ApiConfig | null {
           awayOddsMinLosing02: 1.3,
           awayOddsMaxLosing01: 4,
           awayOddsMaxLosing02: 3,
-          matchOddsLayStakeAbs: 10,
+          matchOddsLayStakeAbs: 2,
           correctScoreLayStakeAbs: 2,
           matchOddsTakeProfitMinPct: 0.1,
           matchOddsTakeProfitMaxPct: 0.15,
@@ -459,14 +484,12 @@ export function loadApiConfig(): ApiConfig | null {
       betfairRobotLimits: (() => {
         const raw = (storedConfig as any)?.betfairRobotLimits;
         if (!raw || typeof raw !== 'object') return defaults.betfairRobotLimits;
-        const sg = raw?.scalpingGoals && typeof raw.scalpingGoals === 'object' ? raw.scalpingGoals : {};
         const st = raw?.scalpingTicks && typeof raw.scalpingTicks === 'object' ? raw.scalpingTicks : {};
         const og = raw?.overGoalsLimit && typeof raw.overGoalsLimit === 'object' ? raw.overGoalsLimit : {};
         const ah = raw?.asianHandicap && typeof raw.asianHandicap === 'object' ? raw.asianHandicap : {};
         const cs = raw?.correctScore && typeof raw.correctScore === 'object' ? raw.correctScore : {};
         const fr = raw?.favoriteRescue && typeof raw.favoriteRescue === 'object' ? raw.favoriteRescue : {};
         return {
-          scalpingGoals: { ...(defaults.betfairRobotLimits?.scalpingGoals ?? {}), ...(sg as any) },
           scalpingTicks: { ...(defaults.betfairRobotLimits?.scalpingTicks ?? {}), ...(st as any) },
           overGoalsLimit: { ...(defaults.betfairRobotLimits?.overGoalsLimit ?? {}), ...(og as any) },
           asianHandicap: { ...(defaults.betfairRobotLimits?.asianHandicap ?? {}), ...(ah as any) },
@@ -493,7 +516,6 @@ export function loadApiConfig(): ApiConfig | null {
     secondHalf: 0,
   };
   const defaultsBetfairRobotLimits = {
-    scalpingGoals: { profitTargetPct: 0.1, stakePct: 1, entryOffsetTicks: 2, secondsToWaitMatch: 10 },
     scalpingTicks: {
       targetTicks: 10,
       entryOffsetTicks: 2,
@@ -501,18 +523,33 @@ export function loadApiConfig(): ApiConfig | null {
       maxSpreadTicks: 2,
       minSecondsBetweenCycles: 8,
       stakePct: 1,
+      stakeAbs: 2,
       maxCycles: 50,
       secondsToWaitMatch: 10,
       invertVolumePct: 300,
+      overReevalMinMinutes: 5,
+      overReevalMaxMinutes: 10,
+      lateNoGoalEnabled: true,
+      lateNoGoalMinMinute: 80,
+      lateUnderLimitEnabled: true,
+      lateUnderLimitMinMinute: 75,
+      lateUnderLimitTargetTicksMin: 5,
+      lateUnderLimitTargetTicksMax: 10,
+      lateUnderLimitMinSecondsBetweenCycles: 4,
+      hedgeUnderEnabled: true,
+      hedgeUnderAboveGoals: 2,
+      hedgeUnderMinMinute: 70,
+      hedgeUnderStakePct: 0.25,
+      hedgeUnderTargetTicks: 6,
       momentOverThreshold: 0.7,
       momentOverThresholdLate: 0.85,
       momentOverThresholdOffDelta: 0.15,
       momentWindowMinSec: 8,
       momentWindowMaxSec: 180,
-      minMarketMatched: 15000,
-      minRunnerMatched: 2500,
+      minMarketMatched: 0,
+      minRunnerMatched: 0,
       afterGoalWaitSeconds: 30,
-      recoveryEnabled: true,
+      recoveryEnabled: false,
       recoveryIncreasePct: 0.25,
       recoveryMaxStakeAbs: 100,
     },
@@ -524,6 +561,7 @@ export function loadApiConfig(): ApiConfig | null {
       dominanceRatio: 1.25,
       minSecondsBetweenEntries: 30,
       stakePct: 1,
+      stakeAbs: 2,
       entryOffsetTicks: 2,
       secondsToWaitMatch: 10,
     },
@@ -533,6 +571,7 @@ export function loadApiConfig(): ApiConfig | null {
       minMarketMatched: 120000,
       minRunnerMatched: 20000,
       stakePct: 1,
+      stakeAbs: 2,
       profitTargetPct: 0.03,
       secondsToWaitMatch: 10,
       maxEntries: 3,
@@ -544,7 +583,7 @@ export function loadApiConfig(): ApiConfig | null {
       autoCooldownMinutes: 20,
       autoMaxPerDay: 8,
     },
-    correctScore: { minProfitPct: 0.03, maxSelections: 6, entryScoresCsv: "0-0,0-1,1-0,1-1", minMarketMatched: 1000 },
+    correctScore: { minProfitPct: 0.03, maxSelections: 6, entryScoresCsv: "0-0,0-1,1-0,1-1", minMarketMatched: 0, stakeAbs: 2 },
     favoriteRescue: {
       enabled: false,
       minFavWinProb: 0.55,
@@ -553,7 +592,7 @@ export function loadApiConfig(): ApiConfig | null {
       awayOddsMinLosing02: 1.3,
       awayOddsMaxLosing01: 4,
       awayOddsMaxLosing02: 3,
-      matchOddsLayStakeAbs: 10,
+      matchOddsLayStakeAbs: 2,
       correctScoreLayStakeAbs: 2,
       matchOddsTakeProfitMinPct: 0.1,
       matchOddsTakeProfitMaxPct: 0.15,
@@ -583,14 +622,12 @@ export function loadApiConfig(): ApiConfig | null {
     betfairRobotLimits: (() => {
       const raw = (storedConfig as any)?.betfairRobotLimits;
       if (!raw || typeof raw !== 'object') return defaultsBetfairRobotLimits;
-      const sg = raw?.scalpingGoals && typeof raw.scalpingGoals === 'object' ? raw.scalpingGoals : {};
       const st = raw?.scalpingTicks && typeof raw.scalpingTicks === 'object' ? raw.scalpingTicks : {};
       const og = raw?.overGoalsLimit && typeof raw.overGoalsLimit === 'object' ? raw.overGoalsLimit : {};
       const ah = raw?.asianHandicap && typeof raw.asianHandicap === 'object' ? raw.asianHandicap : {};
       const cs = raw?.correctScore && typeof raw.correctScore === 'object' ? raw.correctScore : {};
       const fr = raw?.favoriteRescue && typeof raw.favoriteRescue === 'object' ? raw.favoriteRescue : {};
       return {
-        scalpingGoals: { ...(defaultsBetfairRobotLimits.scalpingGoals ?? {}), ...(sg as any) },
         scalpingTicks: { ...(defaultsBetfairRobotLimits.scalpingTicks ?? {}), ...(st as any) },
         overGoalsLimit: { ...(defaultsBetfairRobotLimits.overGoalsLimit ?? {}), ...(og as any) },
         asianHandicap: { ...(defaultsBetfairRobotLimits.asianHandicap ?? {}), ...(ah as any) },

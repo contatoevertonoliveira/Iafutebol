@@ -18,6 +18,7 @@ const json = (body: unknown, status = 200, extraHeaders?: Record<string, string>
   });
 
 const BETFAIR_QUEUE_PREFIX = "betfair/automation_queue_v1/item/";
+const LIVE_SNAPSHOT_KEY = "betfair/live_snapshot_v1";
 const TIME_ZONE = "America/Sao_Paulo";
 
 const dayKeySp = (d: Date) =>
@@ -643,8 +644,13 @@ Deno.serve(async (req) => {
         const key = `${BETFAIR_QUEUE_PREFIX}${matchId}`;
         const existing = (await kv.get(key)) ?? null;
         const now = new Date().toISOString();
+        const rawFixtureId = (body as any)?.fixtureId ?? (existing as any)?.fixtureId ?? null;
+        const fixtureIdNum = Number(rawFixtureId);
+        const fixtureId =
+          Number.isFinite(fixtureIdNum) && fixtureIdNum > 0 ? Math.floor(fixtureIdNum) : null;
         const payload: any = {
           matchId,
+          fixtureId,
           source: String((body as any)?.source ?? "").trim() || existing?.source || null,
           utcDate: String((body as any)?.utcDate ?? "").trim() || existing?.utcDate || null,
           homeTeam: String((body as any)?.homeTeam ?? "").trim() || existing?.homeTeam || null,
@@ -832,6 +838,91 @@ Deno.serve(async (req) => {
         return json({ ok: false, error: message || "Erro ao atualizar odds" }, 500);
       }
     }
+
+    if (method === "POST" && matchPath(path, "/automation/live/snapshot/upsert")) {
+      try {
+        const body = await parseJson(req);
+        const admin = requireAdminToken(body);
+        if (!admin.ok) return json(admin, 401);
+
+        const rawItems = (body as any)?.items && typeof (body as any).items === "object" ? (body as any).items : {};
+        const incomingEntries = Object.entries(rawItems)
+          .map(([k, v]) => [String(k ?? "").trim(), v] as const)
+          .filter(([k, v]) => Boolean(k) && v && typeof v === "object");
+        if (incomingEntries.length === 0) {
+          return json({ ok: true, updated: 0, skipped: 0 });
+        }
+
+        const nowIso = new Date().toISOString();
+        const stored = (await kv.get(LIVE_SNAPSHOT_KEY)) ?? null;
+        const prevItems = stored && typeof stored === "object" && (stored as any).version === 1 && (stored as any).items && typeof (stored as any).items === "object"
+          ? (stored as any).items
+          : {};
+
+        const nextItems: Record<string, any> = { ...prevItems };
+        let updated = 0;
+        let skipped = 0;
+        for (const [matchId, v] of incomingEntries) {
+          const prev = nextItems[matchId] ?? null;
+          const prevAt = String(prev?.updatedAt ?? prev?.fetchedAt ?? "").trim();
+          const incomingAt = String((v as any)?.updatedAt ?? (v as any)?.fetchedAt ?? "").trim();
+          const prevMs = prevAt ? new Date(prevAt).getTime() : 0;
+          const incMs = incomingAt ? new Date(incomingAt).getTime() : 0;
+          if (prevMs && incMs && Number.isFinite(prevMs) && Number.isFinite(incMs) && incMs < prevMs) {
+            skipped += 1;
+            continue;
+          }
+          nextItems[matchId] = { ...(prev && typeof prev === "object" ? prev : {}), ...(v as any), updatedAt: incomingAt || nowIso };
+          updated += 1;
+        }
+
+        const pruned = Object.entries(nextItems)
+          .map(([k, v]) => [String(k ?? "").trim(), v] as const)
+          .filter(([k, v]) => Boolean(k) && v && typeof v === "object")
+          .sort((a, b) => String((b[1] as any)?.updatedAt ?? "").localeCompare(String((a[1] as any)?.updatedAt ?? "")))
+          .slice(0, 2000);
+
+        const snapshot = { version: 1 as const, updatedAt: nowIso, items: Object.fromEntries(pruned) };
+        await kv.set(LIVE_SNAPSHOT_KEY, snapshot);
+        return json({ ok: true, updated, skipped, total: pruned.length, updatedAt: nowIso });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return json({ ok: false, error: message || "Erro ao salvar snapshot" }, 500);
+      }
+    }
+
+    if (method === "POST" && matchPath(path, "/automation/live/snapshot/get")) {
+      try {
+        const body = await parseJson(req);
+        const admin = requireAdminToken(body);
+        if (!admin.ok) return json(admin, 401);
+
+        const raw = (await kv.get(LIVE_SNAPSHOT_KEY)) ?? null;
+        const stored = raw && typeof raw === "object" && (raw as any).version === 1 && (raw as any).items && typeof (raw as any).items === "object"
+          ? (raw as any)
+          : { version: 1 as const, updatedAt: new Date(0).toISOString(), items: {} as Record<string, any> };
+
+        const matchIdsRaw = Array.isArray((body as any)?.matchIds) ? (body as any).matchIds : null;
+        const matchIds = matchIdsRaw
+          ? matchIdsRaw.map((x: any) => String(x ?? "").trim()).filter(Boolean).slice(0, 120)
+          : null;
+
+        if (!matchIds || matchIds.length === 0) {
+          return json({ ok: true, snapshot: stored });
+        }
+
+        const out: Record<string, any> = {};
+        for (const id of matchIds) {
+          const v = (stored.items as any)[id];
+          if (v && typeof v === "object") out[id] = v;
+        }
+        return json({ ok: true, snapshot: { version: 1 as const, updatedAt: stored.updatedAt, items: out } });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return json({ ok: false, error: message || "Erro ao carregar snapshot" }, 500);
+      }
+    }
+
     if (method === "POST" && path.includes("/automation/betfair/strategy/")) {
     const body = await parseJson(req);
     const matchId = String((body as any)?.matchId ?? "").trim();
@@ -1048,6 +1139,955 @@ Deno.serve(async (req) => {
       return json({ ok: true, skipped: true, reason: "unsupported_agent", agent: agent || null });
     }
 
+    if (matchPath(path, "/automation/betfair/strategy/overGoalsLimit/tick")) {
+      const admin = requireAdminToken(body);
+      if (!admin.ok) return json(admin, 401);
+      const current = await getQueueItem(matchId);
+      if (!current) return json({ ok: false, error: "Item não encontrado" }, 404);
+
+      const baseBetfair = await resolveBetfairMatchOdds({
+        homeTeam: String(current?.homeTeam ?? ""),
+        awayTeam: String(current?.awayTeam ?? ""),
+        utcDate: current?.utcDate == null ? null : String(current.utcDate),
+        includeCorrectScore: false,
+      });
+
+      const strategy = (current as any)?.strategy && typeof (current as any).strategy === "object" ? (current as any).strategy : {};
+      const existing = (strategy as any)?.overGoalsLimit && typeof (strategy as any).overGoalsLimit === "object" ? (strategy as any).overGoalsLimit : {};
+
+      const cfg = (body as any)?.config && typeof (body as any).config === "object" ? (body as any).config : {};
+      const bankroll = Number(cfg?.bankroll ?? 50);
+      const stakePctRaw = Number(cfg?.stakePct ?? 1);
+      const stakePct = Number.isFinite(stakePctRaw) ? Math.max(0, Math.min(100, stakePctRaw)) : 1;
+      const stakeAbsCfgRaw = Number(cfg?.stakeAbs);
+      const stakeAbsCfg = Number.isFinite(stakeAbsCfgRaw) ? round2(stakeAbsCfgRaw) : NaN;
+      const stakeAbs =
+        Number.isFinite(stakeAbsCfg) && stakeAbsCfg > 0
+          ? Math.max(2, stakeAbsCfg)
+          : Number.isFinite(bankroll) && bankroll > 0 && Number.isFinite(stakePct) && stakePct > 0
+            ? Math.max(2, round2((bankroll * stakePct) / 100))
+            : 2;
+      const minOddsRaw = Number(cfg?.minOdds ?? 1.2);
+      const minOdds = Number.isFinite(minOddsRaw) ? Math.max(1.01, Math.min(1000, minOddsRaw)) : 1.2;
+      const maxEntriesRaw = Number(cfg?.maxEntries ?? 3);
+      const maxEntries = Number.isFinite(maxEntriesRaw) ? Math.max(1, Math.min(50, Math.floor(maxEntriesRaw))) : 3;
+      const profitTargetPctRaw = Number(cfg?.profitTargetPct ?? 5);
+      const profitTargetPct = Number.isFinite(profitTargetPctRaw) ? Math.max(0.25, Math.min(50, profitTargetPctRaw)) : 5;
+      const minDeltaTradedRaw = Number(cfg?.minDeltaTraded);
+      const minDeltaTraded = Number.isFinite(minDeltaTradedRaw) ? Math.max(0, Math.floor(minDeltaTradedRaw)) : null;
+      const dominanceRatioRaw = Number(cfg?.dominanceRatio);
+      const dominanceRatio = Number.isFinite(dominanceRatioRaw) ? Math.max(0, Math.min(1.5, dominanceRatioRaw)) : null;
+      const minSecondsBetweenEntriesRaw = Number(cfg?.minSecondsBetweenEntries ?? 30);
+      const minSecondsBetweenEntries = Number.isFinite(minSecondsBetweenEntriesRaw)
+        ? Math.max(0, Math.min(3600, Math.floor(minSecondsBetweenEntriesRaw)))
+        : 30;
+      const entryOffsetTicksRaw = Number(cfg?.entryOffsetTicks ?? 0);
+      const entryOffsetTicks = Number.isFinite(entryOffsetTicksRaw) ? Math.max(0, Math.min(10, Math.floor(entryOffsetTicksRaw))) : 0;
+      const secondsToWaitMatchRaw = Number(cfg?.secondsToWaitMatch ?? 10);
+      const secondsToWaitMatch = Number.isFinite(secondsToWaitMatchRaw) ? Math.max(0, Math.min(3600, Math.floor(secondsToWaitMatchRaw))) : 10;
+
+      const momentOverThresholdRaw = Number(cfg?.momentOverThreshold ?? 0.7);
+      const momentOverThreshold = Number.isFinite(momentOverThresholdRaw) ? Math.max(0.1, Math.min(2, momentOverThresholdRaw)) : 0.7;
+      const momentOverThresholdLateRaw = Number(cfg?.momentOverThresholdLate ?? 0.85);
+      const momentOverThresholdLate = Number.isFinite(momentOverThresholdLateRaw) ? Math.max(0.1, Math.min(2, momentOverThresholdLateRaw)) : 0.85;
+      const momentOverThresholdOffDeltaRaw = Number(cfg?.momentOverThresholdOffDelta ?? 0.15);
+      const momentOverThresholdOffDelta = Number.isFinite(momentOverThresholdOffDeltaRaw) ? Math.max(0, Math.min(1, momentOverThresholdOffDeltaRaw)) : 0.15;
+      const momentWindowMinSecRaw = Number(cfg?.momentWindowMinSec ?? 8);
+      const momentWindowMaxSecRaw = Number(cfg?.momentWindowMaxSec ?? 180);
+      const momentWindowMinSec = Number.isFinite(momentWindowMinSecRaw) ? Math.max(1, Math.min(300, Math.floor(momentWindowMinSecRaw))) : 8;
+      const momentWindowMaxSecCandidate = Number.isFinite(momentWindowMaxSecRaw) ? Math.max(2, Math.min(600, Math.floor(momentWindowMaxSecRaw))) : 180;
+      const momentWindowMaxSec = Math.max(momentWindowMinSec + 1, momentWindowMaxSecCandidate);
+
+      const nowIso = new Date().toISOString();
+      const nowMs = Date.now();
+      const entryLockTtlSecondsRaw = Number((cfg as any)?.entryLockTtlSeconds ?? 180);
+      const entryLockTtlSeconds = Number.isFinite(entryLockTtlSecondsRaw) ? Math.max(5, Math.min(3600, Math.floor(entryLockTtlSecondsRaw))) : 180;
+      const entryLockPendingTtlSecondsRaw = Number((cfg as any)?.entryLockPendingTtlSeconds ?? 25);
+      const entryLockPendingTtlSeconds = Number.isFinite(entryLockPendingTtlSecondsRaw)
+        ? Math.max(4, Math.min(300, Math.floor(entryLockPendingTtlSecondsRaw)))
+        : 25;
+      const lockKeyFor = (marketId: string, selectionId: number) => {
+        const mid = String(marketId ?? "").trim();
+        const sid = Number.isFinite(selectionId) && selectionId > 0 ? Math.floor(selectionId) : 0;
+        return `${mid}:${sid}:BACK`;
+      };
+      const readEntryLocks = () => {
+        const merged: Record<string, any> = {};
+        const add = (raw: any) => {
+          if (!raw || typeof raw !== "object") return;
+          for (const [k, v] of Object.entries(raw)) {
+            const key = String(k ?? "").trim();
+            if (!key) continue;
+            if (!v || typeof v !== "object") continue;
+            merged[key] = v;
+          }
+        };
+        add((strategy as any)?.entryLocks);
+        add((existing as any)?.entryLocks);
+        for (const k of Object.keys(strategy)) {
+          const sub = (strategy as any)[k];
+          if (!sub || typeof sub !== "object") continue;
+          if (sub?.entryLocks && typeof sub.entryLocks === "object") add(sub.entryLocks);
+        }
+        return merged;
+      };
+      const pruneEntryLocks = (locks: any) => {
+        const out: Record<string, any> = {};
+        for (const [k, v] of Object.entries(locks ?? {})) {
+          if (!k) continue;
+          if (!v || typeof v !== "object") continue;
+          const exp = Number((v as any)?.expiresAtMs);
+          if (Number.isFinite(exp) && exp > nowMs) out[k] = v;
+        }
+        return out;
+      };
+      const entryLocksPruned = pruneEntryLocks(readEntryLocks());
+      const isEntryLocked = (locks: any, key: string) => {
+        const v = locks && typeof locks === "object" ? (locks as any)[key] : null;
+        const exp = Number(v?.expiresAtMs);
+        return Boolean(v && Number.isFinite(exp) && exp > nowMs);
+      };
+      const setEntryLock = (locks: any, key: string, value: any) => {
+        const base = locks && typeof locks === "object" ? locks : {};
+        return { ...base, [key]: value };
+      };
+      const clearEntryLock = (locks: any, key: string) => {
+        const base = locks && typeof locks === "object" ? locks : {};
+        const { [key]: _, ...rest } = base as any;
+        return rest;
+      };
+      const mkStableCustomerRef = (action: string, matchId: string, marketId: string, selectionId: number) => {
+        const a = String(action ?? "").replace(/[^a-zA-Z0-9]/g, "").slice(0, 4) || "x";
+        const id = String(matchId ?? "").replace(/[^a-zA-Z0-9]/g, "");
+        const tail = id.slice(-8) || "0";
+        const mid = String(marketId ?? "").replace(/[^a-zA-Z0-9]/g, "");
+        const midTail = mid.slice(-6) || "m";
+        const sid = Number.isFinite(selectionId) && selectionId > 0 ? String(Math.floor(selectionId)).slice(-4) : "0";
+        const bucket = Math.floor(Date.now() / 4000).toString(36);
+        let ref = `st-${a}-${tail}-${midTail}${sid}-${bucket}`;
+        if (ref.length > 32) ref = ref.slice(0, 32);
+        return ref;
+      };
+
+      const inPlay = Boolean(baseBetfair?.inPlay ?? false);
+      if (!inPlay) {
+        const next = {
+          ...current,
+          betfair: baseBetfair,
+          strategy: { ...strategy, agent: "overGoalsLimit", overGoalsLimit: { ...existing, phase: String(existing?.phase ?? "").trim() || "monitoring", lastTickAt: nowIso } },
+          updatedAt: nowIso,
+        };
+        await setQueueItem(matchId, next);
+        return json({ ok: true, skipped: true, reason: "waiting_inplay", item: next });
+      }
+
+      const phase = String(existing?.phase ?? "").trim() || "monitoring";
+      const entryCount = Math.max(0, Math.floor(Number(existing?.entryCount ?? 0) || 0));
+      const lastEntryAtMs = (() => {
+        const s = String(existing?.lastEntryAt ?? "").trim();
+        return s ? new Date(s).getTime() : 0;
+      })();
+      const cooldownUntilMs = Number(existing?.cooldownUntilMs);
+      if ((phase !== "entering" && phase !== "entered") && entryCount >= maxEntries) {
+        const next = {
+          ...current,
+          betfair: baseBetfair,
+          strategy: { ...strategy, agent: "overGoalsLimit", overGoalsLimit: { ...existing, phase: "stopped", lastTickAt: nowIso, entryCount } },
+          updatedAt: nowIso,
+        };
+        await setQueueItem(matchId, next);
+        return json({ ok: true, skipped: true, reason: "max_entries", item: next });
+      }
+
+      const baseTimeline = (baseBetfair as any)?.timeline ?? null;
+      const baseTimelineScoreHome = Number(baseTimeline?.scoreHome);
+      const baseTimelineScoreAway = Number(baseTimeline?.scoreAway);
+      const queueScoreHome = typeof (current as any)?.scoreHome === "number" ? (current as any).scoreHome : Number((current as any)?.scoreHome);
+      const queueScoreAway = typeof (current as any)?.scoreAway === "number" ? (current as any).scoreAway : Number((current as any)?.scoreAway);
+      const prevHomeRaw = Number(existing?.lastScoreHome);
+      const prevAwayRaw = Number(existing?.lastScoreAway);
+      const prevHome = Number.isFinite(prevHomeRaw) ? Math.max(0, Math.floor(prevHomeRaw)) : null;
+      const prevAway = Number.isFinite(prevAwayRaw) ? Math.max(0, Math.floor(prevAwayRaw)) : null;
+      const scoreHomeBase =
+        Number.isFinite(queueScoreHome) ? Math.max(0, Math.floor(queueScoreHome))
+          : Number.isFinite(baseTimelineScoreHome) ? Math.max(0, Math.floor(baseTimelineScoreHome))
+          : null;
+      const scoreAwayBase =
+        Number.isFinite(queueScoreAway) ? Math.max(0, Math.floor(queueScoreAway))
+          : Number.isFinite(baseTimelineScoreAway) ? Math.max(0, Math.floor(baseTimelineScoreAway))
+          : null;
+      const scoreHome = typeof scoreHomeBase === "number" && typeof prevHome === "number" ? Math.max(scoreHomeBase, prevHome) : scoreHomeBase;
+      const scoreAway = typeof scoreAwayBase === "number" && typeof prevAway === "number" ? Math.max(scoreAwayBase, prevAway) : scoreAwayBase;
+      const goals = typeof scoreHome === "number" && typeof scoreAway === "number" ? scoreHome + scoreAway : null;
+
+      const timelineElapsed = Number((baseBetfair as any)?.timeline?.elapsed);
+      const marketStartIso = String(baseBetfair?.marketStartTime ?? (current as any)?.utcDate ?? "").trim();
+      const marketStartMs = marketStartIso ? new Date(marketStartIso).getTime() : NaN;
+      const elapsedSec =
+        Number.isFinite(timelineElapsed) ? Math.max(0, Math.floor(timelineElapsed * 60))
+          : Number.isFinite(marketStartMs) ? Math.max(0, Math.floor((nowMs - marketStartMs) / 1000))
+          : null;
+      const elapsedMin = typeof elapsedSec === "number" ? elapsedSec / 60 : null;
+      const lateMode = typeof elapsedMin === "number" && Number.isFinite(elapsedMin) && elapsedMin >= 75;
+      if (Number.isFinite(secondsToWaitMatch) && secondsToWaitMatch > 0) {
+        if (!(typeof elapsedSec === "number" && Number.isFinite(elapsedSec) && elapsedSec >= secondsToWaitMatch)) {
+          const next = {
+            ...current,
+            betfair: baseBetfair,
+            strategy: { ...strategy, agent: "overGoalsLimit", overGoalsLimit: { ...existing, phase: "monitoring", lastTickAt: nowIso, elapsedSec } },
+            updatedAt: nowIso,
+          };
+          await setQueueItem(matchId, next);
+          return json({ ok: true, skipped: true, reason: "waiting_seconds", item: next });
+        }
+      }
+
+      const eventId = String((current as any)?.betfair?.eventId ?? baseBetfair?.eventId ?? "").trim();
+      if (!eventId) return json({ ok: false, error: "Betfair: eventId ausente" }, 500);
+      const underLineCode = Number.isFinite(Number(cfg?.ouLineCode)) && Number(cfg?.ouLineCode) > 0
+        ? Math.floor(Number(cfg?.ouLineCode))
+        : typeof goals === "number" && Number.isFinite(goals) ? Math.floor((goals * 10) + 15) : 15;
+      const overLineCode = Math.max(5, underLineCode - 10);
+
+      let ouOverErr: string | null = null;
+      let ouUnderErr: string | null = null;
+      const ouOverBetfair = await (async () => {
+        try {
+          const raw = await resolveBetfairOverUnderMarket({ eventId, lineCode: overLineCode });
+          return slimOuMarket(raw);
+        } catch (e) {
+          ouOverErr = e instanceof Error ? e.message : String(e);
+          return null;
+        }
+      })();
+      const ouUnderBetfair = await (async () => {
+        try {
+          const raw = await resolveBetfairOverUnderMarket({ eventId, lineCode: underLineCode });
+          return slimOuMarket(raw);
+        } catch (e) {
+          ouUnderErr = e instanceof Error ? e.message : String(e);
+          return null;
+        }
+      })();
+
+      const overMarketId = String(ouOverBetfair?.marketId ?? "").trim();
+      const overMarketStatus = String(ouOverBetfair?.marketStatus ?? "").trim().toUpperCase();
+      const overOverSel = Number(ouOverBetfair?.runners?.overSelectionId);
+      const overBack = Number(ouOverBetfair?.odds?.over?.back);
+      const overLay = Number(ouOverBetfair?.odds?.over?.lay);
+      const overMatchedNow = Number(ouOverBetfair?.odds?.over?.runnerMatched);
+
+      const underMatchedNow = Number(ouUnderBetfair?.odds?.under?.runnerMatched);
+      const underBack = Number(ouUnderBetfair?.odds?.under?.back);
+      const underLay = Number(ouUnderBetfair?.odds?.under?.lay);
+
+      const overReady = Boolean(overMarketId && overMarketStatus === "OPEN" && Number.isFinite(overOverSel) && overOverSel > 0 && Number.isFinite(overBack) && overBack > 1);
+      const underReady = Boolean(String(ouUnderBetfair?.marketId ?? "").trim() && String(ouUnderBetfair?.marketStatus ?? "").trim().toUpperCase() === "OPEN" && Number.isFinite(underBack) && underBack > 1);
+
+      if (!overReady || !underReady) {
+        const next = {
+          ...current,
+          betfair: baseBetfair,
+          strategy: {
+            ...strategy,
+            agent: "overGoalsLimit",
+            overGoalsLimit: {
+              ...existing,
+              phase,
+              lastTickAt: nowIso,
+              ouMarketErrorOver: ouOverErr,
+              ouMarketErrorUnder: ouUnderErr,
+              marketOver: ouOverBetfair ?? null,
+              marketUnder: ouUnderBetfair ?? null,
+            },
+          },
+          updatedAt: nowIso,
+        };
+        await setQueueItem(matchId, next);
+        return json({ ok: true, skipped: true, reason: "market_not_ready", error: ouOverErr || ouUnderErr || null, item: next });
+      }
+
+      const overSpreadTicks = Number.isFinite(overBack) && Number.isFinite(overLay) ? ticksBetweenPrices(overBack, overLay) : null;
+      const predictedSide = (() => {
+        const p = (current as any)?.prediction && typeof (current as any).prediction === "object" ? (current as any).prediction : null;
+        const pred = String(p?.overUnder?.prediction ?? "").trim().toLowerCase();
+        const conf = Number(p?.overUnder?.confidence);
+        if (!(Number.isFinite(conf) && conf >= 55)) return null;
+        if (pred === "over") return "over";
+        if (pred === "under") return "under";
+        return null;
+      })();
+
+      const momentOver = (() => {
+        const snapAtMsPrev = Number(existing?.momentSnapAtMs);
+        const snapOverMatchedPrev = Number(existing?.momentOverMatched);
+        const snapUnderMatchedPrev = Number(existing?.momentUnderMatched);
+        const snapOverBackPrev = Number(existing?.momentOverBack);
+        const lastScorePrev = Number(existing?.lastMomentOverScore);
+
+        const dtMs = Number.isFinite(snapAtMsPrev) && snapAtMsPrev > 0 ? nowMs - snapAtMsPrev : 0;
+        const dtSec = dtMs > 0 ? dtMs / 1000 : 0;
+
+        const threshold = lateMode ? momentOverThresholdLate : momentOverThreshold;
+        const thresholdOff = Math.max(0.1, threshold - momentOverThresholdOffDelta);
+
+        let score = 0;
+        let computed = false;
+        if (dtSec >= momentWindowMinSec && dtSec <= momentWindowMaxSec) {
+          const overRatio =
+            (Number.isFinite(overMatchedNow) && overMatchedNow > 0 ? overMatchedNow : 0) /
+            (Number.isFinite(snapOverMatchedPrev) && snapOverMatchedPrev > 0 ? snapOverMatchedPrev : 1);
+          const underRatio =
+            (Number.isFinite(underMatchedNow) && underMatchedNow > 0 ? underMatchedNow : 0) /
+            (Number.isFinite(snapUnderMatchedPrev) && snapUnderMatchedPrev > 0 ? snapUnderMatchedPrev : 1);
+          const overVelocity =
+            Number.isFinite(overMatchedNow) && Number.isFinite(snapOverMatchedPrev) && dtSec > 0 ? (overMatchedNow - snapOverMatchedPrev) / dtSec : 0;
+          const underVelocity =
+            Number.isFinite(underMatchedNow) && Number.isFinite(snapUnderMatchedPrev) && dtSec > 0 ? (underMatchedNow - snapUnderMatchedPrev) / dtSec : 0;
+
+          const compressionTicks =
+            Number.isFinite(snapOverBackPrev) && snapOverBackPrev > 1 && Number.isFinite(overBack) && overBack > 1 && overBack < snapOverBackPrev
+              ? ticksBetweenPrices(overBack, snapOverBackPrev) ?? 0
+              : 0;
+
+          if (overRatio >= 1.12) score += Math.min(0.45, (overRatio - 1) * 1.6);
+          if (underRatio >= 1.12) score -= Math.min(0.25, (underRatio - 1) * 0.9);
+          if (overVelocity > 0 && underVelocity >= 0) score += Math.min(0.2, (overVelocity / Math.max(1, underVelocity + 1)) * 0.05);
+          if (underVelocity > 0 && overVelocity >= 0) score -= Math.min(0.2, (underVelocity / Math.max(1, overVelocity + 1)) * 0.05);
+
+          if (compressionTicks > 0) score += Math.min(0.35, (compressionTicks / 10) * 0.35);
+
+          const spreadPenalty = overSpreadTicks != null && overSpreadTicks > 3 ? 0.2 : 0;
+          if (spreadPenalty > 0) score -= spreadPenalty;
+
+          if (predictedSide === "over") score += 0.12;
+          if (predictedSide === "under") score -= 0.08;
+
+          computed = true;
+        }
+
+        const scoreUsed = computed ? score : Number.isFinite(lastScorePrev) ? lastScorePrev : 0;
+        const wasAlert = Boolean(existing?.goalAlertActive ?? false);
+        const trigger = wasAlert ? scoreUsed >= thresholdOff : scoreUsed >= threshold;
+
+        const hasSnap = Number.isFinite(snapAtMsPrev) && snapAtMsPrev > 0;
+        const shouldUpdateSnap = !hasSnap || dtSec >= momentWindowMinSec || dtSec > momentWindowMaxSec;
+        const nextSnapAtMs = shouldUpdateSnap ? nowMs : snapAtMsPrev;
+        const nextOverMatched = shouldUpdateSnap ? (Number.isFinite(overMatchedNow) ? overMatchedNow : null) : (Number.isFinite(snapOverMatchedPrev) ? snapOverMatchedPrev : null);
+        const nextUnderMatched = shouldUpdateSnap ? (Number.isFinite(underMatchedNow) ? underMatchedNow : null) : (Number.isFinite(snapUnderMatchedPrev) ? snapUnderMatchedPrev : null);
+        const nextOverBack = shouldUpdateSnap ? (Number.isFinite(overBack) ? overBack : null) : (Number.isFinite(snapOverBackPrev) ? snapOverBackPrev : null);
+
+        return {
+          score: round2(computed ? score : Number.isFinite(lastScorePrev) ? lastScorePrev : 0),
+          threshold,
+          thresholdOff,
+          trigger,
+          nextSnapAtMs,
+          nextOverMatched,
+          nextUnderMatched,
+          nextOverBack,
+          dtSec,
+          snapOverMatchedPrev: Number.isFinite(snapOverMatchedPrev) ? snapOverMatchedPrev : null,
+        };
+      })();
+
+      const stats = (body as any)?.stats && typeof (body as any).stats === "object" ? (body as any).stats : null;
+      const attacksHome = Number(stats?.attacksHome);
+      const attacksAway = Number(stats?.attacksAway);
+      const dangHome = Number(stats?.dangerousAttacksHome);
+      const dangAway = Number(stats?.dangerousAttacksAway);
+      const attacksSum = (Number.isFinite(attacksHome) ? attacksHome : 0) + (Number.isFinite(attacksAway) ? attacksAway : 0);
+      const dangerousSum = (Number.isFinite(dangHome) ? dangHome : 0) + (Number.isFinite(dangAway) ? dangAway : 0);
+      const liveDominanceRatio = attacksSum > 0 ? dangerousSum / attacksSum : null;
+
+      const deltaTradedOver =
+        momentOver.snapOverMatchedPrev != null && Number.isFinite(overMatchedNow) && momentOver.dtSec >= momentWindowMinSec
+          ? overMatchedNow - momentOver.snapOverMatchedPrev
+          : null;
+
+      const canEnterNowByCooldown =
+        !Number.isFinite(cooldownUntilMs) || cooldownUntilMs <= 0 ? true : nowMs >= cooldownUntilMs;
+      const canEnterNowBySpacing =
+        !(lastEntryAtMs && Number.isFinite(lastEntryAtMs) && lastEntryAtMs > 0 && minSecondsBetweenEntries > 0)
+          ? true
+          : nowMs - lastEntryAtMs >= minSecondsBetweenEntries * 1000;
+      const canEnterNow = canEnterNowByCooldown && canEnterNowBySpacing;
+
+      const baseState = {
+        ...existing,
+        lastTickAt: nowIso,
+        entryLocks: entryLocksPruned,
+        lastScoreHome: typeof scoreHome === "number" ? scoreHome : typeof prevHome === "number" ? prevHome : null,
+        lastScoreAway: typeof scoreAway === "number" ? scoreAway : typeof prevAway === "number" ? prevAway : null,
+        elapsedSec,
+        lineCodeOver: overLineCode,
+        lineCodeUnder: underLineCode,
+        marketOver: ouOverBetfair ?? null,
+        marketUnder: ouUnderBetfair ?? null,
+        goalAlertActive: Boolean(momentOver.trigger),
+        momentSnapAtMs: Number.isFinite(momentOver.nextSnapAtMs) ? momentOver.nextSnapAtMs : null,
+        momentOverMatched: (momentOver as any)?.nextOverMatched ?? null,
+        momentUnderMatched: (momentOver as any)?.nextUnderMatched ?? null,
+        momentOverBack: (momentOver as any)?.nextOverBack ?? null,
+        lastMomentOverScore: (momentOver as any)?.score ?? null,
+        lastMomentOverThreshold: (momentOver as any)?.threshold ?? null,
+        lastDeltaTradedOver: deltaTradedOver,
+        lastDominanceRatio: liveDominanceRatio,
+      };
+
+      const isGoalAlert = Boolean(momentOver.trigger);
+      const canEnterAlert =
+        isGoalAlert &&
+        canEnterNow &&
+        Number.isFinite(overBack) &&
+        overBack >= minOdds &&
+        (dominanceRatio == null || liveDominanceRatio == null || liveDominanceRatio >= dominanceRatio) &&
+        (minDeltaTraded == null || deltaTradedOver == null || deltaTradedOver >= minDeltaTraded);
+
+      let ouOrdersCache: any[] | null = null;
+      const getOuOrders = async () => {
+        if (ouOrdersCache) return ouOrdersCache;
+        ouOrdersCache = [];
+        const mids = uniqStrings([overMarketId]).filter(Boolean);
+        if (mids.length === 0) return ouOrdersCache;
+        try {
+          const res = await listCurrentOrders({ adminToken: admin.adminToken, marketIds: mids });
+          const currentOrders = Array.isArray((res as any)?.currentOrders) ? (res as any).currentOrders : [];
+          ouOrdersCache = currentOrders;
+        } catch {}
+        return ouOrdersCache;
+      };
+      const findExistingBackEntry = async (marketId: string, selectionId: number) => {
+        const orders = await getOuOrders();
+        const candidates = orders.filter((o: any) => {
+          const mid = String(o?.marketId ?? "").trim();
+          const sid = Number(o?.selectionId);
+          const sideRaw = String(o?.side ?? "").trim().toUpperCase();
+          if (mid !== String(marketId ?? "").trim()) return false;
+          if (!(Number.isFinite(sid) && sid > 0 && sid === Number(selectionId))) return false;
+          if (sideRaw !== "BACK") return false;
+          const sizeMatched = Number(o?.sizeMatched);
+          const sizeRemaining = Number(o?.sizeRemaining);
+          return (Number.isFinite(sizeMatched) && sizeMatched > 0) || (Number.isFinite(sizeRemaining) && sizeRemaining > 0);
+        });
+        if (candidates.length === 0) return null;
+        candidates.sort((a: any, b: any) => String(b?.placedDate ?? "").localeCompare(String(a?.placedDate ?? "")));
+        return candidates[0] ?? null;
+      };
+      const findExistingLayTp = async (marketId: string, selectionId: number) => {
+        const orders = await getOuOrders();
+        const candidates = orders.filter((o: any) => {
+          const mid = String(o?.marketId ?? "").trim();
+          const sid = Number(o?.selectionId);
+          const sideRaw = String(o?.side ?? "").trim().toUpperCase();
+          if (mid !== String(marketId ?? "").trim()) return false;
+          if (!(Number.isFinite(sid) && sid > 0 && sid === Number(selectionId))) return false;
+          if (sideRaw !== "LAY") return false;
+          const sizeRemaining = Number(o?.sizeRemaining);
+          return Number.isFinite(sizeRemaining) && sizeRemaining > 0;
+        });
+        if (candidates.length === 0) return null;
+        candidates.sort((a: any, b: any) => String(b?.placedDate ?? "").localeCompare(String(a?.placedDate ?? "")));
+        return candidates[0] ?? null;
+      };
+
+      const goalConfirmed = (() => {
+        const lastScoreHome = Number(existing?.lastScoreHome);
+        const lastScoreAway = Number(existing?.lastScoreAway);
+        const hasScoreNow = typeof scoreHome === "number" && typeof scoreAway === "number";
+        const hasScorePrev = Number.isFinite(lastScoreHome) && Number.isFinite(lastScoreAway);
+        return hasScoreNow && hasScorePrev ? scoreHome !== lastScoreHome || scoreAway !== lastScoreAway : false;
+      })();
+      if (goalConfirmed) {
+        const entryBetId = String(existing?.entryBetId ?? "").trim() || null;
+        const tpBetId = String(existing?.takeProfit?.betId ?? "").trim() || null;
+        if (tpBetId) {
+          try {
+            await cancelOrders({ adminToken: admin.adminToken, marketId: overMarketId, betIds: [tpBetId] });
+          } catch {}
+        }
+        if (entryBetId) {
+          try {
+            await cancelOrders({ adminToken: admin.adminToken, marketId: overMarketId, betIds: [entryBetId] });
+          } catch {}
+        }
+
+        const locksNow = (baseState as any)?.entryLocks && typeof (baseState as any).entryLocks === "object" ? (baseState as any).entryLocks : {};
+        const locksCleared = clearEntryLock(locksNow, lockKeyFor(overMarketId, overOverSel));
+        const next = {
+          ...current,
+          betfair: baseBetfair,
+          strategy: {
+            ...strategy,
+            agent: "overGoalsLimit",
+            overGoalsLimit: {
+              ...baseState,
+              entryLocks: locksCleared,
+              phase: "cooldown",
+              closedAt: nowIso,
+              lastClosedAt: nowIso,
+              cooldownUntilMs: nowMs + Math.max(3, minSecondsBetweenEntries) * 1000,
+              lastExitReason: "goal_or_suspend",
+              entryBetId: null,
+              takeProfit: null,
+            },
+          },
+          updatedAt: nowIso,
+        };
+        await setQueueItem(matchId, next);
+        return json({ ok: true, item: next, closed: true, reason: "goal_or_suspend" });
+      }
+
+      if ((phase === "monitoring" || phase === "cooldown" || phase === "closed" || phase === "stopped") && canEnterAlert) {
+        const existingEntry = await findExistingBackEntry(overMarketId, overOverSel);
+        if (existingEntry) {
+          const sizeMatched = Number(existingEntry?.sizeMatched);
+          const sizeRemaining = Number(existingEntry?.sizeRemaining);
+          const hasMatched = Number.isFinite(sizeMatched) && sizeMatched > 0;
+          const tpExisting = await findExistingLayTp(overMarketId, overOverSel);
+          const tpBetId = String(tpExisting?.betId ?? "").trim() || null;
+          const tpPrice = Number(tpExisting?.priceSize?.price ?? tpExisting?.price);
+          const tpSize = Number(tpExisting?.sizeRemaining);
+          const takeProfit =
+            tpBetId && Number.isFinite(tpPrice) && tpPrice > 1 && Number.isFinite(tpSize) && tpSize > 0
+              ? { betId: tpBetId, price: tpPrice, size: tpSize, placedAt: String(tpExisting?.placedDate ?? nowIso), status: String(tpExisting?.status ?? null), errorCode: null, result: null, error: null }
+              : null;
+          const locksNow = (baseState as any)?.entryLocks && typeof (baseState as any).entryLocks === "object" ? (baseState as any).entryLocks : {};
+          const lockTtlMs = entryLockTtlSeconds * 1000;
+          const entryLockKey = lockKeyFor(overMarketId, overOverSel);
+          const locksUpdated = setEntryLock(locksNow, entryLockKey, {
+            matchId,
+            agent: "overGoalsLimit",
+            marketId: overMarketId,
+            selectionId: overOverSel,
+            side: "BACK",
+            lockedAt: nowIso,
+            betId: String(existingEntry?.betId ?? "").trim() || null,
+            expiresAtMs: nowMs + Math.max(1000, lockTtlMs),
+          });
+          const next = {
+            ...current,
+            betfair: baseBetfair,
+            strategy: {
+              ...strategy,
+              agent: "overGoalsLimit",
+              overGoalsLimit: {
+                ...baseState,
+                entryLocks: locksUpdated,
+                phase: hasMatched && takeProfit ? "entered" : "entering",
+                entryMarketId: overMarketId,
+                entryLineCode: overLineCode,
+                selectionId: overOverSel,
+                entryBetId: String(existingEntry?.betId ?? "").trim() || null,
+                entryMatchedSize: Number.isFinite(sizeMatched) && sizeMatched > 0 ? sizeMatched : null,
+                entryRemainingSize: Number.isFinite(sizeRemaining) && sizeRemaining > 0 ? sizeRemaining : null,
+                entryPrice:
+                  (Number(existingEntry?.averagePriceMatched) > 1 ? Number(existingEntry?.averagePriceMatched) : null) ??
+                  (Number(existingEntry?.priceSize?.price) > 1 ? Number(existingEntry?.priceSize?.price) : null) ??
+                  Number(existing?.entryPrice ?? overBack),
+                takeProfit,
+                lastEntryAt: String(existing?.lastEntryAt ?? nowIso),
+              },
+            },
+            updatedAt: nowIso,
+          };
+          await setQueueItem(matchId, next);
+          return json({ ok: true, item: next, skipped: true, reason: "adopt_existing_entry" });
+        }
+
+        const locksNow = (baseState as any)?.entryLocks && typeof (baseState as any).entryLocks === "object" ? (baseState as any).entryLocks : {};
+        const entryLockKey = lockKeyFor(overMarketId, overOverSel);
+        if (isEntryLocked(locksNow, entryLockKey)) {
+          const next = { ...current, betfair: baseBetfair, strategy: { ...strategy, agent: "overGoalsLimit", overGoalsLimit: { ...baseState, phase } }, updatedAt: nowIso };
+          await setQueueItem(matchId, next);
+          return json({ ok: true, skipped: true, reason: "entry_locked", item: next });
+        }
+
+        const entryPrice = movePriceByTicks(overBack, entryOffsetTicks);
+        const result = await placeOrders({
+          adminToken: admin.adminToken,
+          marketId: overMarketId,
+          customerRef: mkStableCustomerRef("og", matchId, overMarketId, overOverSel),
+          instructions: [
+            {
+              selectionId: overOverSel,
+              side: "BACK",
+              orderType: "LIMIT",
+              limitOrder: { size: stakeAbs, price: entryPrice, persistenceType: "LAPSE" },
+            },
+          ],
+        }).catch((e) => ({ __error: e instanceof Error ? e.message : String(e) }));
+        const err = (result as any)?.__error ? String((result as any).__error) : null;
+        const newEntryBetId = err ? null : extractBetId(result);
+        const lockTtlMs = (newEntryBetId ? entryLockTtlSeconds : entryLockPendingTtlSeconds) * 1000;
+        const locksUpdated = err
+          ? locksNow
+          : setEntryLock(locksNow, entryLockKey, {
+              matchId,
+              agent: "overGoalsLimit",
+              marketId: overMarketId,
+              selectionId: overOverSel,
+              side: "BACK",
+              lockedAt: nowIso,
+              betId: newEntryBetId,
+              status: err ? null : extractReportStatus(result),
+              expiresAtMs: nowMs + Math.max(1000, lockTtlMs),
+            });
+
+        const next = {
+          ...current,
+          betfair: baseBetfair,
+          strategy: {
+            ...strategy,
+            agent: "overGoalsLimit",
+            overGoalsLimit: {
+              ...baseState,
+              entryLocks: locksUpdated,
+              phase: err ? "monitoring" : "entering",
+              entryMarketId: overMarketId,
+              entryLineCode: overLineCode,
+              selectionId: overOverSel,
+              entryPrice,
+              stakeAbs,
+              entryBetId: newEntryBetId,
+              entryRequestedAt: nowIso,
+              lastEntryAt: nowIso,
+              entryCount: entryCount + (err ? 0 : 1),
+              lastError: err,
+            },
+          },
+          updatedAt: nowIso,
+        };
+        await setQueueItem(matchId, next);
+        return json({ ok: true, item: next, placed: !err, error: err, reason: err ? "entry_failed" : "entry_placed" });
+      }
+
+      if (phase === "cooldown") {
+        if (Number.isFinite(cooldownUntilMs) && cooldownUntilMs > 0 && nowMs < cooldownUntilMs) {
+          const next = { ...current, betfair: baseBetfair, strategy: { ...strategy, agent: "overGoalsLimit", overGoalsLimit: { ...baseState, phase: "cooldown" } }, updatedAt: nowIso };
+          await setQueueItem(matchId, next);
+          return json({ ok: true, skipped: true, reason: "cooldown", item: next });
+        }
+        const next = { ...current, betfair: baseBetfair, strategy: { ...strategy, agent: "overGoalsLimit", overGoalsLimit: { ...baseState, phase: "monitoring", cooldownUntilMs: null } }, updatedAt: nowIso };
+        await setQueueItem(matchId, next);
+        return json({ ok: true, item: next, resumed: true, reason: "cooldown_done" });
+      }
+
+      if (phase === "entering") {
+        const entryMarketId = String(existing?.entryMarketId ?? overMarketId).trim();
+        const entryBetId = String(existing?.entryBetId ?? "").trim() || null;
+        const entrySelectionId = Number(existing?.selectionId ?? overOverSel);
+        if (!entryBetId) {
+          const adopted = await findExistingBackEntry(entryMarketId, entrySelectionId);
+          if (adopted) {
+            const hasMatched = Number(adopted?.sizeMatched) > 0;
+            const tpExisting = hasMatched ? await findExistingLayTp(entryMarketId, entrySelectionId) : null;
+            const tpBetId = String(tpExisting?.betId ?? "").trim() || null;
+            const tpPrice = Number(tpExisting?.priceSize?.price ?? tpExisting?.price);
+            const tpSize = Number(tpExisting?.sizeRemaining);
+            const takeProfit =
+              tpBetId && Number.isFinite(tpPrice) && tpPrice > 1 && Number.isFinite(tpSize) && tpSize > 0
+                ? { betId: tpBetId, price: tpPrice, size: tpSize, placedAt: String(tpExisting?.placedDate ?? nowIso), status: String(tpExisting?.status ?? null), errorCode: null, result: null, error: null }
+                : null;
+
+            const locksNow = (baseState as any)?.entryLocks && typeof (baseState as any).entryLocks === "object" ? (baseState as any).entryLocks : {};
+            const entryLockKey = lockKeyFor(entryMarketId, entrySelectionId);
+            const locksUpdated = setEntryLock(locksNow, entryLockKey, {
+              matchId,
+              agent: "overGoalsLimit",
+              marketId: entryMarketId,
+              selectionId: entrySelectionId,
+              side: "BACK",
+              lockedAt: nowIso,
+              betId: String(adopted?.betId ?? "").trim() || null,
+              expiresAtMs: nowMs + Math.max(1000, entryLockTtlSeconds * 1000),
+            });
+
+            const next = {
+              ...current,
+              betfair: baseBetfair,
+              strategy: {
+                ...strategy,
+                agent: "overGoalsLimit",
+                overGoalsLimit: {
+                  ...baseState,
+                  entryLocks: locksUpdated,
+                  phase: hasMatched && takeProfit ? "entered" : "entering",
+                  entryMarketId,
+                  entryLineCode: overLineCode,
+                  selectionId: entrySelectionId,
+                  entryBetId: String(adopted?.betId ?? "").trim() || null,
+                  entryMatchedSize: hasMatched ? Number(adopted?.sizeMatched) : null,
+                  entryRemainingSize: Number(adopted?.sizeRemaining),
+                  entryPrice:
+                    (Number(adopted?.averagePriceMatched) > 1 ? Number(adopted?.averagePriceMatched) : null) ??
+                    (Number(adopted?.priceSize?.price) > 1 ? Number(adopted?.priceSize?.price) : null) ??
+                    Number(existing?.entryPrice ?? overBack),
+                  takeProfit,
+                  lastEntryAt: String(existing?.lastEntryAt ?? nowIso),
+                },
+              },
+              updatedAt: nowIso,
+            };
+            await setQueueItem(matchId, next);
+            return json({ ok: true, skipped: true, reason: "adopt_missing_betid", item: next });
+          }
+
+          const reqAt = String(existing?.entryRequestedAt ?? existing?.lastEntryAt ?? existing?.enteredAt ?? "").trim();
+          const reqAtMs = reqAt ? new Date(reqAt).getTime() : 0;
+          if (reqAtMs && Number.isFinite(reqAtMs) && nowMs - reqAtMs < 6_000) {
+            const next = { ...current, betfair: baseBetfair, strategy: { ...strategy, agent: "overGoalsLimit", overGoalsLimit: { ...baseState, phase: "entering", lastExitReason: "await_betid" } }, updatedAt: nowIso };
+            await setQueueItem(matchId, next);
+            return json({ ok: true, skipped: true, reason: "await_betid", item: next });
+          }
+
+          const locksNow = (baseState as any)?.entryLocks && typeof (baseState as any).entryLocks === "object" ? (baseState as any).entryLocks : {};
+          const locksCleared = clearEntryLock(locksNow, lockKeyFor(entryMarketId, entrySelectionId));
+          const next = { ...current, betfair: baseBetfair, strategy: { ...strategy, agent: "overGoalsLimit", overGoalsLimit: { ...baseState, entryLocks: locksCleared, phase: "monitoring", lastExitReason: "missing_entry_betid" } }, updatedAt: nowIso };
+          await setQueueItem(matchId, next);
+          return json({ ok: true, skipped: true, reason: "missing_entry_betid", item: next });
+        }
+        let sizeMatched = 0;
+        let sizeRemaining = 0;
+        let avgPriceMatched = Number(existing?.entryPrice);
+        try {
+          const res = await listCurrentOrders({ adminToken: admin.adminToken, betIds: [entryBetId] });
+          const currentOrders = Array.isArray((res as any)?.currentOrders) ? (res as any).currentOrders : [];
+          const row = currentOrders.find((o: any) => String(o?.betId ?? "").trim() === entryBetId) ?? null;
+          sizeMatched = Number(row?.sizeMatched);
+          sizeRemaining = Number(row?.sizeRemaining);
+          const apm = Number(row?.averagePriceMatched);
+          if (Number.isFinite(apm) && apm > 1) avgPriceMatched = apm;
+        } catch {}
+
+        const matchedSafe = Number.isFinite(sizeMatched) && sizeMatched > 0 ? Math.max(2, round2(sizeMatched)) : 0;
+        const remainingSafe = Number.isFinite(sizeRemaining) && sizeRemaining > 0 ? round2(sizeRemaining) : 0;
+        const entryPriceSafe = Number.isFinite(avgPriceMatched) && avgPriceMatched > 1 ? avgPriceMatched : overBack;
+
+        if (!isGoalAlert) {
+          try {
+            await cancelOrders({ adminToken: admin.adminToken, marketId: entryMarketId, betIds: [entryBetId] });
+          } catch {}
+          const locksNow = (baseState as any)?.entryLocks && typeof (baseState as any).entryLocks === "object" ? (baseState as any).entryLocks : {};
+          const locksCleared = clearEntryLock(locksNow, lockKeyFor(entryMarketId, entrySelectionId));
+          const next = {
+            ...current,
+            betfair: baseBetfair,
+            strategy: {
+              ...strategy,
+              agent: "overGoalsLimit",
+              overGoalsLimit: {
+                ...baseState,
+                entryLocks: locksCleared,
+                phase: "cooldown",
+                closedAt: nowIso,
+                lastClosedAt: nowIso,
+                cooldownUntilMs: nowMs + Math.max(3, minSecondsBetweenEntries) * 1000,
+                lastExitReason: "alert_off_before_match",
+                entryBetId: null,
+                takeProfit: null,
+              },
+            },
+            updatedAt: nowIso,
+          };
+          await setQueueItem(matchId, next);
+          return json({ ok: true, item: next, closed: true, reason: "alert_off_before_match" });
+        }
+
+        if (matchedSafe > 0) {
+          const desiredLay = entryPriceSafe / (1 + profitTargetPct / 100);
+          let targetPrice = entryPriceSafe;
+          for (let i = 0; i < 120 && targetPrice > desiredLay; i++) {
+            const step = tickStep(targetPrice);
+            targetPrice = round2(targetPrice - step);
+            if (targetPrice < 1.01) targetPrice = 1.01;
+          }
+          if (!(Number.isFinite(targetPrice) && targetPrice > 1 && targetPrice < entryPriceSafe)) {
+            targetPrice = movePriceByTicks(entryPriceSafe, -Math.max(2, Math.floor(Math.max(2, profitTargetPct))));
+          }
+          const hedgeSize = Math.max(2, round2((entryPriceSafe * matchedSafe) / targetPrice));
+
+          const tpRes = await placeOrders({
+            adminToken: admin.adminToken,
+            marketId: entryMarketId,
+            customerRef: mkCustomerRef("tp", matchId),
+            instructions: [
+              {
+                selectionId: entrySelectionId,
+                side: "LAY",
+                orderType: "LIMIT",
+                limitOrder: { size: hedgeSize, price: targetPrice, persistenceType: "LAPSE" },
+              },
+            ],
+          }).catch((e) => ({ __error: e instanceof Error ? e.message : String(e) }));
+          const tpErr = (tpRes as any)?.__error ? String((tpRes as any).__error) : null;
+
+          const next = {
+            ...current,
+            betfair: baseBetfair,
+            strategy: {
+              ...strategy,
+              agent: "overGoalsLimit",
+              overGoalsLimit: {
+                ...baseState,
+                phase: tpErr ? "entered" : "entered",
+                entryMarketId: entryMarketId,
+                entryLineCode: overLineCode,
+                selectionId: entrySelectionId,
+                entryBetId,
+                entryMatchedSize: matchedSafe,
+                entryRemainingSize: remainingSafe,
+                entryPrice: entryPriceSafe,
+                targetPrice,
+                takeProfit: {
+                  betId: tpErr ? null : extractBetId(tpRes),
+                  price: targetPrice,
+                  size: hedgeSize,
+                  placedAt: nowIso,
+                  status: tpErr ? null : extractReportStatus(tpRes),
+                  errorCode: tpErr ? null : extractReportErrorCode(tpRes),
+                  result: tpErr ? null : tpRes ?? null,
+                  error: tpErr,
+                },
+                enteredAt: String(existing?.enteredAt ?? nowIso),
+                lastEntryAt: String(existing?.lastEntryAt ?? nowIso),
+              },
+            },
+            updatedAt: nowIso,
+          };
+          await setQueueItem(matchId, next);
+          return json({ ok: true, item: next, entered: true, reason: "entry_matched" });
+        }
+
+        const next = {
+          ...current,
+          betfair: baseBetfair,
+          strategy: {
+            ...strategy,
+            agent: "overGoalsLimit",
+            overGoalsLimit: {
+              ...baseState,
+              phase: "entering",
+              entryMarketId: entryMarketId,
+              entryLineCode: overLineCode,
+              selectionId: entrySelectionId,
+              entryBetId,
+              entryMatchedSize: matchedSafe > 0 ? matchedSafe : null,
+              entryRemainingSize: remainingSafe > 0 ? remainingSafe : null,
+              entryPrice: entryPriceSafe,
+            },
+          },
+          updatedAt: nowIso,
+        };
+        await setQueueItem(matchId, next);
+        return json({ ok: true, skipped: true, reason: "waiting_match", item: next });
+      }
+
+      if (phase === "entered") {
+        const entryMarketId = String(existing?.entryMarketId ?? overMarketId).trim();
+        const entrySelectionId = Number(existing?.selectionId ?? overOverSel);
+        const entryBetId = String(existing?.entryBetId ?? "").trim() || null;
+        const tpBetId = String(existing?.takeProfit?.betId ?? "").trim() || null;
+        const entryPrice = Number(existing?.entryPrice);
+        const matched0 = Number(existing?.entryMatchedSize ?? existing?.stakeAbs);
+        const matchedSafe = Number.isFinite(matched0) && matched0 > 0 ? Math.max(2, round2(matched0)) : 0;
+
+        if (!isGoalAlert && matchedSafe > 0 && Number.isFinite(overLay) && overLay > 1 && Number.isFinite(entryPrice) && entryPrice > 1) {
+          if (tpBetId) {
+            try {
+              await cancelOrders({ adminToken: admin.adminToken, marketId: entryMarketId, betIds: [tpBetId] });
+            } catch {}
+          }
+          const hedgeSize = Math.max(2, round2((entryPrice * matchedSafe) / overLay));
+          try {
+            await placeOrders({
+              adminToken: admin.adminToken,
+              marketId: entryMarketId,
+              customerRef: mkCustomerRef("ex", matchId),
+              instructions: [
+                {
+                  selectionId: entrySelectionId,
+                  side: "LAY",
+                  orderType: "LIMIT",
+                  limitOrder: { size: hedgeSize, price: overLay, persistenceType: "LAPSE" },
+                },
+              ],
+            });
+          } catch {}
+
+          const locksNow = (baseState as any)?.entryLocks && typeof (baseState as any).entryLocks === "object" ? (baseState as any).entryLocks : {};
+          const locksCleared = clearEntryLock(locksNow, lockKeyFor(entryMarketId, entrySelectionId));
+          const next = {
+            ...current,
+            betfair: baseBetfair,
+            strategy: {
+              ...strategy,
+              agent: "overGoalsLimit",
+              overGoalsLimit: {
+                ...baseState,
+                entryLocks: locksCleared,
+                phase: "cooldown",
+                closedAt: nowIso,
+                lastClosedAt: nowIso,
+                cooldownUntilMs: nowMs + Math.max(3, minSecondsBetweenEntries) * 1000,
+                lastExitReason: "alert_off_exit",
+                takeProfit: null,
+              },
+            },
+            updatedAt: nowIso,
+          };
+          await setQueueItem(matchId, next);
+          return json({ ok: true, item: next, closed: true, reason: "alert_off_exit" });
+        }
+
+        if (tpBetId) {
+          try {
+            const res = await listCurrentOrders({ adminToken: admin.adminToken, betIds: [tpBetId] });
+            const currentOrders = Array.isArray((res as any)?.currentOrders) ? (res as any).currentOrders : [];
+            const row = currentOrders.find((o: any) => String(o?.betId ?? "").trim() === tpBetId) ?? null;
+            const sizeRemaining = Number(row?.sizeRemaining);
+            const sizeMatched = Number(row?.sizeMatched);
+            const status = String(row?.status ?? "").trim().toUpperCase();
+            const isDone = status === "EXECUTION_COMPLETE" || (Number.isFinite(sizeRemaining) && sizeRemaining <= 0);
+            const hasMatched = Number.isFinite(sizeMatched) && sizeMatched > 0;
+            if (isDone && hasMatched) {
+              const locksNow = (baseState as any)?.entryLocks && typeof (baseState as any).entryLocks === "object" ? (baseState as any).entryLocks : {};
+              const locksCleared = clearEntryLock(locksNow, lockKeyFor(entryMarketId, entrySelectionId));
+              const next = {
+                ...current,
+                betfair: baseBetfair,
+                strategy: {
+                  ...strategy,
+                  agent: "overGoalsLimit",
+                  overGoalsLimit: {
+                    ...baseState,
+                    entryLocks: locksCleared,
+                    phase: "cooldown",
+                    closedAt: nowIso,
+                    lastClosedAt: nowIso,
+                    cooldownUntilMs: nowMs + Math.max(3, minSecondsBetweenEntries) * 1000,
+                    lastExitReason: "tp_matched",
+                    takeProfitMatchedAt: nowIso,
+                  },
+                },
+                updatedAt: nowIso,
+              };
+              await setQueueItem(matchId, next);
+              return json({ ok: true, item: next, closed: true, reason: "tp_matched" });
+            }
+          } catch {}
+        }
+
+        const next = { ...current, betfair: baseBetfair, strategy: { ...strategy, agent: "overGoalsLimit", overGoalsLimit: { ...baseState, phase: "entered" } }, updatedAt: nowIso };
+        await setQueueItem(matchId, next);
+        return json({ ok: true, skipped: true, reason: "holding", item: next });
+      }
+
+      const next = { ...current, betfair: baseBetfair, strategy: { ...strategy, agent: "overGoalsLimit", overGoalsLimit: { ...baseState, phase: "monitoring" } }, updatedAt: nowIso };
+      await setQueueItem(matchId, next);
+      return json({ ok: true, skipped: true, reason: "noop", item: next });
+    }
+
     if (matchPath(path, "/automation/betfair/strategy/scalpingTicks/tick")) {
       const admin = requireAdminToken(body);
       if (!admin.ok) return json(admin, 401);
@@ -1062,7 +2102,11 @@ Deno.serve(async (req) => {
       });
 
       const strategy = (current as any)?.strategy && typeof (current as any).strategy === "object" ? (current as any).strategy : {};
-      const existing = (strategy as any)?.scalpingTicks && typeof (strategy as any).scalpingTicks === "object" ? (strategy as any).scalpingTicks : {};
+      const agentRaw = String((strategy as any)?.agent ?? "").trim().toLowerCase();
+      const isLegacyScalpingGoals = agentRaw === "scalpinggoals" || agentRaw === "scalping_goals" || agentRaw === "scalping_goals_above";
+      const existingTicks = (strategy as any)?.scalpingTicks && typeof (strategy as any).scalpingTicks === "object" ? (strategy as any).scalpingTicks : {};
+      const existingGoals = (strategy as any)?.scalpingGoals && typeof (strategy as any).scalpingGoals === "object" ? (strategy as any).scalpingGoals : {};
+      const existing = isLegacyScalpingGoals ? { ...existingGoals, ...existingTicks } : existingTicks;
 
       const eventId = String((current as any)?.betfair?.eventId ?? baseBetfair?.eventId ?? "").trim();
       const bodyLive = (body as any)?.live && typeof (body as any).live === "object" ? (body as any).live : null;
@@ -1103,20 +2147,9 @@ Deno.serve(async (req) => {
       const goals = typeof scoreHome === "number" && typeof scoreAway === "number" ? scoreHome + scoreAway : null;
 
       const cfg = (body as any)?.config && typeof (body as any).config === "object" ? (body as any).config : {};
-      const lineCodeRaw = Number(cfg?.ouLineCode);
-      const underLineCode =
-        Number.isFinite(lineCodeRaw) && lineCodeRaw > 0
-          ? Math.floor(lineCodeRaw)
-          : typeof goals === "number" && Number.isFinite(goals)
-            ? Math.floor((goals * 10) + 15)
-            : 15;
-      const overLineCodeFromUnder = underLineCode - 10;
-      const overLineCode =
-        Number.isFinite(overLineCodeFromUnder) && overLineCodeFromUnder > 0
-          ? Math.max(5, Math.floor(overLineCodeFromUnder))
-          : typeof goals === "number" && Number.isFinite(goals)
-            ? Math.floor((goals * 10) + 5)
-            : 5;
+      const goalsSafe = typeof goals === "number" && Number.isFinite(goals) ? Math.max(0, Math.floor(goals)) : null;
+      const underLineCode = goalsSafe != null ? ouLineCodeFromGoals(goalsSafe) : 15;
+      const overLineCode = Math.max(5, underLineCode - 10);
 
       let ouOverErr: string | null = null;
       let ouUnderErr: string | null = null;
@@ -1145,6 +2178,8 @@ Deno.serve(async (req) => {
       const overUnderSel = Number(ouOverBetfair?.runners?.underSelectionId);
       const overBack = Number(ouOverBetfair?.odds?.over?.back);
       const overLay = Number(ouOverBetfair?.odds?.over?.lay);
+      const overUnderBack = Number(ouOverBetfair?.odds?.under?.back);
+      const overUnderLay = Number(ouOverBetfair?.odds?.under?.lay);
 
       const underMarketId = String(ouUnderBetfair?.marketId ?? "").trim();
       const underMarketStatus = String(ouUnderBetfair?.marketStatus ?? "").trim().toUpperCase();
@@ -1197,8 +2232,8 @@ Deno.serve(async (req) => {
       const minSecondsBetweenCycles = Number(cfg?.minSecondsBetweenCycles ?? 8);
       const maxCycles = Number(cfg?.maxCycles ?? 50);
       const secondsToWaitMatch = Number(cfg?.secondsToWaitMatch ?? 10);
-      const minMarketMatched = Number(cfg?.minMarketMatched ?? 15000);
-      const minRunnerMatched = Number(cfg?.minRunnerMatched ?? 2500);
+      const minMarketMatched = Number(cfg?.minMarketMatched ?? 0);
+      const minRunnerMatched = Number(cfg?.minRunnerMatched ?? 0);
       const afterGoalWaitSecondsRaw = Number(cfg?.afterGoalWaitSeconds ?? 30);
       const afterGoalWaitSeconds = Number.isFinite(afterGoalWaitSecondsRaw) ? Math.max(0, Math.min(600, Math.floor(afterGoalWaitSecondsRaw))) : 30;
       const recoveryEnabled = Boolean(cfg?.recoveryEnabled ?? true);
@@ -1221,11 +2256,48 @@ Deno.serve(async (req) => {
       const momentWindowMinSec = Number.isFinite(momentWindowMinSecRaw) ? Math.max(1, Math.min(300, Math.floor(momentWindowMinSecRaw))) : 8;
       const momentWindowMaxSecCandidate = Number.isFinite(momentWindowMaxSecRaw) ? Math.max(2, Math.min(600, Math.floor(momentWindowMaxSecRaw))) : 180;
       const momentWindowMaxSec = Math.max(momentWindowMinSec + 1, momentWindowMaxSecCandidate);
+      const overReevalMinMinutesRaw = Number(cfg?.overReevalMinMinutes ?? 5);
+      const overReevalMaxMinutesRaw = Number(cfg?.overReevalMaxMinutes ?? 10);
+      const overReevalMinMinutes = Number.isFinite(overReevalMinMinutesRaw) ? Math.max(1, Math.min(60, Math.floor(overReevalMinMinutesRaw))) : 5;
+      const overReevalMaxMinutesCandidate = Number.isFinite(overReevalMaxMinutesRaw) ? Math.max(1, Math.min(60, Math.floor(overReevalMaxMinutesRaw))) : 10;
+      const overReevalMaxMinutes = Math.max(overReevalMinMinutes, overReevalMaxMinutesCandidate);
+      const lateNoGoalEnabled = Boolean(cfg?.lateNoGoalEnabled ?? true);
+      const lateNoGoalMinMinuteRaw = Number(cfg?.lateNoGoalMinMinute ?? 80);
+      const lateNoGoalMinMinute = Number.isFinite(lateNoGoalMinMinuteRaw) ? Math.max(60, Math.min(120, Math.floor(lateNoGoalMinMinuteRaw))) : 80;
+      const lateUnderLimitEnabled = Boolean(cfg?.lateUnderLimitEnabled ?? true);
+      const lateUnderLimitMinMinuteRaw = Number(cfg?.lateUnderLimitMinMinute ?? 75);
+      const lateUnderLimitMinMinute = Number.isFinite(lateUnderLimitMinMinuteRaw) ? Math.max(0, Math.min(120, Math.floor(lateUnderLimitMinMinuteRaw))) : 75;
+      const lateUnderLimitTargetTicksMinRaw = Number(cfg?.lateUnderLimitTargetTicksMin ?? 5);
+      const lateUnderLimitTargetTicksMaxRaw = Number(cfg?.lateUnderLimitTargetTicksMax ?? 10);
+      const lateUnderLimitTargetTicksMin = Number.isFinite(lateUnderLimitTargetTicksMinRaw)
+        ? Math.max(2, Math.min(50, Math.floor(lateUnderLimitTargetTicksMinRaw)))
+        : 5;
+      const lateUnderLimitTargetTicksMaxCandidate = Number.isFinite(lateUnderLimitTargetTicksMaxRaw)
+        ? Math.max(2, Math.min(50, Math.floor(lateUnderLimitTargetTicksMaxRaw)))
+        : 10;
+      const lateUnderLimitTargetTicksMax = Math.max(lateUnderLimitTargetTicksMin, lateUnderLimitTargetTicksMaxCandidate);
+      const lateUnderLimitMinSecondsBetweenCyclesRaw = Number(cfg?.lateUnderLimitMinSecondsBetweenCycles ?? 4);
+      const lateUnderLimitMinSecondsBetweenCycles = Number.isFinite(lateUnderLimitMinSecondsBetweenCyclesRaw)
+        ? Math.max(1, Math.min(120, Math.floor(lateUnderLimitMinSecondsBetweenCyclesRaw)))
+        : 4;
+      const hedgeUnderEnabled = Boolean(cfg?.hedgeUnderEnabled ?? true);
+      const hedgeUnderAboveGoalsRaw = Number(cfg?.hedgeUnderAboveGoals ?? 2);
+      const hedgeUnderAboveGoals = Number.isFinite(hedgeUnderAboveGoalsRaw) ? Math.max(1, Math.min(4, Math.floor(hedgeUnderAboveGoalsRaw))) : 2;
+      const hedgeUnderMinMinuteRaw = Number(cfg?.hedgeUnderMinMinute ?? 70);
+      const hedgeUnderMinMinute = Number.isFinite(hedgeUnderMinMinuteRaw) ? Math.max(0, Math.min(120, Math.floor(hedgeUnderMinMinuteRaw))) : 70;
+      const hedgeUnderStakePctRaw = Number(cfg?.hedgeUnderStakePct ?? 0.25);
+      const hedgeUnderStakePct = Number.isFinite(hedgeUnderStakePctRaw) ? Math.max(0.05, Math.min(1, hedgeUnderStakePctRaw)) : 0.25;
+      const hedgeUnderTargetTicksRaw = Number(cfg?.hedgeUnderTargetTicks ?? 6);
+      const hedgeUnderTargetTicks = Number.isFinite(hedgeUnderTargetTicksRaw) ? Math.max(2, Math.min(50, Math.floor(hedgeUnderTargetTicksRaw))) : 6;
 
+      const stakeAbsCfgRaw = Number(cfg?.stakeAbs);
+      const stakeAbsCfg = Number.isFinite(stakeAbsCfgRaw) ? round2(stakeAbsCfgRaw) : NaN;
       const baseStakeAbs =
-        Number.isFinite(bankroll) && bankroll > 0 && Number.isFinite(stakePct) && stakePct > 0
-          ? Math.max(2, round2((bankroll * stakePct) / 100))
-          : 2;
+        Number.isFinite(stakeAbsCfg) && stakeAbsCfg > 0
+          ? Math.max(2, stakeAbsCfg)
+          : Number.isFinite(bankroll) && bankroll > 0 && Number.isFinite(stakePct) && stakePct > 0
+            ? Math.max(2, round2((bankroll * stakePct) / 100))
+            : 2;
       const phase = String(existing?.phase ?? "").trim();
       const recoveryStakeRaw = Number(existing?.recoveryStakeAbs);
       const recoveryStakeAbs =
@@ -1235,11 +2307,73 @@ Deno.serve(async (req) => {
 
       const nowIso = new Date().toISOString();
       const nowMs = Date.now();
+      const entryLockTtlSecondsRaw = Number((cfg as any)?.entryLockTtlSeconds ?? 180);
+      const entryLockTtlSeconds = Number.isFinite(entryLockTtlSecondsRaw) ? Math.max(5, Math.min(3600, Math.floor(entryLockTtlSecondsRaw))) : 180;
+      const entryLockPendingTtlSecondsRaw = Number((cfg as any)?.entryLockPendingTtlSeconds ?? 25);
+      const entryLockPendingTtlSeconds = Number.isFinite(entryLockPendingTtlSecondsRaw)
+        ? Math.max(4, Math.min(300, Math.floor(entryLockPendingTtlSecondsRaw)))
+        : 25;
+      const lockKeyFor = (marketId: string, selectionId: number) => {
+        const mid = String(marketId ?? "").trim();
+        const sid = Number.isFinite(selectionId) && selectionId > 0 ? Math.floor(selectionId) : 0;
+        return `${mid}:${sid}:BACK`;
+      };
+      const readEntryLocks = () => {
+        const merged: Record<string, any> = {};
+        const add = (raw: any) => {
+          if (!raw || typeof raw !== "object") return;
+          for (const [k, v] of Object.entries(raw)) {
+            const key = String(k ?? "").trim();
+            if (!key) continue;
+            if (!v || typeof v !== "object") continue;
+            merged[key] = v;
+          }
+        };
+        add((strategy as any)?.entryLocks);
+        add((existing as any)?.entryLocks);
+        for (const k of Object.keys(strategy)) {
+          const sub = (strategy as any)[k];
+          if (!sub || typeof sub !== "object") continue;
+          if (sub?.entryLocks && typeof sub.entryLocks === "object") add(sub.entryLocks);
+        }
+        return merged;
+      };
+      const pruneEntryLocks = (locks: any) => {
+        const out: Record<string, any> = {};
+        for (const [k, v] of Object.entries(locks ?? {})) {
+          if (!k) continue;
+          if (!v || typeof v !== "object") continue;
+          const exp = Number((v as any)?.expiresAtMs);
+          if (Number.isFinite(exp) && exp > nowMs) out[k] = v;
+        }
+        return out;
+      };
+      const entryLocksPruned = pruneEntryLocks(readEntryLocks());
+      const isEntryLocked = (locks: any, key: string) => {
+        const v = locks && typeof locks === "object" ? (locks as any)[key] : null;
+        const exp = Number(v?.expiresAtMs);
+        return Boolean(v && Number.isFinite(exp) && exp > nowMs);
+      };
+      const setEntryLock = (locks: any, key: string, value: any) => {
+        const base = locks && typeof locks === "object" ? locks : {};
+        return { ...base, [key]: value };
+      };
+      const clearEntryLock = (locks: any, key: string) => {
+        const base = locks && typeof locks === "object" ? locks : {};
+        const { [key]: _, ...rest } = base as any;
+        return rest;
+      };
+      const pickOverReevalAtMs = () => {
+        const span = Math.max(0, overReevalMaxMinutes - overReevalMinMinutes);
+        const minutes = span > 0 ? overReevalMinMinutes + Math.floor(Math.random() * (span + 1)) : overReevalMinMinutes;
+        return nowMs + Math.max(1, minutes) * 60_000;
+      };
       const timelineElapsed = Number((baseBetfair as any)?.timeline?.elapsed);
       const timelineScoreHome = Number((baseBetfair as any)?.timeline?.scoreHome);
       const timelineScoreAway = Number((baseBetfair as any)?.timeline?.scoreAway);
       const scoreHomeNow = typeof scoreHome === "number" ? scoreHome : null;
       const scoreAwayNow = typeof scoreAway === "number" ? scoreAway : null;
+      const totalGoalsNow = typeof scoreHomeNow === "number" && typeof scoreAwayNow === "number" ? scoreHomeNow + scoreAwayNow : null;
       const marketStartIso = String(baseBetfair?.marketStartTime ?? (current as any)?.utcDate ?? "").trim();
       const marketStartMs = marketStartIso ? new Date(marketStartIso).getTime() : NaN;
       const elapsedSec =
@@ -1248,6 +2382,12 @@ Deno.serve(async (req) => {
         : null;
       const elapsedMin = typeof elapsedSec === "number" ? elapsedSec / 60 : null;
       const lateMode = typeof elapsedMin === "number" && Number.isFinite(elapsedMin) && elapsedMin >= 75;
+      const veryLateMode = typeof elapsedMin === "number" && Number.isFinite(elapsedMin) && elapsedMin >= lateNoGoalMinMinute;
+      const lateUnderLimitMode =
+        lateUnderLimitEnabled &&
+        typeof elapsedMin === "number" &&
+        Number.isFinite(elapsedMin) &&
+        elapsedMin >= lateUnderLimitMinMinute;
 
       const predictedSide = (() => {
         const p = (current as any)?.prediction && typeof (current as any).prediction === "object" ? (current as any).prediction : null;
@@ -1347,11 +2487,28 @@ Deno.serve(async (req) => {
 
       const marketId = side === "over" ? overMarketId : underMarketId;
       const marketStatus = (side === "over" ? overMarketStatus : underMarketStatus) || "";
-      const selectionId =
-        side === "over" ? overOverSel : underUnderSel;
+      const selectionId = side === "over" ? overOverSel : underUnderSel;
       const bestBack = side === "over" ? overBack : underBack;
       const bestLay = side === "over" ? overLay : underLay;
       const marketMatched = side === "over" ? overMarketMatched : underMarketMatched;
+      const sideForLate =
+        phase === "entered" || phase === "entering"
+          ? String(existing?.side ?? side).trim().toLowerCase() === "over"
+            ? "over"
+            : "under"
+          : side;
+      const lateUnderLimitApplies =
+        lateUnderLimitMode &&
+        sideForLate === "under" &&
+        !momentOver.trigger;
+      const minSecondsBetweenCyclesUsed = lateUnderLimitApplies ? lateUnderLimitMinSecondsBetweenCycles : minSecondsBetweenCycles;
+      const pickTargetTicksForNewEntry = () => {
+        if (!lateUnderLimitApplies) return Number.isFinite(targetTicks) ? Math.floor(targetTicks) : 10;
+        const minT = lateUnderLimitTargetTicksMin;
+        const maxT = lateUnderLimitTargetTicksMax;
+        if (maxT <= minT) return minT;
+        return minT + Math.floor(Math.random() * (maxT - minT + 1));
+      };
 
       const prevMarketStatus = String(existing?.lastMarketStatus ?? "").trim().toUpperCase();
       const lastBestBack = Number(existing?.lastBestBack);
@@ -1372,6 +2529,7 @@ Deno.serve(async (req) => {
 
       const baseState = {
         ...existing,
+        entryLocks: entryLocksPruned,
         lastTickAt: nowIso,
         lastMarketStatus: marketStatus || prevMarketStatus || null,
         lastBestBack: Number.isFinite(bestBack) ? bestBack : Number.isFinite(lastBestBack) ? lastBestBack : null,
@@ -1393,6 +2551,105 @@ Deno.serve(async (req) => {
         lastMomentOverThreshold: (momentOver as any)?.threshold ?? null,
       };
 
+      let ouOrdersCache: any[] | null = null;
+      const getOuOrders = async () => {
+        if (ouOrdersCache) return ouOrdersCache;
+        ouOrdersCache = [];
+        const mids = uniqStrings([overMarketId, underMarketId]).filter(Boolean);
+        if (mids.length === 0) return ouOrdersCache;
+        try {
+          const res = await listCurrentOrders({ adminToken: admin.adminToken, marketIds: mids });
+          const currentOrders = Array.isArray((res as any)?.currentOrders) ? (res as any).currentOrders : [];
+          ouOrdersCache = currentOrders;
+        } catch {}
+        return ouOrdersCache;
+      };
+
+      const findExistingBackEntry = async (marketId: string, selectionId: number) => {
+        const orders = await getOuOrders();
+        const candidates = orders.filter((o: any) => {
+          const mid = String(o?.marketId ?? "").trim();
+          const sid = Number(o?.selectionId);
+          const sideRaw = String(o?.side ?? "").trim().toUpperCase();
+          if (mid !== String(marketId ?? "").trim()) return false;
+          if (!(Number.isFinite(sid) && sid > 0 && sid === Number(selectionId))) return false;
+          if (sideRaw !== "BACK") return false;
+          const sizeMatched = Number(o?.sizeMatched);
+          const sizeRemaining = Number(o?.sizeRemaining);
+          return (Number.isFinite(sizeMatched) && sizeMatched > 0) || (Number.isFinite(sizeRemaining) && sizeRemaining > 0);
+        });
+        if (candidates.length === 0) return null;
+        candidates.sort((a: any, b: any) => String(b?.placedDate ?? "").localeCompare(String(a?.placedDate ?? "")));
+        const pick = candidates[0] ?? null;
+        if (!pick) return null;
+        const betId = String(pick?.betId ?? "").trim() || null;
+        const placedAt = String(pick?.placedDate ?? "").trim() || null;
+        const price = Number(pick?.priceSize?.price ?? pick?.price);
+        const sizeMatched = Number(pick?.sizeMatched);
+        const sizeRemaining = Number(pick?.sizeRemaining);
+        const averagePriceMatched = Number(pick?.averagePriceMatched);
+        const status = String(pick?.status ?? "").trim().toUpperCase() || null;
+        return {
+          betId,
+          placedAt,
+          price: Number.isFinite(price) && price > 1 ? price : null,
+          sizeMatched: Number.isFinite(sizeMatched) ? sizeMatched : null,
+          sizeRemaining: Number.isFinite(sizeRemaining) ? sizeRemaining : null,
+          averagePriceMatched: Number.isFinite(averagePriceMatched) ? averagePriceMatched : null,
+          status,
+        };
+      };
+
+      const findExistingLayTp = async (marketId: string, selectionId: number) => {
+        const orders = await getOuOrders();
+        const candidates = orders.filter((o: any) => {
+          const mid = String(o?.marketId ?? "").trim();
+          const sid = Number(o?.selectionId);
+          const sideRaw = String(o?.side ?? "").trim().toUpperCase();
+          if (mid !== String(marketId ?? "").trim()) return false;
+          if (!(Number.isFinite(sid) && sid > 0 && sid === Number(selectionId))) return false;
+          if (sideRaw !== "LAY") return false;
+          const sizeRemaining = Number(o?.sizeRemaining);
+          return Number.isFinite(sizeRemaining) && sizeRemaining > 0;
+        });
+        if (candidates.length === 0) return null;
+        candidates.sort((a: any, b: any) => String(b?.placedDate ?? "").localeCompare(String(a?.placedDate ?? "")));
+        const pick = candidates[0] ?? null;
+        if (!pick) return null;
+        const betId = String(pick?.betId ?? "").trim() || null;
+        const placedAt = String(pick?.placedDate ?? "").trim() || null;
+        const price = Number(pick?.priceSize?.price ?? pick?.price);
+        const sizeRemaining = Number(pick?.sizeRemaining);
+        const sizeMatched = Number(pick?.sizeMatched);
+        const status = String(pick?.status ?? "").trim().toUpperCase() || null;
+        const size =
+          Number.isFinite(sizeRemaining) && sizeRemaining > 0
+            ? sizeRemaining
+            : Number.isFinite(sizeMatched) && sizeMatched > 0
+              ? sizeMatched
+              : null;
+        return {
+          betId,
+          placedAt,
+          price: Number.isFinite(price) && price > 1 ? price : null,
+          size,
+          status,
+        };
+      };
+
+      const mkStableCustomerRef = (action: string, matchId: string, marketId: string, selectionId: number) => {
+        const a = String(action ?? "").replace(/[^a-zA-Z0-9]/g, "").slice(0, 4) || "x";
+        const id = String(matchId ?? "").replace(/[^a-zA-Z0-9]/g, "");
+        const tail = id.slice(-8) || "0";
+        const mid = String(marketId ?? "").replace(/[^a-zA-Z0-9]/g, "");
+        const midTail = mid.slice(-6) || "m";
+        const sid = Number.isFinite(selectionId) && selectionId > 0 ? String(Math.floor(selectionId)).slice(-4) : "0";
+        const bucket = Math.floor(Date.now() / 4000).toString(36);
+        let ref = `st-${a}-${tail}-${midTail}${sid}-${bucket}`;
+        if (ref.length > 32) ref = ref.slice(0, 32);
+        return ref;
+      };
+
       if (goalConfirmed || (justResumed && bigMove)) {
         if (phase === "entering") {
           const enteringSide = String(existing?.side ?? "").trim().toLowerCase() === "over" ? "over" : "under";
@@ -1412,6 +2669,12 @@ Deno.serve(async (req) => {
             } catch {}
           }
 
+          const entrySelectionId = Number(existing?.selectionId ?? (enteringSide === "over" ? overOverSel : underUnderSel));
+          const locksNow = (baseState as any)?.entryLocks && typeof (baseState as any).entryLocks === "object" ? (baseState as any).entryLocks : {};
+          const locksCleared =
+            Number.isFinite(entrySelectionId) && entrySelectionId > 0 && entryMarketId
+              ? clearEntryLock(locksNow, lockKeyFor(entryMarketId, entrySelectionId))
+              : locksNow;
           const nextCooldownUntilMs = nowMs + afterGoalWaitSeconds * 1000;
           const next = {
             ...current,
@@ -1421,6 +2684,7 @@ Deno.serve(async (req) => {
               agent: "scalpingTicks",
               scalpingTicks: {
                 ...baseState,
+                entryLocks: locksCleared,
                 phase: "monitoring",
                 lastGoalLikeAt: nowIso,
                 ...(goalConfirmed ? { lastGoalAt: nowIso } : {}),
@@ -1504,6 +2768,11 @@ Deno.serve(async (req) => {
               ? Math.min(recoveryMaxStakeAbs, Math.max(2, round2(prevRecoveryStake * (1 + recoveryIncreasePct))))
               : null;
 
+          const locksNow = (baseState as any)?.entryLocks && typeof (baseState as any).entryLocks === "object" ? (baseState as any).entryLocks : {};
+          const locksCleared =
+            Number.isFinite(posSelectionId) && posSelectionId > 0 && posMarketId
+              ? clearEntryLock(locksNow, lockKeyFor(posMarketId, posSelectionId))
+              : locksNow;
           const nextCooldownUntilMs = nowMs + afterGoalWaitSeconds * 1000;
           const next = {
             ...current,
@@ -1513,6 +2782,7 @@ Deno.serve(async (req) => {
               agent: "scalpingTicks",
               scalpingTicks: {
                 ...baseState,
+                entryLocks: locksCleared,
                 phase: didClose ? "cooldown" : marketStatus === "SUSPENDED" ? "exit_pending" : "cooldown",
                 cycleCount: cycleCount + 1,
                 closedAt: nowIso,
@@ -1602,7 +2872,7 @@ Deno.serve(async (req) => {
         return json({ ok: true, skipped: true, reason: "max_cycles", item: next });
       }
 
-      const minCycleSecSafe = Number.isFinite(minSecondsBetweenCycles) ? Math.max(1, Math.floor(minSecondsBetweenCycles)) : 8;
+      const minCycleSecSafe = Number.isFinite(minSecondsBetweenCyclesUsed) ? Math.max(1, Math.floor(minSecondsBetweenCyclesUsed)) : 8;
       if (lastClosedAtMs && Number.isFinite(lastClosedAtMs) && nowMs - lastClosedAtMs < minCycleSecSafe * 1000) {
         const nextCooldownUntilMs = lastClosedAtMs + minCycleSecSafe * 1000;
         const next = {
@@ -1628,7 +2898,11 @@ Deno.serve(async (req) => {
         }
       }
 
-      const runnerMatched = Number(side === "over" ? ouOverBetfair?.odds?.over?.runnerMatched : ouUnderBetfair?.odds?.under?.runnerMatched);
+      const runnerMatched = Number(
+        side === "over"
+          ? ouOverBetfair?.odds?.over?.runnerMatched
+          : ouUnderBetfair?.odds?.under?.runnerMatched,
+      );
       if (Number.isFinite(minRunnerMatched) && minRunnerMatched > 0) {
         if (!(Number.isFinite(runnerMatched) && runnerMatched >= minRunnerMatched)) {
           const next = {
@@ -1674,16 +2948,115 @@ Deno.serve(async (req) => {
           (enteringSide === "over" ? overMarketId : underMarketId);
         const entrySelectionIdRaw = Number(existing?.selectionId ?? (enteringSide === "over" ? overOverSel : underUnderSel));
         const entrySelectionId = Number.isFinite(entrySelectionIdRaw) ? entrySelectionIdRaw : selectionId;
-        const entryBestBack = enteringSide === "over" ? overBack : underBack;
+        const entryOdds = (() => {
+          const mid = String(entryMarketId ?? "").trim();
+          const sid = Number(entrySelectionId);
+          if (mid === overMarketId && sid === overOverSel) return { bestBack: overBack, bestLay: overLay };
+          if (mid === overMarketId && sid === overUnderSel) return { bestBack: overUnderBack, bestLay: overUnderLay };
+          if (mid === underMarketId && sid === underOverSel) return { bestBack: Number(ouUnderBetfair?.odds?.over?.back), bestLay: Number(ouUnderBetfair?.odds?.over?.lay) };
+          if (mid === underMarketId && sid === underUnderSel) return { bestBack: underBack, bestLay: underLay };
+          return { bestBack: enteringSide === "over" ? overBack : underBack, bestLay: enteringSide === "over" ? overLay : underLay };
+        })();
+        const entryBestBack = entryOdds.bestBack;
+        const entryBestLay = entryOdds.bestLay;
         const tpBetId = String(existing?.takeProfit?.betId ?? "").trim() || null;
         const entryPlacedAtIso = String(existing?.lastEntryAt ?? existing?.enteredAt ?? "").trim();
         const entryPlacedAtMs = entryPlacedAtIso ? new Date(entryPlacedAtIso).getTime() : 0;
 
-        if (!entryBetId) {
+        if (enteringSide === "under" && lateUnderLimitMode && Boolean(momentOver.trigger)) {
+          if (tpBetId) {
+            try {
+              await cancelOrders({ adminToken: admin.adminToken, marketId: entryMarketId, betIds: [tpBetId] });
+            } catch {}
+          }
+          if (entryBetId) {
+            try {
+              await cancelOrders({ adminToken: admin.adminToken, marketId: entryMarketId, betIds: [entryBetId] });
+            } catch {}
+          }
+
+          const locksNow = (baseState as any)?.entryLocks && typeof (baseState as any).entryLocks === "object" ? (baseState as any).entryLocks : {};
+          const locksCleared =
+            Number.isFinite(entrySelectionId) && entrySelectionId > 0 && entryMarketId
+              ? clearEntryLock(locksNow, lockKeyFor(entryMarketId, entrySelectionId))
+              : locksNow;
           const next = {
             ...current,
             betfair: baseBetfair,
-            strategy: { ...strategy, agent: "scalpingTicks", scalpingTicks: { ...baseState, phase: "monitoring" } },
+            strategy: {
+              ...strategy,
+              agent: "scalpingTicks",
+              scalpingTicks: {
+                ...baseState,
+                entryLocks: locksCleared,
+                phase: "cooldown",
+                cooldownUntilMs: nowMs + 5_000,
+                lastExitReason: "late_under_goal_alert_cancel",
+                takeProfit: null,
+                lastEntryStatus: "CANCELLED",
+              },
+            },
+            updatedAt: nowIso,
+          };
+          await setQueueItem(matchId, next);
+          return json({ ok: true, skipped: true, reason: "late_under_goal_alert_cancel", item: next });
+        }
+
+        if (!entryBetId) {
+          const adopted = await findExistingBackEntry(entryMarketId, entrySelectionId);
+          if (adopted?.betId) {
+            const hasMatched = Number(adopted?.sizeMatched) > 0;
+            const tpExisting = hasMatched ? await findExistingLayTp(entryMarketId, entrySelectionId) : null;
+            const takeProfit =
+              tpExisting && tpExisting.betId && tpExisting.price != null && tpExisting.size != null
+                ? { betId: tpExisting.betId, price: tpExisting.price, size: tpExisting.size, placedAt: tpExisting.placedAt ?? nowIso, status: tpExisting.status, errorCode: null, result: null, error: null }
+                : null;
+            const next = {
+              ...current,
+              betfair: baseBetfair,
+              strategy: {
+                ...strategy,
+                agent: "scalpingTicks",
+                scalpingTicks: {
+                  ...baseState,
+                  phase: hasMatched && takeProfit ? "entered" : "entering",
+                  entryMarketId,
+                  entryLineCode: Number(existing?.entryLineCode),
+                  selectionId: entrySelectionId,
+                  entryPrice: adopted.averagePriceMatched ?? adopted.price ?? Number(existing?.entryPrice ?? bestBack),
+                  stakeAbs: Number.isFinite(adopted.sizeMatched) && adopted.sizeMatched > 0 ? adopted.sizeMatched : Number(existing?.stakeAbs ?? stakeAbs),
+                  enteredAt: String(existing?.enteredAt ?? nowIso),
+                  lastEntryAt: String(existing?.lastEntryAt ?? nowIso),
+                  entryBetId: adopted.betId,
+                  entryMatchedSize: adopted.sizeMatched ?? null,
+                  entryRemainingSize: adopted.sizeRemaining ?? null,
+                  entryMatchedAt: hasMatched ? nowIso : null,
+                  takeProfit,
+                  lastEntryStatus: adopted.status,
+                  lastEntryErrorCode: null,
+                },
+              },
+              updatedAt: nowIso,
+            };
+            await setQueueItem(matchId, next);
+            return json({ ok: true, entered: Boolean(hasMatched), skipped: true, reason: "adopt_missing_betid", item: next });
+          }
+
+          if (entryPlacedAtMs && Number.isFinite(entryPlacedAtMs) && nowMs - entryPlacedAtMs < 6_000) {
+            const next = {
+              ...current,
+              betfair: baseBetfair,
+              strategy: { ...strategy, agent: "scalpingTicks", scalpingTicks: { ...baseState, phase: "entering", entryMarketId, selectionId: entrySelectionId, lastEntryStatus: "PENDING_BETID" } },
+              updatedAt: nowIso,
+            };
+            await setQueueItem(matchId, next);
+            return json({ ok: true, skipped: true, reason: "await_betid", item: next });
+          }
+
+          const next = {
+            ...current,
+            betfair: baseBetfair,
+            strategy: { ...strategy, agent: "scalpingTicks", scalpingTicks: { ...baseState, phase: "monitoring", lastEntryStatus: "MISSING_BETID" } },
             updatedAt: nowIso,
           };
           await setQueueItem(matchId, next);
@@ -1733,7 +3106,14 @@ Deno.serve(async (req) => {
               : Number.isFinite(entryBestBack) && entryBestBack > 1
               ? entryBestBack
               : bestBack;
-          const targetPrice = movePriceByTicks(entryPriceSafe, -(Number.isFinite(targetTicks) ? Math.floor(targetTicks) : 6));
+          const cycleTargetTicks0 = Number(existing?.cycleTargetTicks);
+          const targetTicksUsed =
+            Number.isFinite(cycleTargetTicks0) && cycleTargetTicks0 > 0
+              ? Math.floor(cycleTargetTicks0)
+              : Number.isFinite(targetTicks)
+                ? Math.floor(targetTicks)
+                : 6;
+          const targetPrice = movePriceByTicks(entryPriceSafe, -Math.max(2, targetTicksUsed));
           const hedgeSizeAtTarget = Number.isFinite(targetPrice) && targetPrice > 1 ? Math.max(2, round2((entryPriceSafe * matchedSafe) / targetPrice)) : null;
 
           let takeProfit = null as any;
@@ -1741,7 +3121,7 @@ Deno.serve(async (req) => {
             const tpRes = await placeOrders({
               adminToken: admin.adminToken,
               marketId: entryMarketId,
-              customerRef: mkCustomerRef("tp", matchId),
+              customerRef: mkStableCustomerRef("tp", matchId, entryMarketId, entrySelectionId),
               instructions: [
                 {
                   selectionId: entrySelectionId,
@@ -1764,6 +3144,7 @@ Deno.serve(async (req) => {
             };
           }
 
+          const entrySide = String(existing?.side ?? "").trim().toLowerCase() === "over" ? "over" : "under";
           const next = {
             ...current,
             betfair: baseBetfair,
@@ -1778,6 +3159,7 @@ Deno.serve(async (req) => {
                 selectionId: entrySelectionId,
                 entryPrice: entryPriceSafe,
                 targetPrice,
+                cycleTargetTicks: Number.isFinite(targetTicksUsed) ? targetTicksUsed : null,
                 stakeAbs: matchedSafe,
                 spreadTicks,
                 enteredAt: String(existing?.enteredAt ?? nowIso),
@@ -1790,6 +3172,19 @@ Deno.serve(async (req) => {
                 lastTpPlaceAt: nowIso,
                 lastTpPlaceError: (takeProfit as any)?.error ?? null,
                 lastEntryStatus: status || null,
+                ...(entrySide === "over"
+                  ? {
+                      overReevalAtMs: pickOverReevalAtMs(),
+                      overReevalStartedAt: nowIso,
+                      overReevalStartScoreHome: baseState.lastScoreHome ?? null,
+                      overReevalStartScoreAway: baseState.lastScoreAway ?? null,
+                    }
+                  : {
+                      overReevalAtMs: null,
+                      overReevalStartedAt: null,
+                      overReevalStartScoreHome: null,
+                      overReevalStartScoreAway: null,
+                    }),
               },
             },
             updatedAt: nowIso,
@@ -1825,11 +3220,14 @@ Deno.serve(async (req) => {
             return json({ ok: true, skipped: true, reason: "reprice_no_price", item: next });
           }
 
-          const entryPrice = currentBestBackForEntry;
+          const entryPrice =
+            !momentOver.trigger && Number.isFinite(entryBestLay) && entryBestLay > 1
+              ? entryBestLay
+              : currentBestBackForEntry;
           const result = await placeOrders({
             adminToken: admin.adminToken,
             marketId: entryMarketId,
-            customerRef: mkCustomerRef("rp", matchId),
+            customerRef: mkStableCustomerRef("rp", matchId, entryMarketId, entrySelectionId),
             instructions: [
               {
                 selectionId: entrySelectionId,
@@ -1840,6 +3238,20 @@ Deno.serve(async (req) => {
             ],
           });
           const newEntryBetId = extractBetId(result);
+          const locksNow = (baseState as any)?.entryLocks && typeof (baseState as any).entryLocks === "object" ? (baseState as any).entryLocks : {};
+          const entryLockKey = lockKeyFor(entryMarketId, entrySelectionId);
+          const lockTtlMs = (newEntryBetId ? entryLockTtlSeconds : entryLockPendingTtlSeconds) * 1000;
+          const locksUpdated = setEntryLock(locksNow, entryLockKey, {
+            matchId,
+            marketId: entryMarketId,
+            selectionId: entrySelectionId,
+            side: "BACK",
+            tradeMode: enteringSide,
+            lockedAt: nowIso,
+            betId: newEntryBetId,
+            status: extractReportStatus(result),
+            expiresAtMs: nowMs + Math.max(1000, lockTtlMs),
+          });
 
           const next = {
             ...current,
@@ -1849,6 +3261,7 @@ Deno.serve(async (req) => {
               agent: "scalpingTicks",
               scalpingTicks: {
                 ...baseState,
+                entryLocks: locksUpdated,
                 phase: "entering",
                 entryMarketId: entryMarketId,
                 entryLineCode:
@@ -1887,11 +3300,91 @@ Deno.serve(async (req) => {
       }
 
       if (!phase || phase === "monitoring" || phase === "cooldown" || phase === "closed") {
-        const entryPrice = movePriceByTicks(bestBack, Number.isFinite(entryOffsetTicks) ? Math.floor(entryOffsetTicks) : 0);
+        const existingEntry = await findExistingBackEntry(
+          marketId,
+          selectionId,
+        );
+        if (existingEntry) {
+          const sizeMatched = Number(existingEntry.sizeMatched);
+          const sizeRemaining = Number(existingEntry.sizeRemaining);
+          const hasMatched = Number.isFinite(sizeMatched) && sizeMatched > 0;
+          const tpExisting = hasMatched
+            ? await findExistingLayTp(marketId, selectionId)
+            : null;
+          const stakeFromOrders =
+            Number.isFinite(sizeMatched) && sizeMatched > 0
+              ? Math.max(2, round2(sizeMatched))
+              : Number.isFinite(sizeRemaining) && sizeRemaining > 0
+                ? Math.max(2, round2(sizeRemaining))
+                : stakeAbs;
+          const tpPrice = tpExisting?.price ?? null;
+          const tpSize = tpExisting?.size ?? null;
+          const takeProfit =
+            tpExisting && tpExisting.betId && tpPrice != null && tpSize != null
+              ? { betId: tpExisting.betId, price: tpPrice, size: tpSize, placedAt: tpExisting.placedAt ?? nowIso, status: tpExisting.status, errorCode: null, result: null, error: null }
+              : null;
+          const next = {
+            ...current,
+            betfair: baseBetfair,
+            strategy: {
+              ...strategy,
+              agent: "scalpingTicks",
+              scalpingTicks: {
+                ...baseState,
+                phase: hasMatched && takeProfit ? "entered" : "entering",
+                cycleCount,
+                entryMarketId: marketId,
+                entryLineCode: String(marketId ?? "").trim() === String(overMarketId ?? "").trim() ? overLineCode : underLineCode,
+                selectionId: selectionId,
+                entryPrice:
+                  (existingEntry.averagePriceMatched != null && existingEntry.averagePriceMatched > 1 ? existingEntry.averagePriceMatched : null) ??
+                  existingEntry.price ??
+                  Number(existing?.entryPrice ?? bestBack),
+                targetPrice: takeProfit ? tpPrice : Number(existing?.targetPrice),
+                stakeAbs: stakeFromOrders,
+                spreadTicks,
+                enteredAt: String(existing?.enteredAt ?? nowIso),
+                lastEntryAt: nowIso,
+                entryBetId: existingEntry.betId,
+                entryMatchedSize: hasMatched ? Math.max(0, round2(sizeMatched)) : null,
+                entryRemainingSize: Number.isFinite(sizeRemaining) ? Math.max(0, round2(sizeRemaining)) : null,
+                entryMatchedAt: hasMatched ? nowIso : null,
+                takeProfit,
+                lastEntryStatus: existingEntry.status,
+                lastEntryErrorCode: null,
+              },
+            },
+            status: String((current as any)?.status ?? "running"),
+            updatedAt: nowIso,
+          };
+          await setQueueItem(matchId, next);
+          return json({ ok: true, item: next, skipped: true, reason: "adopt_existing_entry" });
+        }
+
+        const locksNow = (baseState as any)?.entryLocks && typeof (baseState as any).entryLocks === "object" ? (baseState as any).entryLocks : {};
+        const entryLockKey = lockKeyFor(marketId, selectionId);
+        if (isEntryLocked(locksNow, entryLockKey)) {
+          const next = {
+            ...current,
+            betfair: baseBetfair,
+            strategy: { ...strategy, agent: "scalpingTicks", scalpingTicks: { ...baseState, phase: phase || "monitoring" } },
+            updatedAt: nowIso,
+          };
+          await setQueueItem(matchId, next);
+          return json({ ok: true, skipped: true, reason: "entry_locked", item: next });
+        }
+
+        const entryOffsetTicksSafe = Number.isFinite(entryOffsetTicks) ? Math.floor(entryOffsetTicks) : 0;
+        const baseForEntry =
+          !momentOver.trigger && Number.isFinite(bestLay) && bestLay > 1
+            ? bestLay
+            : bestBack;
+        const entryPrice = movePriceByTicks(baseForEntry, !momentOver.trigger ? 0 : entryOffsetTicksSafe);
+        const cycleTargetTicks = pickTargetTicksForNewEntry();
         const result = await placeOrders({
           adminToken: admin.adminToken,
           marketId,
-          customerRef: mkCustomerRef("en", matchId),
+          customerRef: mkStableCustomerRef("en", matchId, marketId, selectionId),
           instructions: [
             {
               selectionId,
@@ -1905,6 +3398,18 @@ Deno.serve(async (req) => {
         const entryBetId = extractBetId(result);
         const entryStatus = extractReportStatus(result);
         const entryErrorCode = extractReportErrorCode(result);
+        const lockTtlMs = (entryBetId ? entryLockTtlSeconds : entryLockPendingTtlSeconds) * 1000;
+        const locksUpdated = setEntryLock(locksNow, entryLockKey, {
+          matchId,
+          marketId,
+          selectionId,
+          side: "BACK",
+          tradeMode: side,
+          lockedAt: nowIso,
+          betId: entryBetId,
+          status: entryStatus,
+          expiresAtMs: nowMs + Math.max(1000, lockTtlMs),
+        });
 
         const next = {
           ...current,
@@ -1914,12 +3419,14 @@ Deno.serve(async (req) => {
             agent: "scalpingTicks",
             scalpingTicks: {
               ...baseState,
+              entryLocks: locksUpdated,
               phase: "entering",
               cycleCount,
               entryMarketId: marketId,
-              entryLineCode: side === "over" ? overLineCode : underLineCode,
+              entryLineCode: String(marketId ?? "").trim() === String(overMarketId ?? "").trim() ? overLineCode : underLineCode,
               selectionId,
               entryPrice,
+              cycleTargetTicks,
               stakeAbs,
               spreadTicks,
               enteredAt: nowIso,
@@ -1947,8 +3454,17 @@ Deno.serve(async (req) => {
           String(existing?.entryMarketId ?? "").trim() ||
           (activeSide === "over" ? overMarketId : underMarketId);
         const posSelectionId = Number(existing?.selectionId ?? (activeSide === "over" ? overOverSel : underUnderSel));
-        const posBestBack = activeSide === "over" ? overBack : underBack;
-        const posBestLay = activeSide === "over" ? overLay : underLay;
+        const posOdds = (() => {
+          const mid = String(posMarketId ?? "").trim();
+          const sid = Number(posSelectionId);
+          if (mid === overMarketId && sid === overOverSel) return { bestBack: overBack, bestLay: overLay, runnerMatched: overMatchedNow };
+          if (mid === overMarketId && sid === overUnderSel) return { bestBack: overUnderBack, bestLay: overUnderLay, runnerMatched: Number(ouOverBetfair?.odds?.under?.runnerMatched) };
+          if (mid === underMarketId && sid === underOverSel) return { bestBack: Number(ouUnderBetfair?.odds?.over?.back), bestLay: Number(ouUnderBetfair?.odds?.over?.lay), runnerMatched: Number(ouUnderBetfair?.odds?.over?.runnerMatched) };
+          if (mid === underMarketId && sid === underUnderSel) return { bestBack: underBack, bestLay: underLay, runnerMatched: underMatchedNow };
+          return { bestBack: activeSide === "over" ? overBack : underBack, bestLay: activeSide === "over" ? overLay : underLay, runnerMatched: activeSide === "over" ? overMatchedNow : underMatchedNow };
+        })();
+        const posBestBack = posOdds.bestBack;
+        const posBestLay = posOdds.bestLay;
         const tpBetId = String(existing?.takeProfit?.betId ?? "").trim() || null;
         const tpPrice = Number(existing?.takeProfit?.price);
         const lastTpCheckAt = String(existing?.lastTpCheckAt ?? "").trim();
@@ -1957,6 +3473,298 @@ Deno.serve(async (req) => {
         const lastTpPlaceAtMs = lastTpPlaceAt ? new Date(lastTpPlaceAt).getTime() : 0;
         const pendingExitAt = String((existing as any)?.pendingExitAt ?? "").trim();
         const pendingExitAtMs = pendingExitAt ? new Date(pendingExitAt).getTime() : 0;
+        const overReevalAtMs = Number((existing as any)?.overReevalAtMs);
+        const overStartHome = Number((existing as any)?.overReevalStartScoreHome);
+        const overStartAway = Number((existing as any)?.overReevalStartScoreAway);
+
+        const isSameScoreAsOverStart =
+          activeSide === "over" &&
+          typeof scoreHomeNow === "number" &&
+          typeof scoreAwayNow === "number" &&
+          Number.isFinite(overStartHome) &&
+          Number.isFinite(overStartAway) &&
+          scoreHomeNow === overStartHome &&
+          scoreAwayNow === overStartAway;
+
+        if (activeSide === "under" && lateUnderLimitMode && Boolean(momentOver.trigger)) {
+          const entryBetId = String(existing?.entryBetId ?? "").trim() || null;
+          let entrySizeMatched = Number(existing?.stakeAbs ?? stakeAbs);
+          let entrySizeRemaining = 0;
+          if (entryBetId) {
+            try {
+              const res = await listCurrentOrders({ adminToken: admin.adminToken, betIds: [entryBetId] });
+              const currentOrders = Array.isArray((res as any)?.currentOrders) ? (res as any).currentOrders : [];
+              const row = currentOrders.find((o: any) => String(o?.betId ?? "").trim() === entryBetId) ?? null;
+              const sizeMatched = Number(row?.sizeMatched);
+              const sizeRemaining = Number(row?.sizeRemaining);
+              if (Number.isFinite(sizeMatched) && sizeMatched > 0) entrySizeMatched = sizeMatched;
+              if (Number.isFinite(sizeRemaining) && sizeRemaining > 0) entrySizeRemaining = sizeRemaining;
+            } catch {}
+          }
+
+          if (tpBetId) {
+            try {
+              await cancelOrders({ adminToken: admin.adminToken, marketId: posMarketId, betIds: [tpBetId] });
+            } catch {}
+          }
+          if (entryBetId && entrySizeRemaining > 0 && !(Number.isFinite(entrySizeMatched) && entrySizeMatched > 0)) {
+            try {
+              await cancelOrders({ adminToken: admin.adminToken, marketId: posMarketId, betIds: [entryBetId] });
+            } catch {}
+          } else if (marketStatus !== "SUSPENDED" && Number.isFinite(posBestLay) && posBestLay > 1) {
+            const entryPrice = Number(existing?.entryPrice);
+            const hedgeSize =
+              Number.isFinite(entryPrice) && entryPrice > 1 && Number.isFinite(entrySizeMatched) && entrySizeMatched > 0
+                ? Math.max(2, round2((entryPrice * entrySizeMatched) / posBestLay))
+                : Math.max(2, round2(entrySizeMatched));
+            try {
+              await placeOrders({
+                adminToken: admin.adminToken,
+                marketId: posMarketId,
+                customerRef: mkCustomerRef("lx", matchId),
+                instructions: [
+                  {
+                    selectionId: posSelectionId,
+                    side: "LAY",
+                    orderType: "LIMIT",
+                    limitOrder: { size: hedgeSize, price: posBestLay, persistenceType: "LAPSE" },
+                  },
+                ],
+              });
+            } catch {}
+          }
+
+          const minCycleSecSafe = Number.isFinite(minSecondsBetweenCyclesUsed) ? Math.max(1, Math.floor(minSecondsBetweenCyclesUsed)) : 8;
+          const locksNow = (baseState as any)?.entryLocks && typeof (baseState as any).entryLocks === "object" ? (baseState as any).entryLocks : {};
+          const locksCleared =
+            Number.isFinite(posSelectionId) && posSelectionId > 0 && posMarketId
+              ? clearEntryLock(locksNow, lockKeyFor(posMarketId, posSelectionId))
+              : locksNow;
+          const next = {
+            ...current,
+            betfair: baseBetfair,
+            strategy: {
+              ...strategy,
+              agent: "scalpingTicks",
+              scalpingTicks: {
+                ...baseState,
+                entryLocks: locksCleared,
+                phase: "cooldown",
+                cooldownUntilMs: nowMs + minCycleSecSafe * 1000,
+                lastClosedAt: nowIso,
+                closedAt: nowIso,
+                lastExitReason: "late_under_goal_alert_exit",
+                pendingExitAt: marketStatus === "SUSPENDED" ? nowIso : null,
+                pendingExitReason: marketStatus === "SUSPENDED" ? "late_under_goal_alert_pending" : null,
+                takeProfit: null,
+              },
+            },
+            updatedAt: nowIso,
+          };
+          await setQueueItem(matchId, next);
+          return json({ ok: true, item: next, closed: true, reason: "late_under_goal_alert_exit" });
+        }
+
+        
+        if (
+          activeSide === "over" &&
+          Number.isFinite(overReevalAtMs) &&
+          overReevalAtMs > 0 &&
+          nowMs >= overReevalAtMs &&
+          isSameScoreAsOverStart &&
+          Number.isFinite(posBestLay) &&
+          posBestLay > 1
+        ) {
+          if (
+            lateNoGoalEnabled &&
+            veryLateMode &&
+            totalGoalsNow === 0 &&
+            Number.isFinite(overUnderBack) &&
+            overUnderBack > 1 &&
+            Number.isFinite(overUnderLay) &&
+            overUnderLay > 1
+          ) {
+            const entryBetId = String(existing?.entryBetId ?? "").trim() || null;
+            let entrySizeMatched = Number(existing?.stakeAbs ?? stakeAbs);
+            let entrySizeRemaining = 0;
+            if (entryBetId) {
+              try {
+                const res = await listCurrentOrders({ adminToken: admin.adminToken, betIds: [entryBetId] });
+                const currentOrders = Array.isArray((res as any)?.currentOrders) ? (res as any).currentOrders : [];
+                const row = currentOrders.find((o: any) => String(o?.betId ?? "").trim() === entryBetId) ?? null;
+                const sizeMatched = Number(row?.sizeMatched);
+                const sizeRemaining = Number(row?.sizeRemaining);
+                if (Number.isFinite(sizeMatched) && sizeMatched > 0) entrySizeMatched = sizeMatched;
+                if (Number.isFinite(sizeRemaining) && sizeRemaining > 0) entrySizeRemaining = sizeRemaining;
+              } catch {}
+            }
+
+            if (tpBetId) {
+              try {
+                await cancelOrders({ adminToken: admin.adminToken, marketId: posMarketId, betIds: [tpBetId] });
+              } catch {}
+            }
+            if (entryBetId && entrySizeRemaining > 0 && !(Number.isFinite(entrySizeMatched) && entrySizeMatched > 0)) {
+              try {
+                await cancelOrders({ adminToken: admin.adminToken, marketId: posMarketId, betIds: [entryBetId] });
+              } catch {}
+            } else {
+              const entryPrice = Number(existing?.entryPrice);
+              const hedgeNow =
+                Number.isFinite(entryPrice) && entryPrice > 1 && Number.isFinite(entrySizeMatched) && entrySizeMatched > 0
+                  ? Math.max(2, round2((entryPrice * entrySizeMatched) / posBestLay))
+                  : Math.max(2, round2(Number(existing?.stakeAbs ?? stakeAbs)));
+              try {
+                await placeOrders({
+                  adminToken: admin.adminToken,
+                  marketId: posMarketId,
+                  customerRef: mkCustomerRef("rx", matchId),
+                  instructions: [
+                    {
+                      selectionId: posSelectionId,
+                      side: "LAY",
+                      orderType: "LIMIT",
+                      limitOrder: { size: hedgeNow, price: posBestLay, persistenceType: "LAPSE" },
+                    },
+                  ],
+                });
+              } catch {}
+            }
+
+            const minCycleSecSafe = Number.isFinite(minSecondsBetweenCyclesUsed) ? Math.max(1, Math.floor(minSecondsBetweenCyclesUsed)) : 8;
+            const locksNow = (baseState as any)?.entryLocks && typeof (baseState as any).entryLocks === "object" ? (baseState as any).entryLocks : {};
+            const locksCleared =
+              Number.isFinite(posSelectionId) && posSelectionId > 0 && posMarketId
+                ? clearEntryLock(locksNow, lockKeyFor(posMarketId, posSelectionId))
+                : locksNow;
+            const nextCooldownUntilMs = nowMs + minCycleSecSafe * 1000;
+            const next = {
+              ...current,
+              betfair: baseBetfair,
+              strategy: {
+                ...strategy,
+                agent: "scalpingTicks",
+                scalpingTicks: {
+                  ...baseState,
+                  entryLocks: locksCleared,
+                  phase: "cooldown",
+                  cycleCount: cycleCount + 1,
+                  closedAt: nowIso,
+                  lastClosedAt: nowIso,
+                  cooldownUntilMs: nextCooldownUntilMs,
+                  lastExitReason: "late_no_goal_rebalance",
+                  pendingExitAt: null,
+                  pendingExitReason: null,
+                  
+                  overReevalAtMs: null,
+                  overReevalStartedAt: null,
+                  overReevalStartScoreHome: null,
+                  overReevalStartScoreAway: null,
+                },
+              },
+              updatedAt: nowIso,
+            };
+            await setQueueItem(matchId, next);
+            return json({ ok: true, item: next, closed: true, reason: "late_no_goal_rebalance" });
+          }
+
+          if (!momentOver.trigger) {
+            const entryBetId = String(existing?.entryBetId ?? "").trim() || null;
+            let entrySizeMatched = Number(existing?.stakeAbs ?? stakeAbs);
+            let entrySizeRemaining = 0;
+            if (entryBetId) {
+              try {
+                const res = await listCurrentOrders({ adminToken: admin.adminToken, betIds: [entryBetId] });
+                const currentOrders = Array.isArray((res as any)?.currentOrders) ? (res as any).currentOrders : [];
+                const row = currentOrders.find((o: any) => String(o?.betId ?? "").trim() === entryBetId) ?? null;
+                const sizeMatched = Number(row?.sizeMatched);
+                const sizeRemaining = Number(row?.sizeRemaining);
+                if (Number.isFinite(sizeMatched) && sizeMatched > 0) entrySizeMatched = sizeMatched;
+                if (Number.isFinite(sizeRemaining) && sizeRemaining > 0) entrySizeRemaining = sizeRemaining;
+              } catch {}
+            }
+
+            if (tpBetId) {
+              try {
+                await cancelOrders({ adminToken: admin.adminToken, marketId: posMarketId, betIds: [tpBetId] });
+              } catch {}
+            }
+            if (entryBetId && entrySizeRemaining > 0 && !(Number.isFinite(entrySizeMatched) && entrySizeMatched > 0)) {
+              try {
+                await cancelOrders({ adminToken: admin.adminToken, marketId: posMarketId, betIds: [entryBetId] });
+              } catch {}
+            }
+
+            const entryPrice = Number(existing?.entryPrice);
+            const hedgeSize =
+              Number.isFinite(entryPrice) && entryPrice > 1 && Number.isFinite(entrySizeMatched) && entrySizeMatched > 0
+                ? Math.max(2, round2((entryPrice * entrySizeMatched) / posBestLay))
+                : Math.max(2, round2(Number(existing?.stakeAbs ?? stakeAbs)));
+            try {
+              await placeOrders({
+                adminToken: admin.adminToken,
+                marketId: posMarketId,
+                customerRef: mkCustomerRef("rx", matchId),
+                instructions: [
+                  {
+                    selectionId: posSelectionId,
+                    side: "LAY",
+                    orderType: "LIMIT",
+                    limitOrder: { size: hedgeSize, price: posBestLay, persistenceType: "LAPSE" },
+                  },
+                ],
+              });
+            } catch {}
+
+            const minCycleSecSafe = Number.isFinite(minSecondsBetweenCyclesUsed) ? Math.max(1, Math.floor(minSecondsBetweenCyclesUsed)) : 8;
+            const locksNow = (baseState as any)?.entryLocks && typeof (baseState as any).entryLocks === "object" ? (baseState as any).entryLocks : {};
+            const locksCleared =
+              Number.isFinite(posSelectionId) && posSelectionId > 0 && posMarketId
+                ? clearEntryLock(locksNow, lockKeyFor(posMarketId, posSelectionId))
+                : locksNow;
+            const nextCooldownUntilMs = nowMs + minCycleSecSafe * 1000;
+            const next = {
+              ...current,
+              betfair: baseBetfair,
+              strategy: {
+                ...strategy,
+                agent: "scalpingTicks",
+                scalpingTicks: {
+                  ...baseState,
+                  entryLocks: locksCleared,
+                  phase: "cooldown",
+                  cycleCount: cycleCount + 1,
+                  closedAt: nowIso,
+                  lastClosedAt: nowIso,
+                  cooldownUntilMs: nextCooldownUntilMs,
+                  lastExitReason: "over_reeval_under",
+                  pendingExitAt: null,
+                  pendingExitReason: null,
+                  overReevalAtMs: null,
+                  overReevalStartedAt: null,
+                  overReevalStartScoreHome: null,
+                  overReevalStartScoreAway: null,
+                },
+              },
+              updatedAt: nowIso,
+            };
+            await setQueueItem(matchId, next);
+            return json({ ok: true, item: next, closed: true, reason: "over_reeval_under" });
+          }
+
+          const next = {
+            ...current,
+            betfair: baseBetfair,
+            strategy: {
+              ...strategy,
+              agent: "scalpingTicks",
+              scalpingTicks: { ...baseState, phase: "entered", overReevalAtMs: pickOverReevalAtMs() },
+            },
+            updatedAt: nowIso,
+          };
+          await setQueueItem(matchId, next);
+          return json({ ok: true, item: next, skipped: true, reason: "over_reeval_keep" });
+        }
 
         if (pendingExitAtMs && Number.isFinite(pendingExitAtMs) && pendingExitAtMs > 0 && Number.isFinite(posBestLay) && posBestLay > 1) {
           const entryBetId = String(existing?.entryBetId ?? "").trim() || null;
@@ -2006,7 +3814,12 @@ Deno.serve(async (req) => {
             });
           } catch {}
 
-          const minCycleSecSafe = Number.isFinite(minSecondsBetweenCycles) ? Math.max(1, Math.floor(minSecondsBetweenCycles)) : 8;
+          const locksNow = (baseState as any)?.entryLocks && typeof (baseState as any).entryLocks === "object" ? (baseState as any).entryLocks : {};
+          const locksCleared =
+            Number.isFinite(posSelectionId) && posSelectionId > 0 && posMarketId
+              ? clearEntryLock(locksNow, lockKeyFor(posMarketId, posSelectionId))
+              : locksNow;
+          const minCycleSecSafe = Number.isFinite(minSecondsBetweenCyclesUsed) ? Math.max(1, Math.floor(minSecondsBetweenCyclesUsed)) : 8;
           const nextCooldownUntilMs = nowMs + minCycleSecSafe * 1000;
           const next = {
             ...current,
@@ -2016,6 +3829,7 @@ Deno.serve(async (req) => {
               agent: "scalpingTicks",
               scalpingTicks: {
                 ...baseState,
+                entryLocks: locksCleared,
                 phase: "cooldown",
                 cycleCount: cycleCount + 1,
                 closedAt: nowIso,
@@ -2037,11 +3851,18 @@ Deno.serve(async (req) => {
           if (!lastTpPlaceAtMs || !Number.isFinite(lastTpPlaceAtMs) || nowMs - lastTpPlaceAtMs >= throttleMs) {
             const entryPrice0 = Number(existing?.entryPrice);
             const stake0 = Number(existing?.stakeAbs ?? stakeAbs);
+            const cycleTargetTicks0 = Number(existing?.cycleTargetTicks);
+            const targetTicksUsed =
+              Number.isFinite(cycleTargetTicks0) && cycleTargetTicks0 > 0
+                ? Math.floor(cycleTargetTicks0)
+                : Number.isFinite(targetTicks)
+                  ? Math.floor(targetTicks)
+                  : 6;
             const targetPrice0 =
               Number(existing?.targetPrice) > 1
                 ? Number(existing?.targetPrice)
                 : Number.isFinite(entryPrice0) && entryPrice0 > 1
-                  ? movePriceByTicks(entryPrice0, -(Number.isFinite(targetTicks) ? Math.floor(targetTicks) : 6))
+                  ? movePriceByTicks(entryPrice0, -Math.max(2, targetTicksUsed))
                   : NaN;
 
             if (Number.isFinite(entryPrice0) && entryPrice0 > 1 && Number.isFinite(targetPrice0) && targetPrice0 > 1 && Number.isFinite(stake0) && stake0 > 0) {
@@ -2049,7 +3870,7 @@ Deno.serve(async (req) => {
               const tpRes = await placeOrders({
                 adminToken: admin.adminToken,
                 marketId: posMarketId,
-                customerRef: mkCustomerRef("tr", matchId),
+                customerRef: mkStableCustomerRef("tr", matchId, posMarketId, posSelectionId),
                 instructions: [
                   {
                     selectionId: posSelectionId,
@@ -2094,143 +3915,1116 @@ Deno.serve(async (req) => {
           }
         }
 
-        const invertVolumePctRaw = Number(cfg?.invertVolumePct ?? 300);
-        const invertVolumePct = Number.isFinite(invertVolumePctRaw) ? Math.max(50, Math.min(1000, Math.floor(invertVolumePctRaw))) : 300;
-        const invertMultiplier = 1 + invertVolumePct / 100;
-        const baselineOver = Number(existing?.entryOverMatched);
-        const baselineOverSafe =
-          Number.isFinite(baselineOver) && baselineOver > 0
-            ? baselineOver
-            : Number.isFinite(overMatchedNow) && overMatchedNow > 0
-              ? overMatchedNow
-              : null;
-        const shouldInvert =
-          activeSide === "under" &&
-          baselineOverSafe != null &&
-          Number.isFinite(overMatchedNow) &&
-          overMatchedNow > 0 &&
-          overMatchedNow >= baselineOverSafe * invertMultiplier;
+        if (
+          hedgeUnderEnabled &&
+          activeSide === "over" &&
+          totalGoalsNow === 0 &&
+          typeof elapsedMin === "number" &&
+          Number.isFinite(elapsedMin) &&
+          elapsedMin >= hedgeUnderMinMinute &&
+          Boolean(momentOver.trigger)
+        ) {
+          const hedgeLineCode = Math.max(5, Math.floor(overLineCode + hedgeUnderAboveGoals * 10));
+          const hedgeState = ((existing as any)?.hedgeUnder && typeof (existing as any).hedgeUnder === "object") ? (existing as any).hedgeUnder : {};
+          const hedgePhase = String(hedgeState?.phase ?? "").trim();
+          const hedgeMarketIdStored = String(hedgeState?.marketId ?? "").trim() || null;
+          const hedgeSelectionIdStored = Number(hedgeState?.selectionId);
+          const hedgeEntryBetIdStored = String(hedgeState?.entryBetId ?? "").trim() || null;
+          const hedgeTpBetIdStored = String(hedgeState?.takeProfit?.betId ?? "").trim() || null;
+          const hedgeEntryPriceStored = Number(hedgeState?.entryPrice);
+          const hedgeTargetPriceStored = Number(hedgeState?.targetPrice);
+          const hedgeStakeAbsStored = Number(hedgeState?.stakeAbs);
+          const hedgeCooldownUntilMsStored = Number(hedgeState?.cooldownUntilMs);
 
-        if (shouldInvert) {
-          const entryBetId = String(existing?.entryBetId ?? "").trim() || null;
-          let entrySizeMatched = Number(existing?.stakeAbs ?? stakeAbs);
-          let entrySizeRemaining = 0;
-          if (entryBetId) {
+          const resolveHedge = async () => {
+            const raw = await resolveBetfairOverUnderMarket({ eventId, lineCode: hedgeLineCode });
+            const slim = slimOuMarket(raw);
+            const mid = String(slim?.marketId ?? "").trim();
+            const selUnder = Number(slim?.runners?.underSelectionId);
+            const bestBackUnder = Number(slim?.odds?.under?.back);
+            const bestLayUnder = Number(slim?.odds?.under?.lay);
+            return { mid, selUnder, bestBackUnder, bestLayUnder };
+          };
+
+          const hedgeCooldownSec = Number.isFinite(minSecondsBetweenCycles) ? Math.max(5, Math.min(120, Math.floor(minSecondsBetweenCycles))) : 8;
+
+          let hedgeMid = hedgeMarketIdStored;
+          let hedgeSel = Number.isFinite(hedgeSelectionIdStored) ? hedgeSelectionIdStored : NaN;
+          let hedgeBestBack = NaN;
+          let hedgeBestLay = NaN;
+          try {
+            const r = await resolveHedge();
+            hedgeMid = r.mid || hedgeMid;
+            hedgeSel = Number.isFinite(r.selUnder) ? r.selUnder : hedgeSel;
+            hedgeBestBack = r.bestBackUnder;
+            hedgeBestLay = r.bestLayUnder;
+          } catch {}
+
+          const pickBack = (orders: any[]) => {
+            const candidates = orders.filter((o: any) => {
+              const mid = String(o?.marketId ?? "").trim();
+              const sid = Number(o?.selectionId);
+              const sideRaw = String(o?.side ?? "").trim().toUpperCase();
+              if (mid !== String(hedgeMid ?? "").trim()) return false;
+              if (!(Number.isFinite(sid) && sid > 0 && sid === Number(hedgeSel))) return false;
+              if (sideRaw !== "BACK") return false;
+              const sizeMatched = Number(o?.sizeMatched);
+              const sizeRemaining = Number(o?.sizeRemaining);
+              return (Number.isFinite(sizeMatched) && sizeMatched > 0) || (Number.isFinite(sizeRemaining) && sizeRemaining > 0);
+            });
+            if (candidates.length === 0) return null;
+            candidates.sort((a: any, b: any) => String(b?.placedDate ?? "").localeCompare(String(a?.placedDate ?? "")));
+            return candidates[0] ?? null;
+          };
+
+          const pickLayTp = (orders: any[]) => {
+            const candidates = orders.filter((o: any) => {
+              const mid = String(o?.marketId ?? "").trim();
+              const sid = Number(o?.selectionId);
+              const sideRaw = String(o?.side ?? "").trim().toUpperCase();
+              if (mid !== String(hedgeMid ?? "").trim()) return false;
+              if (!(Number.isFinite(sid) && sid > 0 && sid === Number(hedgeSel))) return false;
+              if (sideRaw !== "LAY") return false;
+              const sizeRemaining = Number(o?.sizeRemaining);
+              return Number.isFinite(sizeRemaining) && sizeRemaining > 0;
+            });
+            if (candidates.length === 0) return null;
+            candidates.sort((a: any, b: any) => String(b?.placedDate ?? "").localeCompare(String(a?.placedDate ?? "")));
+            return candidates[0] ?? null;
+          };
+
+          const canOperateHedge = Boolean(hedgeMid && Number.isFinite(hedgeSel) && hedgeSel > 0);
+          if (canOperateHedge) {
+            const hedgeOrdersRes = await listCurrentOrders({ adminToken: admin.adminToken, marketIds: [String(hedgeMid)] }).catch(() => null);
+            const hedgeOrders = Array.isArray((hedgeOrdersRes as any)?.currentOrders) ? (hedgeOrdersRes as any).currentOrders : [];
+
+            const existingBack = pickBack(hedgeOrders);
+            const existingTp = pickLayTp(hedgeOrders);
+
+            if (!hedgeEntryBetIdStored && existingBack) {
+              const betId = String(existingBack?.betId ?? "").trim() || null;
+              const placedAt = String(existingBack?.placedDate ?? "").trim() || nowIso;
+              const avgMatched = Number(existingBack?.averagePriceMatched);
+              const price = Number(existingBack?.priceSize?.price ?? existingBack?.price);
+              const sizeMatched = Number(existingBack?.sizeMatched);
+              const sizeRemaining = Number(existingBack?.sizeRemaining);
+              const entryPriceH =
+                Number.isFinite(avgMatched) && avgMatched > 1
+                  ? avgMatched
+                  : Number.isFinite(price) && price > 1
+                    ? price
+                    : Number.isFinite(hedgeEntryPriceStored) && hedgeEntryPriceStored > 1
+                      ? hedgeEntryPriceStored
+                      : null;
+              const stakeHedge =
+                Number.isFinite(sizeMatched) && sizeMatched > 0
+                  ? Math.max(2, round2(sizeMatched))
+                  : Number.isFinite(sizeRemaining) && sizeRemaining > 0
+                    ? Math.max(2, round2(sizeRemaining))
+                    : Math.max(2, round2(hedgeStakeAbsStored));
+
+              const tpBetId = existingTp ? String(existingTp?.betId ?? "").trim() || null : null;
+              const tpPrice = existingTp ? Number(existingTp?.priceSize?.price ?? existingTp?.price) : null;
+              const tpSizeRemaining = existingTp ? Number(existingTp?.sizeRemaining) : null;
+              const tpSizeMatched = existingTp ? Number(existingTp?.sizeMatched) : null;
+              const tpSize =
+                Number.isFinite(tpSizeRemaining) && tpSizeRemaining > 0
+                  ? tpSizeRemaining
+                  : Number.isFinite(tpSizeMatched) && tpSizeMatched > 0
+                    ? tpSizeMatched
+                    : null;
+
+              const targetPriceH =
+                Number.isFinite(hedgeTargetPriceStored) && hedgeTargetPriceStored > 1
+                  ? hedgeTargetPriceStored
+                  : entryPriceH
+                    ? movePriceByTicks(entryPriceH, -hedgeUnderTargetTicks)
+                    : null;
+
+              const next = {
+                ...current,
+                betfair: baseBetfair,
+                strategy: {
+                  ...strategy,
+                  agent: "scalpingTicks",
+                  scalpingTicks: {
+                    ...baseState,
+                    phase: "entered",
+                    hedgeUnder: {
+                      phase: tpBetId && tpPrice && tpSize ? "entered" : "entering",
+                      lineCode: hedgeLineCode,
+                      marketId: hedgeMid,
+                      selectionId: hedgeSel,
+                      entryPrice: entryPriceH,
+                      targetPrice: targetPriceH,
+                      stakeAbs: stakeHedge,
+                      entryBetId: betId,
+                      enteredAt: String(hedgeState?.enteredAt ?? placedAt),
+                      takeProfit: tpBetId && tpPrice && tpSize ? { betId: tpBetId, price: tpPrice, size: tpSize, placedAt: String(existingTp?.placedDate ?? nowIso), result: null, error: null } : null,
+                      cooldownUntilMs: Number.isFinite(hedgeCooldownUntilMsStored) && hedgeCooldownUntilMsStored > 0 ? hedgeCooldownUntilMsStored : null,
+                      lastClosedAt: String(hedgeState?.lastClosedAt ?? ""),
+                      lastError: null,
+                    },
+                  },
+                },
+                updatedAt: nowIso,
+              };
+              await setQueueItem(matchId, next);
+              return json({ ok: true, item: next, skipped: true, reason: "hedge_under_adopt" });
+            }
+
+            if (hedgeTpBetIdStored) {
+              const tpRowRes = await listCurrentOrders({ adminToken: admin.adminToken, betIds: [hedgeTpBetIdStored] }).catch(() => null);
+              const tpOrders = Array.isArray((tpRowRes as any)?.currentOrders) ? (tpRowRes as any).currentOrders : [];
+              const row = tpOrders.find((o: any) => String(o?.betId ?? "").trim() === hedgeTpBetIdStored) ?? null;
+              const remaining = Number(row?.sizeRemaining);
+              const isOpen = Number.isFinite(remaining) && remaining > 0;
+
+              if (!isOpen) {
+                const next = {
+                  ...current,
+                  betfair: baseBetfair,
+                  strategy: {
+                    ...strategy,
+                    agent: "scalpingTicks",
+                    scalpingTicks: {
+                      ...baseState,
+                      phase: "entered",
+                      hedgeUnder: {
+                        phase: "cooldown",
+                        lineCode: hedgeLineCode,
+                        marketId: hedgeMid,
+                        selectionId: hedgeSel,
+                        entryPrice: null,
+                        targetPrice: null,
+                        stakeAbs: null,
+                        entryBetId: null,
+                        enteredAt: null,
+                        takeProfit: null,
+                        cooldownUntilMs: nowMs + hedgeCooldownSec * 1000,
+                        lastClosedAt: nowIso,
+                        lastError: null,
+                      },
+                    },
+                  },
+                  updatedAt: nowIso,
+                };
+                await setQueueItem(matchId, next);
+                return json({ ok: true, item: next, skipped: true, reason: "hedge_under_closed" });
+              }
+            }
+
+            const hedgeCooldownUntilMs =
+              Number.isFinite(hedgeCooldownUntilMsStored) && hedgeCooldownUntilMsStored > 0 ? hedgeCooldownUntilMsStored : 0;
+            const isCoolingDown = hedgePhase === "cooldown" && hedgeCooldownUntilMs > 0 && nowMs < hedgeCooldownUntilMs;
+
+            if (!hedgeEntryBetIdStored && !isCoolingDown && Number.isFinite(hedgeBestBack) && hedgeBestBack > 1) {
+              const locksNowGlobal = (baseState as any)?.entryLocks && typeof (baseState as any).entryLocks === "object" ? (baseState as any).entryLocks : {};
+              const hedgeEntryLockKey = lockKeyFor(String(hedgeMid), Number(hedgeSel));
+              if (isEntryLocked(locksNowGlobal, hedgeEntryLockKey)) {
+                const next = {
+                  ...current,
+                  betfair: baseBetfair,
+                  strategy: {
+                    ...strategy,
+                    agent: "scalpingTicks",
+                    scalpingTicks: {
+                      ...baseState,
+                      phase: "entered",
+                      hedgeUnder: {
+                        ...hedgeState,
+                        phase: hedgePhase || "monitoring",
+                        lineCode: hedgeLineCode,
+                        marketId: hedgeMid,
+                        selectionId: hedgeSel,
+                      },
+                    },
+                  },
+                  updatedAt: nowIso,
+                };
+                await setQueueItem(matchId, next);
+                return json({ ok: true, item: next, skipped: true, reason: "hedge_under_entry_locked" });
+              }
+
+              const stakeHedge = Math.max(2, round2(stakeAbs * hedgeUnderStakePct));
+              const entryPriceH = hedgeBestBack;
+              const targetPriceH = movePriceByTicks(entryPriceH, -hedgeUnderTargetTicks);
+              const placeRes = await placeOrders({
+                adminToken: admin.adminToken,
+                marketId: String(hedgeMid),
+                customerRef: mkStableCustomerRef("hu", matchId, String(hedgeMid), Number(hedgeSel)),
+                instructions: [
+                  {
+                    selectionId: hedgeSel,
+                    side: "BACK",
+                    orderType: "LIMIT",
+                    limitOrder: { size: stakeHedge, price: entryPriceH, persistenceType: "LAPSE" },
+                  },
+                ],
+              }).catch((e) => ({ __error: e instanceof Error ? e.message : String(e) }));
+
+              const betId = extractBetId(placeRes);
+              const lockTtlMs = (betId ? entryLockTtlSeconds : entryLockPendingTtlSeconds) * 1000;
+              const locksUpdated = setEntryLock(locksNowGlobal, hedgeEntryLockKey, {
+                matchId,
+                marketId: String(hedgeMid),
+                selectionId: Number(hedgeSel),
+                side: "BACK",
+                tradeMode: "hedge_under",
+                lockedAt: nowIso,
+                betId,
+                status: extractReportStatus(placeRes),
+                expiresAtMs: nowMs + Math.max(1000, lockTtlMs),
+              });
+              const next = {
+                ...current,
+                betfair: baseBetfair,
+                strategy: {
+                  ...strategy,
+                  agent: "scalpingTicks",
+                  scalpingTicks: {
+                    ...baseState,
+                    entryLocks: locksUpdated,
+                    phase: "entered",
+                    hedgeUnder: {
+                      phase: "entering",
+                      lineCode: hedgeLineCode,
+                      marketId: hedgeMid,
+                      selectionId: hedgeSel,
+                      entryPrice: entryPriceH,
+                      targetPrice: Number.isFinite(targetPriceH) && targetPriceH > 1 ? targetPriceH : null,
+                      stakeAbs: stakeHedge,
+                      entryBetId: betId,
+                      enteredAt: nowIso,
+                      takeProfit: null,
+                      cooldownUntilMs: null,
+                      lastClosedAt: String(hedgeState?.lastClosedAt ?? ""),
+                      lastError: (placeRes as any)?.__error ? String((placeRes as any).__error) : null,
+                    },
+                  },
+                },
+                updatedAt: nowIso,
+              };
+              await setQueueItem(matchId, next);
+              return json({ ok: true, item: next, skipped: true, reason: "hedge_under_entering" });
+            }
+          }
+
+          if (hedgeEntryBetIdStored && !hedgeTpBetIdStored) {
             try {
-              const res = await listCurrentOrders({ adminToken: admin.adminToken, betIds: [entryBetId] });
+              const res = await listCurrentOrders({ adminToken: admin.adminToken, betIds: [hedgeEntryBetIdStored] });
               const currentOrders = Array.isArray((res as any)?.currentOrders) ? (res as any).currentOrders : [];
-              const row = currentOrders.find((o: any) => String(o?.betId ?? "").trim() === entryBetId) ?? null;
+              const row = currentOrders.find((o: any) => String(o?.betId ?? "").trim() === hedgeEntryBetIdStored) ?? null;
               const sizeMatched = Number(row?.sizeMatched);
               const sizeRemaining = Number(row?.sizeRemaining);
-              if (Number.isFinite(sizeMatched) && sizeMatched > 0) entrySizeMatched = sizeMatched;
-              if (Number.isFinite(sizeRemaining) && sizeRemaining > 0) entrySizeRemaining = sizeRemaining;
+              const avgMatched = Number(row?.averagePriceMatched);
+              const isStillOpen = Number.isFinite(sizeRemaining) && sizeRemaining > 0;
+              const hasMatched = Number.isFinite(sizeMatched) && sizeMatched > 0;
+              if (!isStillOpen && !hasMatched) {
+                const locksNowGlobal = (baseState as any)?.entryLocks && typeof (baseState as any).entryLocks === "object" ? (baseState as any).entryLocks : {};
+                const locksCleared =
+                  hedgeMid && Number.isFinite(hedgeSel) && Number(hedgeSel) > 0
+                    ? clearEntryLock(locksNowGlobal, lockKeyFor(String(hedgeMid), Number(hedgeSel)))
+                    : locksNowGlobal;
+                const next = {
+                  ...current,
+                  betfair: baseBetfair,
+                  strategy: {
+                    ...strategy,
+                    agent: "scalpingTicks",
+                    scalpingTicks: {
+                      ...baseState,
+                      entryLocks: locksCleared,
+                      phase: "entered",
+                      hedgeUnder: {
+                        phase: "cooldown",
+                        lineCode: hedgeLineCode,
+                        marketId: hedgeMid,
+                        selectionId: hedgeSel,
+                        entryPrice: null,
+                        targetPrice: null,
+                        stakeAbs: null,
+                        entryBetId: null,
+                        enteredAt: null,
+                        takeProfit: null,
+                        cooldownUntilMs: nowMs + hedgeCooldownSec * 1000,
+                        lastClosedAt: nowIso,
+                        lastError: null,
+                      },
+                    },
+                  },
+                  updatedAt: nowIso,
+                };
+                await setQueueItem(matchId, next);
+                return json({ ok: true, item: next, skipped: true, reason: "hedge_under_reset" });
+              }
+
+              if (hasMatched) {
+                const mid = hedgeMid || hedgeMarketIdStored || String(row?.marketId ?? "").trim();
+                const sel = Number.isFinite(hedgeSel) ? hedgeSel : Number.isFinite(hedgeSelectionIdStored) ? hedgeSelectionIdStored : Number(row?.selectionId);
+                const entryPriceH =
+                  Number.isFinite(avgMatched) && avgMatched > 1
+                    ? avgMatched
+                    : Number.isFinite(hedgeEntryPriceStored) && hedgeEntryPriceStored > 1
+                      ? hedgeEntryPriceStored
+                      : Number.isFinite(hedgeBestBack) && hedgeBestBack > 1
+                        ? hedgeBestBack
+                        : null;
+                const stakeHedge = Number.isFinite(sizeMatched) ? Math.max(2, round2(sizeMatched)) : Math.max(2, round2(hedgeStakeAbsStored));
+                let targetPriceH = Number.isFinite(hedgeTargetPriceStored) && hedgeTargetPriceStored > 1 ? hedgeTargetPriceStored : null;
+                if (!targetPriceH && entryPriceH) targetPriceH = movePriceByTicks(entryPriceH, -hedgeUnderTargetTicks);
+
+                if (mid && Number.isFinite(sel) && sel > 0 && entryPriceH && targetPriceH && targetPriceH > 1) {
+                  const hedgeSizeAtTarget = Math.max(2, round2((entryPriceH * stakeHedge) / targetPriceH));
+                  const tpRes = await placeOrders({
+                    adminToken: admin.adminToken,
+                    marketId: String(mid),
+                    customerRef: mkStableCustomerRef("ht", matchId, String(mid), Number(sel)),
+                    instructions: [
+                      {
+                        selectionId: sel,
+                        side: "LAY",
+                        orderType: "LIMIT",
+                        limitOrder: { size: hedgeSizeAtTarget, price: targetPriceH, persistenceType: "LAPSE" },
+                      },
+                    ],
+                  }).catch((e) => ({ __error: e instanceof Error ? e.message : String(e) }));
+
+                  const tpBetId = extractBetId(tpRes);
+                  const next = {
+                    ...current,
+                    betfair: baseBetfair,
+                    strategy: {
+                      ...strategy,
+                      agent: "scalpingTicks",
+                      scalpingTicks: {
+                        ...baseState,
+                        phase: "entered",
+                        hedgeUnder: {
+                          phase: "entered",
+                          lineCode: hedgeLineCode,
+                          marketId: mid,
+                          selectionId: sel,
+                          entryPrice: entryPriceH,
+                          targetPrice: targetPriceH,
+                          stakeAbs: stakeHedge,
+                          entryBetId: hedgeEntryBetIdStored,
+                          enteredAt: String(hedgeState?.enteredAt ?? nowIso),
+                          takeProfit: { betId: tpBetId, price: targetPriceH, size: hedgeSizeAtTarget, placedAt: nowIso, result: (tpRes as any)?.__error ? null : tpRes ?? null, error: (tpRes as any)?.__error ? String((tpRes as any).__error) : null },
+                          cooldownUntilMs: null,
+                          lastClosedAt: String(hedgeState?.lastClosedAt ?? ""),
+                          lastError: null,
+                        },
+                      },
+                    },
+                    updatedAt: nowIso,
+                  };
+                  await setQueueItem(matchId, next);
+                  return json({ ok: true, item: next, skipped: true, reason: "hedge_under_tp" });
+                }
+              }
+            } catch {}
+          }
+        }
+
+        const alertOver0 = ((existing as any)?.alertOver && typeof (existing as any).alertOver === "object") ? (existing as any).alertOver : {};
+        const alertPhase = String((alertOver0 as any)?.phase ?? "").trim() || "monitoring";
+        const alertEntryBetId0 = String((alertOver0 as any)?.entryBetId ?? "").trim() || null;
+        const alertTpBetId0 = String((alertOver0 as any)?.takeProfit?.betId ?? "").trim() || null;
+        const alertLastEntryAtIso0 = String((alertOver0 as any)?.lastEntryAt ?? "").trim();
+        const alertLastEntryAtMs0 = alertLastEntryAtIso0 ? new Date(alertLastEntryAtIso0).getTime() : 0;
+        const alertCooldownUntilMs0 = Number((alertOver0 as any)?.cooldownUntilMs);
+        const alertIsCooling = alertPhase === "cooldown" && Number.isFinite(alertCooldownUntilMs0) && alertCooldownUntilMs0 > nowMs;
+
+        let alertOverNext: any = alertOver0;
+        let entryLocksAfterAlert: any = (baseState as any).entryLocks;
+        const locksNowGlobal = entryLocksAfterAlert && typeof entryLocksAfterAlert === "object" ? entryLocksAfterAlert : {};
+        const alertMarketId = String((alertOver0 as any)?.entryMarketId ?? "").trim() || overMarketId;
+        const alertSelectionId = Number((alertOver0 as any)?.selectionId ?? overOverSel);
+        const alertLockKey =
+          alertMarketId && Number.isFinite(alertSelectionId) && alertSelectionId > 0
+            ? lockKeyFor(alertMarketId, alertSelectionId)
+            : null;
+
+        const alertUnder0 = ((existing as any)?.alertUnder && typeof (existing as any).alertUnder === "object") ? (existing as any).alertUnder : {};
+        const alertUnderPhase = String((alertUnder0 as any)?.phase ?? "").trim() || "monitoring";
+        const alertUnderEntryBetId0 = String((alertUnder0 as any)?.entryBetId ?? "").trim() || null;
+        const alertUnderTpBetId0 = String((alertUnder0 as any)?.takeProfit?.betId ?? "").trim() || null;
+        const alertUnderLastEntryAtIso0 = String((alertUnder0 as any)?.lastEntryAt ?? "").trim();
+        const alertUnderLastEntryAtMs0 = alertUnderLastEntryAtIso0 ? new Date(alertUnderLastEntryAtIso0).getTime() : 0;
+        const alertUnderCooldownUntilMs0 = Number((alertUnder0 as any)?.cooldownUntilMs);
+        const alertUnderIsCooling = alertUnderPhase === "cooldown" && Number.isFinite(alertUnderCooldownUntilMs0) && alertUnderCooldownUntilMs0 > nowMs;
+        let alertUnderNext: any = alertUnder0;
+        const earlyHedgeOk =
+          typeof goalsSafe === "number" &&
+          Number.isFinite(goalsSafe) &&
+          goalsSafe === 0 &&
+          typeof elapsedMin === "number" &&
+          Number.isFinite(elapsedMin) &&
+          elapsedMin >= 0 &&
+          elapsedMin <= 46;
+
+        if (!momentOver.trigger && alertEntryBetId0 && alertMarketId && Number.isFinite(alertSelectionId) && alertSelectionId > 0) {
+          if (alertTpBetId0) {
+            try {
+              await cancelOrders({ adminToken: admin.adminToken, marketId: alertMarketId, betIds: [alertTpBetId0] });
             } catch {}
           }
 
-          if (tpBetId) {
-            try {
-              await cancelOrders({ adminToken: admin.adminToken, marketId: posMarketId, betIds: [tpBetId] });
-            } catch {}
-          }
+          let sizeMatched = 0;
+          let sizeRemaining = 0;
+          let avgPriceMatched = NaN;
+          try {
+            const res = await listCurrentOrders({ adminToken: admin.adminToken, betIds: [alertEntryBetId0] });
+            const currentOrders = Array.isArray((res as any)?.currentOrders) ? (res as any).currentOrders : [];
+            const row = currentOrders.find((o: any) => String(o?.betId ?? "").trim() === alertEntryBetId0) ?? null;
+            sizeMatched = Number(row?.sizeMatched);
+            sizeRemaining = Number(row?.sizeRemaining);
+            avgPriceMatched = Number(row?.averagePriceMatched);
+          } catch {}
 
-          if (entryBetId && entrySizeRemaining > 0 && !(Number.isFinite(entrySizeMatched) && entrySizeMatched > 0)) {
+          const matchedSafe = Number.isFinite(sizeMatched) && sizeMatched > 0 ? sizeMatched : 0;
+          const remainingSafe = Number.isFinite(sizeRemaining) && sizeRemaining > 0 ? sizeRemaining : 0;
+          if (remainingSafe > 0 && matchedSafe <= 0) {
             try {
-              await cancelOrders({ adminToken: admin.adminToken, marketId: posMarketId, betIds: [entryBetId] });
+              await cancelOrders({ adminToken: admin.adminToken, marketId: alertMarketId, betIds: [alertEntryBetId0] });
             } catch {}
-          } else {
-            const entryPrice = Number(existing?.entryPrice);
-            const hedgeNow =
-              Number.isFinite(entryPrice) && entryPrice > 1 && Number.isFinite(posBestLay) && posBestLay > 1 && Number.isFinite(entrySizeMatched) && entrySizeMatched > 0
-                ? Math.max(2, round2((entryPrice * entrySizeMatched) / posBestLay))
-                : Math.max(2, round2(Number(existing?.stakeAbs ?? stakeAbs)));
+            entryLocksAfterAlert = alertLockKey ? clearEntryLock(locksNowGlobal, alertLockKey) : entryLocksAfterAlert;
+            alertOverNext = {
+              phase: "cooldown",
+              entryMarketId: alertMarketId,
+              selectionId: alertSelectionId,
+              entryPrice: null,
+              stakeAbs: null,
+              enteredAt: null,
+              lastEntryAt: null,
+              entryBetId: null,
+              takeProfit: null,
+              cooldownUntilMs: nowMs + Math.max(3, minCycleSecSafe) * 1000,
+              lastClosedAt: nowIso,
+              lastExitReason: "alert_over_cancel_on_alert_off",
+            };
+          } else if (matchedSafe > 0 && overMarketStatus === "OPEN" && Number.isFinite(overLay) && overLay > 1) {
+            const entryPriceUsed =
+              Number.isFinite(avgPriceMatched) && avgPriceMatched > 1
+                ? avgPriceMatched
+                : Number((alertOver0 as any)?.entryPrice);
+            const entryPriceSafe = Number.isFinite(entryPriceUsed) && entryPriceUsed > 1 ? entryPriceUsed : overLay;
+            const hedgeSize = Math.max(2, round2((entryPriceSafe * matchedSafe) / overLay));
             try {
               await placeOrders({
                 adminToken: admin.adminToken,
-                marketId: posMarketId,
-                customerRef: mkCustomerRef("ix", matchId),
+                marketId: alertMarketId,
+                customerRef: mkStableCustomerRef("ax", matchId, alertMarketId, alertSelectionId),
                 instructions: [
                   {
-                    selectionId: posSelectionId,
+                    selectionId: alertSelectionId,
                     side: "LAY",
                     orderType: "LIMIT",
-                    limitOrder: { size: hedgeNow, price: posBestLay, persistenceType: "LAPSE" },
+                    limitOrder: { size: hedgeSize, price: overLay, persistenceType: "LAPSE" },
                   },
                 ],
               });
             } catch {}
-          }
-
-          const overEntryPrice = movePriceByTicks(overBack, Number.isFinite(entryOffsetTicks) ? Math.floor(entryOffsetTicks) : 0);
-          const overTargetPrice = movePriceByTicks(overEntryPrice, -(Number.isFinite(targetTicks) ? Math.floor(targetTicks) : 10));
-          if (Number.isFinite(overEntryPrice) && overEntryPrice > 1 && Number.isFinite(overTargetPrice) && overTargetPrice > 1) {
-            const entryRes = await placeOrders({
-              adminToken: admin.adminToken,
-              marketId: overMarketId,
-              customerRef: mkCustomerRef("ie", matchId),
-              instructions: [
-                {
-                  selectionId: overOverSel,
-                  side: "BACK",
-                  orderType: "LIMIT",
-                  limitOrder: { size: stakeAbs, price: overEntryPrice, persistenceType: "LAPSE" },
-                },
-              ],
-            });
-            const newEntryBetId = (() => {
-              const betId = (entryRes as any)?.instructionReports?.[0]?.betId ?? null;
-              const s = String(betId ?? "").trim();
-              return s || null;
-            })();
-
-            const hedgeSizeAtTarget =
-              Number.isFinite(stakeAbs) && stakeAbs > 0 ? Math.max(2, round2((overEntryPrice * stakeAbs) / overTargetPrice)) : 2;
-            const tpRes = await placeOrders({
-              adminToken: admin.adminToken,
-              marketId: overMarketId,
-              customerRef: mkCustomerRef("it", matchId),
-              instructions: [
-                {
-                  selectionId: overOverSel,
-                  side: "LAY",
-                  orderType: "LIMIT",
-                  limitOrder: { size: hedgeSizeAtTarget, price: overTargetPrice, persistenceType: "LAPSE" },
-                },
-              ],
-            }).catch(() => null);
-            const newTpBetId = (() => {
-              const betId = (tpRes as any)?.instructionReports?.[0]?.betId ?? null;
-              const s = String(betId ?? "").trim();
-              return s || null;
-            })();
-
-            const next = {
-              ...current,
-              betfair: baseBetfair,
-              strategy: {
-                ...strategy,
-                agent: "scalpingTicks",
-                scalpingTicks: {
-                  ...baseState,
-                  phase: "entered",
-                  side: "over",
-                  entryMarketId: overMarketId,
-                  entryLineCode: overLineCode,
-                  selectionId: overOverSel,
-                  entryPrice: overEntryPrice,
-                  targetPrice: overTargetPrice,
-                  stakeAbs,
-                  entryBetId: newEntryBetId,
-                  takeProfit: { betId: newTpBetId, price: overTargetPrice, size: hedgeSizeAtTarget, placedAt: nowIso, result: tpRes ?? null },
-                  lastInversionAt: nowIso,
-                  inversionCount: Math.max(0, Math.floor(Number(existing?.inversionCount ?? 0) || 0)) + 1,
-                },
-              },
-              updatedAt: nowIso,
+            entryLocksAfterAlert = alertLockKey ? clearEntryLock(locksNowGlobal, alertLockKey) : entryLocksAfterAlert;
+            alertOverNext = {
+              phase: "cooldown",
+              entryMarketId: alertMarketId,
+              selectionId: alertSelectionId,
+              entryPrice: null,
+              stakeAbs: null,
+              enteredAt: null,
+              lastEntryAt: null,
+              entryBetId: null,
+              takeProfit: null,
+              cooldownUntilMs: nowMs + Math.max(3, minCycleSecSafe) * 1000,
+              lastClosedAt: nowIso,
+              lastExitReason: "alert_over_exit_on_alert_off",
             };
-            await setQueueItem(matchId, next);
-            return json({ ok: true, item: next, inverted: true, reason: "volume_shift_over_threshold" });
           }
         }
+
+        if (!momentOver.trigger && alertUnderEntryBetId0 && !alertUnderIsCooling) {
+          const alertUnderLineCode = Math.max(5, underLineCode + 10);
+          let uErr: string | null = null;
+          const uMk = await (async () => {
+            try {
+              const raw = await resolveBetfairOverUnderMarket({ eventId, lineCode: alertUnderLineCode });
+              return slimOuMarket(raw);
+            } catch (e) {
+              uErr = e instanceof Error ? e.message : String(e);
+              return null;
+            }
+          })();
+          const uMid = String(uMk?.marketId ?? "").trim();
+          const uStatus = String(uMk?.marketStatus ?? "").trim().toUpperCase();
+          const uSel = Number(uMk?.runners?.underSelectionId);
+          const uLay = Number(uMk?.odds?.under?.lay);
+          if (uMid && uStatus === "OPEN" && Number.isFinite(uSel) && uSel > 0) {
+            if (alertUnderTpBetId0) {
+              try {
+                await cancelOrders({ adminToken: admin.adminToken, marketId: uMid, betIds: [alertUnderTpBetId0] });
+              } catch {}
+            }
+
+            let sizeMatched = 0;
+            let sizeRemaining = 0;
+            let avgPriceMatched = NaN;
+            try {
+              const res = await listCurrentOrders({ adminToken: admin.adminToken, betIds: [alertUnderEntryBetId0] });
+              const currentOrders = Array.isArray((res as any)?.currentOrders) ? (res as any).currentOrders : [];
+              const row = currentOrders.find((o: any) => String(o?.betId ?? "").trim() === alertUnderEntryBetId0) ?? null;
+              sizeMatched = Number(row?.sizeMatched);
+              sizeRemaining = Number(row?.sizeRemaining);
+              avgPriceMatched = Number(row?.averagePriceMatched);
+            } catch {}
+
+            const matchedSafe = Number.isFinite(sizeMatched) && sizeMatched > 0 ? sizeMatched : 0;
+            const remainingSafe = Number.isFinite(sizeRemaining) && sizeRemaining > 0 ? sizeRemaining : 0;
+            const lockKey = lockKeyFor(uMid, uSel);
+
+            if (remainingSafe > 0 && matchedSafe <= 0) {
+              try {
+                await cancelOrders({ adminToken: admin.adminToken, marketId: uMid, betIds: [alertUnderEntryBetId0] });
+              } catch {}
+              entryLocksAfterAlert = clearEntryLock(locksNowGlobal, lockKey);
+              alertUnderNext = {
+                phase: "cooldown",
+                entryMarketId: uMid,
+                selectionId: uSel,
+                entryPrice: null,
+                stakeAbs: null,
+                enteredAt: null,
+                lastEntryAt: null,
+                entryBetId: null,
+                takeProfit: null,
+                cooldownUntilMs: nowMs + Math.max(3, minCycleSecSafe) * 1000,
+                lastClosedAt: nowIso,
+                lastExitReason: "alert_under_cancel_on_alert_off",
+                error: uErr,
+              };
+            } else if (matchedSafe > 0 && Number.isFinite(uLay) && uLay > 1) {
+              const entryPriceUsed =
+                Number.isFinite(avgPriceMatched) && avgPriceMatched > 1
+                  ? avgPriceMatched
+                  : Number((alertUnder0 as any)?.entryPrice);
+              const entryPriceSafe = Number.isFinite(entryPriceUsed) && entryPriceUsed > 1 ? entryPriceUsed : uLay;
+              const hedgeSize = Math.max(2, round2((entryPriceSafe * matchedSafe) / uLay));
+              try {
+                await placeOrders({
+                  adminToken: admin.adminToken,
+                  marketId: uMid,
+                  customerRef: mkStableCustomerRef("ux", matchId, uMid, uSel),
+                  instructions: [
+                    {
+                      selectionId: uSel,
+                      side: "LAY",
+                      orderType: "LIMIT",
+                      limitOrder: { size: hedgeSize, price: uLay, persistenceType: "LAPSE" },
+                    },
+                  ],
+                });
+              } catch {}
+              entryLocksAfterAlert = clearEntryLock(locksNowGlobal, lockKey);
+              alertUnderNext = {
+                phase: "cooldown",
+                entryMarketId: uMid,
+                selectionId: uSel,
+                entryPrice: null,
+                stakeAbs: null,
+                enteredAt: null,
+                lastEntryAt: null,
+                entryBetId: null,
+                takeProfit: null,
+                cooldownUntilMs: nowMs + Math.max(3, minCycleSecSafe) * 1000,
+                lastClosedAt: nowIso,
+                lastExitReason: "alert_under_exit_on_alert_off",
+                error: uErr,
+              };
+            }
+          } else {
+            alertUnderNext = { ...(alertUnder0 as any), error: uErr, phase: alertUnderPhase || "monitoring" };
+          }
+        }
+
+        const canRunAlertOver =
+          activeSide === "under" &&
+          Boolean(momentOver.trigger) &&
+          overReady &&
+          overMarketStatus === "OPEN" &&
+          Number.isFinite(overOverSel) &&
+          overOverSel > 0 &&
+          overMarketId &&
+          !alertIsCooling;
+
+        if (canRunAlertOver) {
+          const alertLockKey2 = lockKeyFor(overMarketId, overOverSel);
+          const spreadOk =
+            maxSpreadSafe == null || overSpreadTicks == null ? true : overSpreadTicks <= maxSpreadSafe;
+
+          const targetTicksSafe = Number.isFinite(targetTicks) ? Math.max(2, Math.floor(targetTicks)) : 10;
+          const entryPriceNow =
+            Number.isFinite(overLay) && overLay > 1 ? overLay
+              : Number.isFinite(overBack) && overBack > 1 ? overBack
+                : NaN;
+
+          if (spreadOk && Number.isFinite(entryPriceNow) && entryPriceNow > 1) {
+            const underExposure0 = Number(existing?.entryMatchedSize ?? existing?.stakeAbs ?? stakeAbs);
+            const underExposure = Number.isFinite(underExposure0) && underExposure0 > 0 ? Math.max(2, round2(underExposure0)) : stakeAbs;
+            const oddsForProtect0 = Number.isFinite(overBack) && overBack > 1 ? overBack : entryPriceNow;
+            const desiredProtectStakeAbs =
+              Number.isFinite(oddsForProtect0) && oddsForProtect0 > 1
+                ? Math.max(2, round2(underExposure / Math.max(0.05, oddsForProtect0 - 1)))
+                : stakeAbs;
+            const protectCap = Number.isFinite(recoveryMaxStakeAbs) && recoveryMaxStakeAbs > 0 ? recoveryMaxStakeAbs : 100;
+            const alertStakeAbs = Math.max(2, Math.min(protectCap, desiredProtectStakeAbs));
+
+            if (!alertEntryBetId0) {
+              const adopted = await findExistingBackEntry(overMarketId, overOverSel);
+              if (adopted?.betId) {
+                const hasMatched = Number(adopted?.sizeMatched) > 0;
+                const tpExisting = hasMatched ? await findExistingLayTp(overMarketId, overOverSel) : null;
+                const takeProfit =
+                  tpExisting && tpExisting.betId && tpExisting.price != null && tpExisting.size != null
+                    ? { betId: tpExisting.betId, price: tpExisting.price, size: tpExisting.size, placedAt: tpExisting.placedAt ?? nowIso, status: tpExisting.status, errorCode: null, result: null, error: null }
+                    : null;
+                alertOverNext = {
+                  phase: hasMatched && takeProfit ? "entered" : "entering",
+                  entryMarketId: overMarketId,
+                  selectionId: overOverSel,
+                  entryPrice: adopted.averagePriceMatched ?? adopted.price ?? entryPriceNow,
+                  stakeAbs: Number.isFinite(adopted.sizeMatched) && adopted.sizeMatched > 0 ? adopted.sizeMatched : Number((alertOver0 as any)?.stakeAbs ?? alertStakeAbs),
+                  enteredAt: String((alertOver0 as any)?.enteredAt ?? nowIso),
+                  lastEntryAt: String((alertOver0 as any)?.lastEntryAt ?? nowIso),
+                  entryBetId: adopted.betId,
+                  entryMatchedSize: adopted.sizeMatched ?? null,
+                  entryRemainingSize: adopted.sizeRemaining ?? null,
+                  entryMatchedAt: hasMatched ? nowIso : null,
+                  takeProfit,
+                  lastEntryStatus: adopted.status,
+                  lastEntryErrorCode: null,
+                  cooldownUntilMs: Number((alertOver0 as any)?.cooldownUntilMs) || null,
+                };
+              } else if (!isEntryLocked(locksNowGlobal, alertLockKey2)) {
+                const result = await placeOrders({
+                  adminToken: admin.adminToken,
+                  marketId: overMarketId,
+                  customerRef: mkStableCustomerRef("ao", matchId, overMarketId, overOverSel),
+                  instructions: [
+                    {
+                      selectionId: overOverSel,
+                      side: "BACK",
+                      orderType: "LIMIT",
+                      limitOrder: { size: alertStakeAbs, price: entryPriceNow, persistenceType: "LAPSE" },
+                    },
+                  ],
+                }).catch((e) => ({ __error: e instanceof Error ? e.message : String(e) }));
+
+                const betId = extractBetId(result);
+                const lockTtlMs = (betId ? entryLockTtlSeconds : entryLockPendingTtlSeconds) * 1000;
+                entryLocksAfterAlert = setEntryLock(locksNowGlobal, alertLockKey2, {
+                  matchId,
+                  marketId: overMarketId,
+                  selectionId: overOverSel,
+                  side: "BACK",
+                  tradeMode: "alert_over",
+                  lockedAt: nowIso,
+                  betId,
+                  status: extractReportStatus(result),
+                  expiresAtMs: nowMs + Math.max(1000, lockTtlMs),
+                });
+
+                alertOverNext = {
+                  phase: "entering",
+                  entryMarketId: overMarketId,
+                  selectionId: overOverSel,
+                  entryPrice: entryPriceNow,
+                  stakeAbs: alertStakeAbs,
+                  enteredAt: nowIso,
+                  lastEntryAt: nowIso,
+                  entryBetId: betId,
+                  takeProfit: null,
+                  lastResult: (result as any)?.__error ? null : result ?? null,
+                  lastEntryStatus: extractReportStatus(result),
+                  lastEntryErrorCode: extractReportErrorCode(result),
+                };
+              }
+            } else {
+              let sizeMatched = 0;
+              let sizeRemaining = 0;
+              let avgPriceMatched = NaN;
+              let status = "";
+              try {
+                const res = await listCurrentOrders({ adminToken: admin.adminToken, betIds: [alertEntryBetId0] });
+                const currentOrders = Array.isArray((res as any)?.currentOrders) ? (res as any).currentOrders : [];
+                const row = currentOrders.find((o: any) => String(o?.betId ?? "").trim() === alertEntryBetId0) ?? null;
+                sizeMatched = Number(row?.sizeMatched);
+                sizeRemaining = Number(row?.sizeRemaining);
+                avgPriceMatched = Number(row?.averagePriceMatched);
+                status = String(row?.status ?? "").trim().toUpperCase();
+              } catch {}
+
+              const matchedSafe = Number.isFinite(sizeMatched) && sizeMatched > 0 ? sizeMatched : 0;
+              const remainingSafe = Number.isFinite(sizeRemaining) && sizeRemaining > 0 ? sizeRemaining : 0;
+              const expired = alertLastEntryAtMs0 && Number.isFinite(alertLastEntryAtMs0) && nowMs - alertLastEntryAtMs0 >= entryMaxWaitSeconds * 1000;
+
+              if (matchedSafe <= 0 && remainingSafe > 0 && expired) {
+                try {
+                  await cancelOrders({ adminToken: admin.adminToken, marketId: overMarketId, betIds: [alertEntryBetId0] });
+                } catch {}
+                entryLocksAfterAlert = clearEntryLock(locksNowGlobal, alertLockKey2);
+                alertOverNext = {
+                  phase: "cooldown",
+                  entryMarketId: overMarketId,
+                  selectionId: overOverSel,
+                  entryPrice: null,
+                  stakeAbs: null,
+                  enteredAt: null,
+                  lastEntryAt: null,
+                  entryBetId: null,
+                  takeProfit: null,
+                  cooldownUntilMs: nowMs + Math.max(3, minCycleSecSafe) * 1000,
+                  lastClosedAt: nowIso,
+                  lastExitReason: "alert_over_entry_timeout",
+                };
+              } else if (matchedSafe > 0) {
+                if (remainingSafe > 0) {
+                  try {
+                    await cancelOrders({ adminToken: admin.adminToken, marketId: overMarketId, betIds: [alertEntryBetId0] });
+                  } catch {}
+                }
+
+                const entryPriceMatched =
+                  Number.isFinite(avgPriceMatched) && avgPriceMatched > 1
+                    ? avgPriceMatched
+                    : Number((alertOver0 as any)?.entryPrice ?? entryPriceNow);
+                const targetPrice = movePriceByTicks(entryPriceMatched, -targetTicksSafe);
+
+                let takeProfit = (alertOver0 as any)?.takeProfit ?? null;
+                if (!alertTpBetId0 && Number.isFinite(targetPrice) && targetPrice > 1) {
+                  const hedgeSizeAtTarget = Math.max(2, round2((entryPriceMatched * matchedSafe) / targetPrice));
+                  const tpRes = await placeOrders({
+                    adminToken: admin.adminToken,
+                    marketId: overMarketId,
+                    customerRef: mkStableCustomerRef("at", matchId, overMarketId, overOverSel),
+                    instructions: [
+                      {
+                        selectionId: overOverSel,
+                        side: "LAY",
+                        orderType: "LIMIT",
+                        limitOrder: { size: hedgeSizeAtTarget, price: targetPrice, persistenceType: "LAPSE" },
+                      },
+                    ],
+                  }).catch((e) => ({ __error: e instanceof Error ? e.message : String(e) }));
+                  takeProfit = {
+                    betId: extractBetId(tpRes),
+                    price: targetPrice,
+                    size: hedgeSizeAtTarget,
+                    placedAt: nowIso,
+                    status: extractReportStatus(tpRes),
+                    errorCode: extractReportErrorCode(tpRes),
+                    result: (tpRes as any)?.__error ? null : tpRes ?? null,
+                    error: (tpRes as any)?.__error ? String((tpRes as any).__error) : null,
+                  };
+                }
+
+                if (takeProfit?.betId) {
+                  try {
+                    const tpRes2 = await listCurrentOrders({ adminToken: admin.adminToken, betIds: [String(takeProfit.betId)] });
+                    const currentOrders2 = Array.isArray((tpRes2 as any)?.currentOrders) ? (tpRes2 as any).currentOrders : [];
+                    const row2 = currentOrders2.find((o: any) => String(o?.betId ?? "").trim() === String(takeProfit.betId)) ?? null;
+                    const sizeRemaining2 = Number(row2?.sizeRemaining);
+                    const sizeMatched2 = Number(row2?.sizeMatched);
+                    const status2 = String(row2?.status ?? "").trim().toUpperCase();
+                    const isDone2 = status2 === "EXECUTION_COMPLETE" || (Number.isFinite(sizeRemaining2) && sizeRemaining2 <= 0);
+                    const hasMatched2 = Number.isFinite(sizeMatched2) && sizeMatched2 > 0;
+                    if (isDone2 && hasMatched2) {
+                      entryLocksAfterAlert = clearEntryLock(locksNowGlobal, alertLockKey2);
+                      alertOverNext = {
+                        phase: "cooldown",
+                        entryMarketId: overMarketId,
+                        selectionId: overOverSel,
+                        entryPrice: null,
+                        stakeAbs: null,
+                        enteredAt: null,
+                        lastEntryAt: null,
+                        entryBetId: null,
+                        takeProfit: null,
+                        cooldownUntilMs: nowMs + Math.max(3, minCycleSecSafe) * 1000,
+                        lastClosedAt: nowIso,
+                        lastExitReason: "alert_over_tp_matched",
+                      };
+                    } else {
+                      alertOverNext = {
+                        ...(alertOver0 as any),
+                        phase: "entered",
+                        entryMarketId: overMarketId,
+                        selectionId: overOverSel,
+                        entryBetId: alertEntryBetId0,
+                        entryPrice: entryPriceMatched,
+                        stakeAbs: matchedSafe,
+                        targetPrice,
+                        takeProfit,
+                        lastEntryStatus: status || null,
+                      };
+                    }
+                  } catch {
+                    alertOverNext = {
+                      ...(alertOver0 as any),
+                      phase: "entered",
+                      entryMarketId: overMarketId,
+                      selectionId: overOverSel,
+                      entryBetId: alertEntryBetId0,
+                      entryPrice: entryPriceMatched,
+                      stakeAbs: matchedSafe,
+                      targetPrice,
+                      takeProfit,
+                      lastEntryStatus: status || null,
+                    };
+                  }
+                } else {
+                  alertOverNext = {
+                    ...(alertOver0 as any),
+                    phase: "entered",
+                    entryMarketId: overMarketId,
+                    selectionId: overOverSel,
+                    entryBetId: alertEntryBetId0,
+                    entryPrice: entryPriceMatched,
+                    stakeAbs: matchedSafe,
+                    targetPrice,
+                    takeProfit,
+                    lastEntryStatus: status || null,
+                  };
+                }
+              } else {
+                alertOverNext = {
+                  ...(alertOver0 as any),
+                  phase: "entering",
+                  entryMarketId: overMarketId,
+                  selectionId: overOverSel,
+                  entryBetId: alertEntryBetId0,
+                  lastEntryStatus: status || null,
+                };
+              }
+            }
+          }
+        }
+
+        if (canRunAlertOver && earlyHedgeOk && !alertUnderIsCooling && Boolean(momentOver.trigger)) {
+          const alertUnderLineCode = Math.max(5, underLineCode + 10);
+          let uErr: string | null = null;
+          const uMk = await (async () => {
+            try {
+              const raw = await resolveBetfairOverUnderMarket({ eventId, lineCode: alertUnderLineCode });
+              return slimOuMarket(raw);
+            } catch (e) {
+              uErr = e instanceof Error ? e.message : String(e);
+              return null;
+            }
+          })();
+          const uMid = String(uMk?.marketId ?? "").trim();
+          const uStatus = String(uMk?.marketStatus ?? "").trim().toUpperCase();
+          const uSel = Number(uMk?.runners?.underSelectionId);
+          const uBack = Number(uMk?.odds?.under?.back);
+          const uLay = Number(uMk?.odds?.under?.lay);
+          const uReady = Boolean(uMid && uStatus === "OPEN" && Number.isFinite(uSel) && uSel > 0);
+          if (uReady) {
+            const uEntryPriceNow = Number.isFinite(uLay) && uLay > 1 ? uLay : Number.isFinite(uBack) && uBack > 1 ? uBack : NaN;
+            const denom = Number.isFinite(uEntryPriceNow) && uEntryPriceNow > 1 ? Math.max(0.05, uEntryPriceNow - 1) : 0.05;
+            const underExposure0 = Number(existing?.entryMatchedSize ?? existing?.stakeAbs ?? stakeAbs);
+            const underExposure = Number.isFinite(underExposure0) && underExposure0 > 0 ? Math.max(2, round2(underExposure0)) : stakeAbs;
+            const overExposure0 = Number((alertOverNext as any)?.stakeAbs);
+            const overExposure = Number.isFinite(overExposure0) && overExposure0 > 0 ? Math.max(2, round2(overExposure0)) : stakeAbs;
+            const requiredProfit = Math.max(2, round2((underExposure + overExposure) * 1.08));
+            const desiredStake = Math.max(2, round2(requiredProfit / denom));
+            const cap = Number.isFinite(recoveryMaxStakeAbs) && recoveryMaxStakeAbs > 0 ? recoveryMaxStakeAbs : 100;
+            const alertUnderStakeAbs = Math.max(2, Math.min(cap, desiredStake));
+
+            const lockKey = lockKeyFor(uMid, uSel);
+            const entryPriceToUse = uEntryPriceNow;
+
+            if (!alertUnderEntryBetId0) {
+              const adopted = await findExistingBackEntry(uMid, uSel);
+              if (adopted?.betId) {
+                const hasMatched = Number(adopted?.sizeMatched) > 0;
+                const tpExisting = hasMatched ? await findExistingLayTp(uMid, uSel) : null;
+                const takeProfit =
+                  tpExisting && tpExisting.betId && tpExisting.price != null && tpExisting.size != null
+                    ? { betId: tpExisting.betId, price: tpExisting.price, size: tpExisting.size, placedAt: tpExisting.placedAt ?? nowIso, status: tpExisting.status, errorCode: null, result: null, error: null }
+                    : null;
+                alertUnderNext = {
+                  phase: hasMatched && takeProfit ? "entered" : "entering",
+                  entryMarketId: uMid,
+                  selectionId: uSel,
+                  entryPrice: adopted.averagePriceMatched ?? adopted.price ?? entryPriceToUse,
+                  stakeAbs: Number.isFinite(adopted.sizeMatched) && adopted.sizeMatched > 0 ? adopted.sizeMatched : Number((alertUnder0 as any)?.stakeAbs ?? alertUnderStakeAbs),
+                  enteredAt: String((alertUnder0 as any)?.enteredAt ?? nowIso),
+                  lastEntryAt: String((alertUnder0 as any)?.lastEntryAt ?? nowIso),
+                  entryBetId: adopted.betId,
+                  entryMatchedSize: adopted.sizeMatched ?? null,
+                  entryRemainingSize: adopted.sizeRemaining ?? null,
+                  entryMatchedAt: hasMatched ? nowIso : null,
+                  takeProfit,
+                  lastEntryStatus: adopted.status,
+                  lastEntryErrorCode: null,
+                  error: uErr,
+                };
+              } else if (!isEntryLocked(locksNowGlobal, lockKey) && Number.isFinite(entryPriceToUse) && entryPriceToUse > 1) {
+                const res = await placeOrders({
+                  adminToken: admin.adminToken,
+                  marketId: uMid,
+                  customerRef: mkStableCustomerRef("au", matchId, uMid, uSel),
+                  instructions: [
+                    {
+                      selectionId: uSel,
+                      side: "BACK",
+                      orderType: "LIMIT",
+                      limitOrder: { size: alertUnderStakeAbs, price: entryPriceToUse, persistenceType: "LAPSE" },
+                    },
+                  ],
+                }).catch((e) => ({ __error: e instanceof Error ? e.message : String(e) }));
+
+                const betId = extractBetId(res);
+                const lockTtlMs = (betId ? entryLockTtlSeconds : entryLockPendingTtlSeconds) * 1000;
+                entryLocksAfterAlert = setEntryLock(locksNowGlobal, lockKey, {
+                  matchId,
+                  marketId: uMid,
+                  selectionId: uSel,
+                  side: "BACK",
+                  tradeMode: "alert_under",
+                  lockedAt: nowIso,
+                  betId,
+                  status: extractReportStatus(res),
+                  expiresAtMs: nowMs + Math.max(1000, lockTtlMs),
+                });
+
+                alertUnderNext = {
+                  phase: "entering",
+                  entryMarketId: uMid,
+                  selectionId: uSel,
+                  entryPrice: entryPriceToUse,
+                  stakeAbs: alertUnderStakeAbs,
+                  enteredAt: nowIso,
+                  lastEntryAt: nowIso,
+                  entryBetId: betId,
+                  takeProfit: null,
+                  lastResult: (res as any)?.__error ? null : res ?? null,
+                  lastEntryStatus: extractReportStatus(res),
+                  lastEntryErrorCode: extractReportErrorCode(res),
+                  error: uErr,
+                };
+              }
+            } else {
+              let sizeMatched = 0;
+              let sizeRemaining = 0;
+              let avgPriceMatched = NaN;
+              let status = "";
+              try {
+                const res = await listCurrentOrders({ adminToken: admin.adminToken, betIds: [alertUnderEntryBetId0] });
+                const currentOrders = Array.isArray((res as any)?.currentOrders) ? (res as any).currentOrders : [];
+                const row = currentOrders.find((o: any) => String(o?.betId ?? "").trim() === alertUnderEntryBetId0) ?? null;
+                sizeMatched = Number(row?.sizeMatched);
+                sizeRemaining = Number(row?.sizeRemaining);
+                avgPriceMatched = Number(row?.averagePriceMatched);
+                status = String(row?.status ?? "").trim().toUpperCase();
+              } catch {}
+
+              const matchedSafe = Number.isFinite(sizeMatched) && sizeMatched > 0 ? sizeMatched : 0;
+              const remainingSafe = Number.isFinite(sizeRemaining) && sizeRemaining > 0 ? sizeRemaining : 0;
+              const expired = alertUnderLastEntryAtMs0 && Number.isFinite(alertUnderLastEntryAtMs0) && nowMs - alertUnderLastEntryAtMs0 >= entryMaxWaitSeconds * 1000;
+
+              if (matchedSafe <= 0 && remainingSafe > 0 && expired) {
+                try {
+                  await cancelOrders({ adminToken: admin.adminToken, marketId: uMid, betIds: [alertUnderEntryBetId0] });
+                } catch {}
+                entryLocksAfterAlert = clearEntryLock(locksNowGlobal, lockKey);
+                alertUnderNext = {
+                  phase: "cooldown",
+                  entryMarketId: uMid,
+                  selectionId: uSel,
+                  entryPrice: null,
+                  stakeAbs: null,
+                  enteredAt: null,
+                  lastEntryAt: null,
+                  entryBetId: null,
+                  takeProfit: null,
+                  cooldownUntilMs: nowMs + Math.max(3, minCycleSecSafe) * 1000,
+                  lastClosedAt: nowIso,
+                  lastExitReason: "alert_under_entry_timeout",
+                  error: uErr,
+                };
+              } else if (matchedSafe > 0) {
+                if (remainingSafe > 0) {
+                  try {
+                    await cancelOrders({ adminToken: admin.adminToken, marketId: uMid, betIds: [alertUnderEntryBetId0] });
+                  } catch {}
+                }
+
+                const entryPriceMatched =
+                  Number.isFinite(avgPriceMatched) && avgPriceMatched > 1
+                    ? avgPriceMatched
+                    : Number((alertUnder0 as any)?.entryPrice ?? entryPriceToUse);
+                const targetPrice = movePriceByTicks(entryPriceMatched, -Math.max(2, targetTicksSafe));
+
+                let takeProfit = (alertUnder0 as any)?.takeProfit ?? null;
+                if (!alertUnderTpBetId0 && Number.isFinite(targetPrice) && targetPrice > 1) {
+                  const hedgeSizeAtTarget = Math.max(2, round2((entryPriceMatched * matchedSafe) / targetPrice));
+                  const tpRes = await placeOrders({
+                    adminToken: admin.adminToken,
+                    marketId: uMid,
+                    customerRef: mkStableCustomerRef("ut", matchId, uMid, uSel),
+                    instructions: [
+                      {
+                        selectionId: uSel,
+                        side: "LAY",
+                        orderType: "LIMIT",
+                        limitOrder: { size: hedgeSizeAtTarget, price: targetPrice, persistenceType: "LAPSE" },
+                      },
+                    ],
+                  }).catch((e) => ({ __error: e instanceof Error ? e.message : String(e) }));
+                  takeProfit = {
+                    betId: extractBetId(tpRes),
+                    price: targetPrice,
+                    size: hedgeSizeAtTarget,
+                    placedAt: nowIso,
+                    status: extractReportStatus(tpRes),
+                    errorCode: extractReportErrorCode(tpRes),
+                    result: (tpRes as any)?.__error ? null : tpRes ?? null,
+                    error: (tpRes as any)?.__error ? String((tpRes as any).__error) : null,
+                  };
+                }
+
+                alertUnderNext = {
+                  ...(alertUnder0 as any),
+                  phase: "entered",
+                  entryMarketId: uMid,
+                  selectionId: uSel,
+                  entryBetId: alertUnderEntryBetId0,
+                  entryPrice: entryPriceMatched,
+                  stakeAbs: matchedSafe,
+                  targetPrice,
+                  takeProfit,
+                  lastEntryStatus: status || null,
+                  error: uErr,
+                };
+              } else {
+                alertUnderNext = {
+                  ...(alertUnder0 as any),
+                  phase: "entering",
+                  entryMarketId: uMid,
+                  selectionId: uSel,
+                  entryBetId: alertUnderEntryBetId0,
+                  lastEntryStatus: status || null,
+                  error: uErr,
+                };
+              }
+            }
+          } else {
+            alertUnderNext = { ...(alertUnder0 as any), error: uErr, phase: alertUnderPhase || "monitoring" };
+          }
+        }
+
+        const baseState2 = { ...baseState, entryLocks: entryLocksAfterAlert, alertOver: alertOverNext, alertUnder: alertUnderNext };
 
         if (tpBetId && (!lastTpCheckAtMs || !Number.isFinite(lastTpCheckAtMs) || nowMs - lastTpCheckAtMs > 4500)) {
           try {
@@ -2244,6 +5038,11 @@ Deno.serve(async (req) => {
             const hasMatched = Number.isFinite(sizeMatched) && sizeMatched > 0;
 
             if (isDone && hasMatched) {
+              const locksNow = (baseState2 as any)?.entryLocks && typeof (baseState2 as any).entryLocks === "object" ? (baseState2 as any).entryLocks : {};
+              const locksCleared =
+                Number.isFinite(selectionId) && selectionId > 0 && marketId
+                  ? clearEntryLock(locksNow, lockKeyFor(marketId, selectionId))
+                  : locksNow;
               const nextCooldownUntilMs = nowMs + minCycleSecSafe * 1000;
               const next = {
                 ...current,
@@ -2252,7 +5051,8 @@ Deno.serve(async (req) => {
                   ...strategy,
                   agent: "scalpingTicks",
                   scalpingTicks: {
-                    ...baseState,
+                    ...baseState2,
+                    entryLocks: locksCleared,
                     phase: "cooldown",
                     cycleCount: cycleCount + 1,
                     closedAt: nowIso,
@@ -2298,6 +5098,11 @@ Deno.serve(async (req) => {
               },
             ],
           });
+          const locksNow = (baseState2 as any)?.entryLocks && typeof (baseState2 as any).entryLocks === "object" ? (baseState2 as any).entryLocks : {};
+          const locksCleared =
+            Number.isFinite(selectionId) && selectionId > 0 && marketId
+              ? clearEntryLock(locksNow, lockKeyFor(marketId, selectionId))
+              : locksNow;
           const nextCooldownUntilMs = nowMs + minCycleSecSafe * 1000;
           const next = {
             ...current,
@@ -2306,7 +5111,8 @@ Deno.serve(async (req) => {
               ...strategy,
               agent: "scalpingTicks",
               scalpingTicks: {
-                ...baseState,
+                ...baseState2,
+                entryLocks: locksCleared,
                 phase: "cooldown",
                 cycleCount: cycleCount + 1,
                 closedAt: nowIso,
@@ -2327,7 +5133,7 @@ Deno.serve(async (req) => {
         const next = {
           ...current,
           betfair: baseBetfair,
-          strategy: { ...strategy, agent: "scalpingTicks", scalpingTicks: { ...baseState, phase: "entered", lastTpCheckAt: tpBetId ? nowIso : existing?.lastTpCheckAt } },
+          strategy: { ...strategy, agent: "scalpingTicks", scalpingTicks: { ...baseState2, phase: "entered", lastTpCheckAt: tpBetId ? nowIso : existing?.lastTpCheckAt } },
           updatedAt: nowIso,
         };
         await setQueueItem(matchId, next);
@@ -2415,10 +5221,10 @@ Deno.serve(async (req) => {
       const targetTicks = Number.isFinite(targetTicksRaw) ? Math.max(1, Math.min(50, Math.floor(targetTicksRaw))) : 10;
       const maxSpreadTicksRaw = Number(cfg?.maxSpreadTicks ?? 2);
       const maxSpreadTicks = Number.isFinite(maxSpreadTicksRaw) ? Math.max(0, Math.min(20, Math.floor(maxSpreadTicksRaw))) : 2;
-      const minMarketMatchedRaw = Number(cfg?.minMarketMatched ?? 120000);
-      const minMarketMatched = Number.isFinite(minMarketMatchedRaw) ? Math.max(0, Math.floor(minMarketMatchedRaw)) : 120000;
-      const minRunnerMatchedRaw = Number(cfg?.minRunnerMatched ?? 20000);
-      const minRunnerMatched = Number.isFinite(minRunnerMatchedRaw) ? Math.max(0, Math.floor(minRunnerMatchedRaw)) : 20000;
+      const minMarketMatchedRaw = Number(cfg?.minMarketMatched ?? 0);
+      const minMarketMatched = Number.isFinite(minMarketMatchedRaw) ? Math.max(0, Math.floor(minMarketMatchedRaw)) : 0;
+      const minRunnerMatchedRaw = Number(cfg?.minRunnerMatched ?? 0);
+      const minRunnerMatched = Number.isFinite(minRunnerMatchedRaw) ? Math.max(0, Math.floor(minRunnerMatchedRaw)) : 0;
       const secondsToWaitMatchRaw = Number(cfg?.secondsToWaitMatch ?? 10);
       const secondsToWaitMatch = Number.isFinite(secondsToWaitMatchRaw) ? Math.max(0, Math.min(3600, Math.floor(secondsToWaitMatchRaw))) : 10;
       const maxEntriesRaw = Number(cfg?.maxEntries ?? 3);
@@ -2428,22 +5234,95 @@ Deno.serve(async (req) => {
       const entryOffsetTicksRaw = Number(cfg?.entryOffsetTicks ?? 0);
       const entryOffsetTicks = Number.isFinite(entryOffsetTicksRaw) ? Math.max(0, Math.min(10, Math.floor(entryOffsetTicksRaw))) : 0;
 
+      const stakeAbsCfgRaw = Number(cfg?.stakeAbs);
+      const stakeAbsCfg = Number.isFinite(stakeAbsCfgRaw) ? round2(stakeAbsCfgRaw) : NaN;
       const baseStakeAbs =
-        Number.isFinite(bankroll) && bankroll > 0 && Number.isFinite(stakePct) && stakePct > 0
-          ? Math.max(2, round2((bankroll * stakePct) / 100))
-          : 2;
+        Number.isFinite(stakeAbsCfg) && stakeAbsCfg > 0
+          ? Math.max(2, stakeAbsCfg)
+          : Number.isFinite(bankroll) && bankroll > 0 && Number.isFinite(stakePct) && stakePct > 0
+            ? Math.max(2, round2((bankroll * stakePct) / 100))
+            : 2;
 
       const inPlay = Boolean(baseBetfair?.inPlay ?? false);
       const strategy = (current as any)?.strategy && typeof (current as any).strategy === "object" ? (current as any).strategy : {};
       const existing = (strategy as any)?.asianHandicap && typeof (strategy as any).asianHandicap === "object" ? (strategy as any).asianHandicap : {};
       const phase = String(existing?.phase ?? "").trim() || "monitoring";
 
+      const entryLockTtlSecondsRaw = Number((cfg as any)?.entryLockTtlSeconds ?? 180);
+      const entryLockTtlSeconds = Number.isFinite(entryLockTtlSecondsRaw) ? Math.max(5, Math.min(3600, Math.floor(entryLockTtlSecondsRaw))) : 180;
+      const entryLockPendingTtlSecondsRaw = Number((cfg as any)?.entryLockPendingTtlSeconds ?? 25);
+      const entryLockPendingTtlSeconds = Number.isFinite(entryLockPendingTtlSecondsRaw)
+        ? Math.max(4, Math.min(300, Math.floor(entryLockPendingTtlSecondsRaw)))
+        : 25;
+      const lockKeyFor = (marketId: string, selectionId: number) => {
+        const mid = String(marketId ?? "").trim();
+        const sid = Number.isFinite(selectionId) && selectionId > 0 ? Math.floor(selectionId) : 0;
+        return `${mid}:${sid}:BACK`;
+      };
+      const readEntryLocks = () => {
+        const merged: Record<string, any> = {};
+        const add = (raw: any) => {
+          if (!raw || typeof raw !== "object") return;
+          for (const [k, v] of Object.entries(raw)) {
+            const key = String(k ?? "").trim();
+            if (!key) continue;
+            if (!v || typeof v !== "object") continue;
+            merged[key] = v;
+          }
+        };
+        add((strategy as any)?.entryLocks);
+        add((existing as any)?.entryLocks);
+        for (const k of Object.keys(strategy)) {
+          const sub = (strategy as any)[k];
+          if (!sub || typeof sub !== "object") continue;
+          if (sub?.entryLocks && typeof sub.entryLocks === "object") add(sub.entryLocks);
+        }
+        return merged;
+      };
+      const pruneEntryLocks = (locks: any) => {
+        const out: Record<string, any> = {};
+        for (const [k, v] of Object.entries(locks ?? {})) {
+          if (!k) continue;
+          if (!v || typeof v !== "object") continue;
+          const exp = Number((v as any)?.expiresAtMs);
+          if (Number.isFinite(exp) && exp > nowMs) out[k] = v;
+        }
+        return out;
+      };
+      const isEntryLocked = (locks: any, key: string) => {
+        const v = locks && typeof locks === "object" ? (locks as any)[key] : null;
+        const exp = Number(v?.expiresAtMs);
+        return Boolean(v && Number.isFinite(exp) && exp > nowMs);
+      };
+      const setEntryLock = (locks: any, key: string, value: any) => {
+        const base = locks && typeof locks === "object" ? locks : {};
+        return { ...base, [key]: value };
+      };
+      const clearEntryLock = (locks: any, key: string) => {
+        const base = locks && typeof locks === "object" ? locks : {};
+        const { [key]: _, ...rest } = base as any;
+        return rest;
+      };
+      const mkStableCustomerRef = (action: string, matchId: string, marketId: string, selectionId: number) => {
+        const a = String(action ?? "").replace(/[^a-zA-Z0-9]/g, "").slice(0, 4) || "x";
+        const id = String(matchId ?? "").replace(/[^a-zA-Z0-9]/g, "");
+        const tail = id.slice(-8) || "0";
+        const mid = String(marketId ?? "").replace(/[^a-zA-Z0-9]/g, "");
+        const midTail = mid.slice(-6) || "m";
+        const sid = Number.isFinite(selectionId) && selectionId > 0 ? String(Math.floor(selectionId)).slice(-4) : "0";
+        const bucket = Math.floor(Date.now() / 4000).toString(36);
+        let ref = `ah-${a}-${tail}-${midTail}${sid}-${bucket}`;
+        if (ref.length > 32) ref = ref.slice(0, 32);
+        return ref;
+      };
+      const entryLocksPruned = pruneEntryLocks(readEntryLocks());
+
       const cycleCount = Math.max(0, Math.floor(Number(existing?.cycleCount ?? 0) || 0));
       if (phase !== "entering" && phase !== "entered" && cycleCount >= maxEntries) {
         const next = {
           ...current,
           betfair: baseBetfair,
-          strategy: { ...strategy, agent: "asianHandicap", asianHandicap: { ...existing, phase: "stopped", lastTickAt: nowIso, cycleCount } },
+          strategy: { ...strategy, agent: "asianHandicap", asianHandicap: { ...existing, entryLocks: entryLocksPruned, phase: "stopped", lastTickAt: nowIso, cycleCount } },
           updatedAt: nowIso,
         };
         await setQueueItem(matchId, next);
@@ -2454,7 +5333,7 @@ Deno.serve(async (req) => {
         const next = {
           ...current,
           betfair: baseBetfair,
-          strategy: { ...strategy, agent: "asianHandicap", asianHandicap: { ...existing, phase: phase || "monitoring", lastTickAt: nowIso, cycleCount } },
+          strategy: { ...strategy, agent: "asianHandicap", asianHandicap: { ...existing, entryLocks: entryLocksPruned, phase: phase || "monitoring", lastTickAt: nowIso, cycleCount } },
           updatedAt: nowIso,
         };
         await setQueueItem(matchId, next);
@@ -2480,7 +5359,7 @@ Deno.serve(async (req) => {
           const next = {
             ...current,
             betfair: baseBetfair,
-            strategy: { ...strategy, agent: "asianHandicap", asianHandicap: { ...existing, phase: "monitoring", lastTickAt: nowIso, cycleCount, elapsedSec } },
+            strategy: { ...strategy, agent: "asianHandicap", asianHandicap: { ...existing, entryLocks: entryLocksPruned, phase: "monitoring", lastTickAt: nowIso, cycleCount, elapsedSec } },
             updatedAt: nowIso,
           };
           await setQueueItem(matchId, next);
@@ -2501,7 +5380,7 @@ Deno.serve(async (req) => {
           strategy: {
             ...strategy,
             agent: "asianHandicap",
-            asianHandicap: { ...existing, phase: "monitoring", lastTickAt: nowIso, cycleCount, skippedReason: "no_prediction" },
+            asianHandicap: { ...existing, entryLocks: entryLocksPruned, phase: "monitoring", lastTickAt: nowIso, cycleCount, skippedReason: "no_prediction" },
           },
           updatedAt: nowIso,
         };
@@ -2523,7 +5402,7 @@ Deno.serve(async (req) => {
         const next = {
           ...current,
           betfair: baseBetfair,
-          strategy: { ...strategy, agent: "asianHandicap", asianHandicap: { ...existing, phase: "monitoring", lastTickAt: nowIso, cycleCount, error: ahErr } },
+          strategy: { ...strategy, agent: "asianHandicap", asianHandicap: { ...existing, entryLocks: entryLocksPruned, phase: "monitoring", lastTickAt: nowIso, cycleCount, error: ahErr } },
           updatedAt: nowIso,
         };
         await setQueueItem(matchId, next);
@@ -2547,7 +5426,7 @@ Deno.serve(async (req) => {
         const next = {
           ...current,
           betfair: baseBetfair,
-          strategy: { ...strategy, agent: "asianHandicap", asianHandicap: { ...existing, phase: "monitoring", lastTickAt: nowIso, cycleCount, marketId: marketId || null } },
+          strategy: { ...strategy, agent: "asianHandicap", asianHandicap: { ...existing, entryLocks: entryLocksPruned, phase: "monitoring", lastTickAt: nowIso, cycleCount, marketId: marketId || null } },
           updatedAt: nowIso,
         };
         await setQueueItem(matchId, next);
@@ -2567,7 +5446,7 @@ Deno.serve(async (req) => {
           strategy: {
             ...strategy,
             agent: "asianHandicap",
-            asianHandicap: { ...existing, phase: "monitoring", lastTickAt: nowIso, cycleCount, marketId, marketStatus },
+            asianHandicap: { ...existing, entryLocks: entryLocksPruned, phase: "monitoring", lastTickAt: nowIso, cycleCount, marketId, marketStatus },
           },
           updatedAt: nowIso,
         };
@@ -2580,7 +5459,7 @@ Deno.serve(async (req) => {
           const next = {
             ...current,
             betfair: baseBetfair,
-            strategy: { ...strategy, agent: "asianHandicap", asianHandicap: { ...existing, phase: "monitoring", lastTickAt: nowIso, cycleCount, marketId, marketMatched } },
+            strategy: { ...strategy, agent: "asianHandicap", asianHandicap: { ...existing, entryLocks: entryLocksPruned, phase: "monitoring", lastTickAt: nowIso, cycleCount, marketId, marketMatched } },
             updatedAt: nowIso,
           };
           await setQueueItem(matchId, next);
@@ -2593,7 +5472,7 @@ Deno.serve(async (req) => {
           const next = {
             ...current,
             betfair: baseBetfair,
-            strategy: { ...strategy, agent: "asianHandicap", asianHandicap: { ...existing, phase: "monitoring", lastTickAt: nowIso, cycleCount, marketId, runnerMatched } },
+            strategy: { ...strategy, agent: "asianHandicap", asianHandicap: { ...existing, entryLocks: entryLocksPruned, phase: "monitoring", lastTickAt: nowIso, cycleCount, marketId, runnerMatched } },
             updatedAt: nowIso,
           };
           await setQueueItem(matchId, next);
@@ -2605,7 +5484,7 @@ Deno.serve(async (req) => {
         const next = {
           ...current,
           betfair: baseBetfair,
-          strategy: { ...strategy, agent: "asianHandicap", asianHandicap: { ...existing, phase: "monitoring", lastTickAt: nowIso, cycleCount, marketId, spreadTicks } },
+          strategy: { ...strategy, agent: "asianHandicap", asianHandicap: { ...existing, entryLocks: entryLocksPruned, phase: "monitoring", lastTickAt: nowIso, cycleCount, marketId, spreadTicks } },
           updatedAt: nowIso,
         };
         await setQueueItem(matchId, next);
@@ -2616,7 +5495,7 @@ Deno.serve(async (req) => {
         const next = {
           ...current,
           betfair: baseBetfair,
-          strategy: { ...strategy, agent: "asianHandicap", asianHandicap: { ...existing, phase: "monitoring", lastTickAt: nowIso, cycleCount, marketId } },
+          strategy: { ...strategy, agent: "asianHandicap", asianHandicap: { ...existing, entryLocks: entryLocksPruned, phase: "monitoring", lastTickAt: nowIso, cycleCount, marketId } },
           updatedAt: nowIso,
         };
         await setQueueItem(matchId, next);
@@ -2628,12 +5507,14 @@ Deno.serve(async (req) => {
         const next = {
           ...current,
           betfair: baseBetfair,
-          strategy: { ...strategy, agent: "asianHandicap", asianHandicap: { ...existing, phase: "cooldown", lastTickAt: nowIso, cycleCount, marketId } },
+          strategy: { ...strategy, agent: "asianHandicap", asianHandicap: { ...existing, entryLocks: entryLocksPruned, phase: "cooldown", lastTickAt: nowIso, cycleCount, marketId } },
           updatedAt: nowIso,
         };
         await setQueueItem(matchId, next);
         return json({ ok: true, skipped: true, reason: "cooldown", item: next });
       }
+
+      const entryLockKey = lockKeyFor(marketId, selectionId);
 
       if (phase === "entering") {
         const entryBetId = String(existing?.entryBetId ?? "").trim() || null;
@@ -2641,14 +5522,26 @@ Deno.serve(async (req) => {
         const entryPlacedAtMs = entryPlacedAtIso ? new Date(entryPlacedAtIso).getTime() : 0;
 
         if (!entryBetId) {
+          const ageMs = entryPlacedAtMs && Number.isFinite(entryPlacedAtMs) ? nowMs - entryPlacedAtMs : Number.POSITIVE_INFINITY;
+          const stillWaiting = typeof ageMs === "number" && Number.isFinite(ageMs) && ageMs >= 0 && ageMs < entryLockPendingTtlSeconds * 1000;
           const next = {
             ...current,
             betfair: baseBetfair,
-            strategy: { ...strategy, agent: "asianHandicap", asianHandicap: { ...existing, phase: "monitoring", lastTickAt: nowIso, cycleCount } },
+            strategy: {
+              ...strategy,
+              agent: "asianHandicap",
+              asianHandicap: {
+                ...existing,
+                entryLocks: entryLocksPruned,
+                phase: stillWaiting ? "entering" : "monitoring",
+                lastTickAt: nowIso,
+                cycleCount,
+              },
+            },
             updatedAt: nowIso,
           };
           await setQueueItem(matchId, next);
-          return json({ ok: true, skipped: true, reason: "entering_missing_betid", item: next });
+          return json({ ok: true, skipped: true, reason: stillWaiting ? "await_betid" : "entering_missing_betid", item: next });
         }
 
         let sizeMatched = 0;
@@ -2727,6 +5620,13 @@ Deno.serve(async (req) => {
               agent: "asianHandicap",
               asianHandicap: {
                 ...existing,
+                entryLocks: setEntryLock(entryLocksPruned, entryLockKey, {
+                  marketId,
+                  selectionId,
+                  betId: entryBetId,
+                  placedAtIso: entryPlacedAtIso || nowIso,
+                  expiresAtMs: nowMs + Math.max(1000, entryLockTtlSeconds * 1000),
+                }),
                 phase: "entered",
                 team: predTeam,
                 line: predLine,
@@ -2775,7 +5675,7 @@ Deno.serve(async (req) => {
           const result = await placeOrders({
             adminToken: admin.adminToken,
             marketId,
-            customerRef: mkCustomerRef("ar", matchId),
+            customerRef: mkStableCustomerRef("ar", matchId, marketId, selectionId),
             instructions: [
               {
                 selectionId,
@@ -2786,6 +5686,14 @@ Deno.serve(async (req) => {
             ],
           });
           const newEntryBetId = extractBetId(result);
+          const lockTtlMs = (newEntryBetId ? entryLockTtlSeconds : entryLockPendingTtlSeconds) * 1000;
+          const locksUpdated = setEntryLock(entryLocksPruned, entryLockKey, {
+            marketId,
+            selectionId,
+            betId: newEntryBetId,
+            placedAtIso: nowIso,
+            expiresAtMs: nowMs + Math.max(1000, lockTtlMs),
+          });
 
           const next = {
             ...current,
@@ -2795,6 +5703,7 @@ Deno.serve(async (req) => {
               agent: "asianHandicap",
               asianHandicap: {
                 ...existing,
+                entryLocks: locksUpdated,
                 phase: "entering",
                 team: predTeam,
                 line: predLine,
@@ -2823,7 +5732,7 @@ Deno.serve(async (req) => {
         const next = {
           ...current,
           betfair: baseBetfair,
-          strategy: { ...strategy, agent: "asianHandicap", asianHandicap: { ...existing, phase: "entering", lastTickAt: nowIso, cycleCount } },
+          strategy: { ...strategy, agent: "asianHandicap", asianHandicap: { ...existing, entryLocks: entryLocksPruned, phase: "entering", lastTickAt: nowIso, cycleCount } },
           updatedAt: nowIso,
         };
         await setQueueItem(matchId, next);
@@ -2848,7 +5757,7 @@ Deno.serve(async (req) => {
             const tpRes = await placeOrders({
               adminToken: admin.adminToken,
               marketId,
-              customerRef: mkCustomerRef("at", matchId),
+              customerRef: mkStableCustomerRef("at", matchId, marketId, selectionId),
               instructions: [
                 {
                   selectionId,
@@ -2877,6 +5786,7 @@ Deno.serve(async (req) => {
                 agent: "asianHandicap",
                 asianHandicap: {
                   ...existing,
+                  entryLocks: entryLocksPruned,
                   takeProfit,
                   lastTpPlaceAt: nowIso,
                   lastTpPlaceError: (takeProfit as any)?.error ?? null,
@@ -2909,6 +5819,7 @@ Deno.serve(async (req) => {
             if (isDone) {
               const nextCooldownUntilMs = nowMs + 8_000;
               const nextPhase = cycleCount + 1 >= maxEntries ? "stopped" : "cooldown";
+              const locksCleared = clearEntryLock(entryLocksPruned, entryLockKey);
               const next = {
                 ...current,
                 betfair: baseBetfair,
@@ -2917,6 +5828,7 @@ Deno.serve(async (req) => {
                   agent: "asianHandicap",
                   asianHandicap: {
                     ...existing,
+                    entryLocks: locksCleared,
                     phase: nextPhase,
                     cycleCount: cycleCount + 1,
                     closedAt: nowIso,
@@ -2937,7 +5849,7 @@ Deno.serve(async (req) => {
         const next = {
           ...current,
           betfair: baseBetfair,
-          strategy: { ...strategy, agent: "asianHandicap", asianHandicap: { ...existing, phase: "entered", lastTickAt: nowIso, cycleCount } },
+          strategy: { ...strategy, agent: "asianHandicap", asianHandicap: { ...existing, entryLocks: entryLocksPruned, phase: "entered", lastTickAt: nowIso, cycleCount } },
           updatedAt: nowIso,
         };
         await setQueueItem(matchId, next);
@@ -2948,18 +5860,33 @@ Deno.serve(async (req) => {
         const next = {
           ...current,
           betfair: baseBetfair,
-          strategy: { ...strategy, agent: "asianHandicap", asianHandicap: { ...existing, phase: "monitoring", lastTickAt: nowIso, cycleCount } },
+          strategy: { ...strategy, agent: "asianHandicap", asianHandicap: { ...existing, entryLocks: entryLocksPruned, phase: "monitoring", lastTickAt: nowIso, cycleCount } },
           updatedAt: nowIso,
         };
         await setQueueItem(matchId, next);
         return json({ ok: true, skipped: true, reason: "cooldown_done", item: next });
       }
 
+      if (isEntryLocked(entryLocksPruned, entryLockKey)) {
+        const next = {
+          ...current,
+          betfair: baseBetfair,
+          strategy: {
+            ...strategy,
+            agent: "asianHandicap",
+            asianHandicap: { ...existing, entryLocks: entryLocksPruned, phase: "monitoring", lastTickAt: nowIso, cycleCount, marketId, selectionId },
+          },
+          updatedAt: nowIso,
+        };
+        await setQueueItem(matchId, next);
+        return json({ ok: true, skipped: true, reason: "entry_locked", item: next });
+      }
+
       const entryPrice = movePriceByTicks(bestBack, entryOffsetTicks);
       const result = await placeOrders({
         adminToken: admin.adminToken,
         marketId,
-        customerRef: mkCustomerRef("ae", matchId),
+        customerRef: mkStableCustomerRef("ae", matchId, marketId, selectionId),
         instructions: [
           {
             selectionId,
@@ -2972,6 +5899,14 @@ Deno.serve(async (req) => {
       const entryBetId = extractBetId(result);
       const entryStatus = extractReportStatus(result);
       const entryErrorCode = extractReportErrorCode(result);
+      const lockTtlMs = (entryBetId ? entryLockTtlSeconds : entryLockPendingTtlSeconds) * 1000;
+      const locksUpdated = setEntryLock(entryLocksPruned, entryLockKey, {
+        marketId,
+        selectionId,
+        betId: entryBetId,
+        placedAtIso: nowIso,
+        expiresAtMs: nowMs + Math.max(1000, lockTtlMs),
+      });
 
       const next = {
         ...current,
@@ -2981,6 +5916,7 @@ Deno.serve(async (req) => {
           agent: "asianHandicap",
           asianHandicap: {
             ...existing,
+            entryLocks: locksUpdated,
             phase: "entering",
             cycleCount,
             team: predTeam,
@@ -3012,9 +5948,13 @@ Deno.serve(async (req) => {
       const current = await getQueueItem(matchId);
       if (!current) return json({ ok: false, error: "Item não encontrado" }, 404);
 
+      const dryRun = Boolean((body as any)?.dryRun ?? false);
       const cfg = (body as any)?.config && typeof (body as any).config === "object" ? (body as any).config : {};
       const bankroll = Number(cfg?.bankroll ?? 50);
       const bankrollAbs = Number.isFinite(bankroll) && bankroll > 0 ? bankroll : 50;
+      const stakeAbsCfgRaw = Number(cfg?.stakeAbs);
+      const stakeAbsCfg = Number.isFinite(stakeAbsCfgRaw) ? round2(stakeAbsCfgRaw) : NaN;
+      const stakeFixed = Number.isFinite(stakeAbsCfg) && stakeAbsCfg > 0 ? Math.max(2, stakeAbsCfg) : null;
 
       const betfair = await resolveBetfairMatchOdds({
         homeTeam: String(current?.homeTeam ?? ""),
@@ -3023,9 +5963,22 @@ Deno.serve(async (req) => {
         includeCorrectScore: true,
       });
 
+      const nowIso = new Date().toISOString();
+      const strategy = (current as any)?.strategy && typeof (current as any).strategy === "object" ? (current as any).strategy : {};
+      const csState = (strategy as any)?.correctScore && typeof (strategy as any).correctScore === "object" ? (strategy as any).correctScore : {};
+
       const marketId = String(betfair?.correctScore?.marketId ?? "").trim();
       if (!marketId) {
-        const next = { ...current, betfair, updatedAt: new Date().toISOString() };
+        const next = {
+          ...current,
+          betfair,
+          strategy: {
+            ...strategy,
+            agent: "correctScore",
+            correctScore: { ...csState, lastAttemptAt: nowIso, lastAttempt: { adoptedExisting: false, placed: false, reason: "correct_score_not_ready" } },
+          },
+          updatedAt: nowIso,
+        };
         await setQueueItem(matchId, next);
         return json({ ok: true, skipped: true, reason: "correct_score_not_ready", adoptedExisting: false, item: next });
       }
@@ -3034,13 +5987,32 @@ Deno.serve(async (req) => {
       const maxSelRaw = Number(planCfg?.maxSelections ?? 4);
       const maxSelections = Number.isFinite(maxSelRaw) ? Math.max(1, Math.min(20, Math.floor(maxSelRaw))) : 4;
       const entryScoresCsv = String(planCfg?.entryScoresCsv ?? "0-0,0-1,1-0,1-1").trim();
-      const minMarketMatchedRaw = Number((planCfg as any)?.minMarketMatched ?? 1000);
-      const minMarketMatched = Number.isFinite(minMarketMatchedRaw) ? Math.max(0, Math.floor(minMarketMatchedRaw)) : 1000;
+      const minMarketMatchedRaw = Number((planCfg as any)?.minMarketMatched ?? 0);
+      const minMarketMatched = Number.isFinite(minMarketMatchedRaw) ? Math.max(0, Math.floor(minMarketMatchedRaw)) : 0;
+      const enforceMinMarketMatched = Boolean((planCfg as any)?.enforceMinMarketMatched ?? false);
 
       const marketMatched = Number((betfair as any)?.correctScore?.matchedVolume);
-      if (Number.isFinite(minMarketMatched) && minMarketMatched > 0) {
+      if (enforceMinMarketMatched && Number.isFinite(minMarketMatched) && minMarketMatched > 0) {
         if (!(Number.isFinite(marketMatched) && marketMatched >= minMarketMatched)) {
-          const next = { ...current, betfair, updatedAt: new Date().toISOString() };
+          const next = {
+            ...current,
+            betfair,
+            strategy: {
+              ...strategy,
+              agent: "correctScore",
+              correctScore: {
+                ...csState,
+                lastAttemptAt: nowIso,
+                lastAttempt: {
+                  adoptedExisting: false,
+                  placed: false,
+                  reason: "market_matched_low",
+                  meta: { marketMatched: Number.isFinite(marketMatched) ? marketMatched : null, minMarketMatched },
+                },
+              },
+            },
+            updatedAt: nowIso,
+          };
           await setQueueItem(matchId, next);
           return json({
             ok: true,
@@ -3051,6 +6023,66 @@ Deno.serve(async (req) => {
             meta: { marketMatched: Number.isFinite(marketMatched) ? marketMatched : null, minMarketMatched },
           });
         }
+      }
+
+      const existingOrdersRes = await (async () => {
+        try {
+          return await listCurrentOrders({ adminToken: admin.adminToken, marketIds: [marketId] });
+        } catch {
+          return null;
+        }
+      })();
+      const existingOrders = Array.isArray((existingOrdersRes as any)?.currentOrders) ? (existingOrdersRes as any).currentOrders : [];
+      const openOrdersCount = existingOrders.filter((o: any) => Number(o?.sizeRemaining) > 0).length;
+      const matchedBetsCount = existingOrders.filter((o: any) => Number(o?.sizeMatched) > 0).length;
+      const hasExistingPosition = openOrdersCount > 0 || matchedBetsCount > 0;
+      if (hasExistingPosition) {
+        if (!dryRun) {
+          const nowIso = new Date().toISOString();
+          const scoreHome = Number(current?.scoreHome);
+          const scoreAway = Number(current?.scoreAway);
+          const totalGoals =
+            Number.isFinite(scoreHome) && Number.isFinite(scoreAway) ? Math.max(0, Math.floor(scoreHome) + Math.floor(scoreAway)) : null;
+          const strategy = (current as any)?.strategy && typeof (current as any).strategy === "object" ? (current as any).strategy : {};
+          const csState = (strategy as any)?.correctScore && typeof (strategy as any).correctScore === "object" ? (strategy as any).correctScore : {};
+          const next = {
+            ...current,
+            betfair,
+            strategy: {
+              ...strategy,
+              agent: "correctScore",
+              correctScore: {
+                ...csState,
+                lastExecutionAt: nowIso,
+                lastExecution: { adoptedExisting: true, openOrdersCount, matchedBetsCount },
+                adoptedExistingAt: nowIso,
+                adoptedExisting: { openOrdersCount, matchedBetsCount, marketId },
+                ...(totalGoals != null ? { lastGoals: totalGoals } : {}),
+              },
+            },
+            updatedAt: nowIso,
+          };
+          await setQueueItem(matchId, next);
+          return json({
+            ok: true,
+            dryRun: false,
+            placed: false,
+            adoptedExisting: true,
+            openOrdersCount,
+            matchedBetsCount,
+            reason: "existing_position_detected",
+            item: next,
+          });
+        }
+        return json({
+          ok: true,
+          dryRun: true,
+          placed: false,
+          adoptedExisting: true,
+          openOrdersCount,
+          matchedBetsCount,
+          reason: "existing_position_detected",
+        });
       }
 
       const bodyLive = (body as any)?.live && typeof (body as any).live === "object" ? (body as any).live : null;
@@ -3105,16 +6137,34 @@ Deno.serve(async (req) => {
         .filter(Boolean) as Array<{ key: string; selectionId: number; back: number }>;
 
       if (picksWithPrice.length === 0) {
-        const next = { ...current, betfair, updatedAt: new Date().toISOString() };
+        const next = {
+          ...current,
+          betfair,
+          strategy: {
+            ...strategy,
+            agent: "correctScore",
+            correctScore: {
+              ...csState,
+              lastAttemptAt: nowIso,
+              lastAttempt: { adoptedExisting: false, placed: false, reason: "no_runners_price" },
+            },
+          },
+          updatedAt: nowIso,
+        };
         await setQueueItem(matchId, next);
         return json({ ok: true, skipped: true, reason: "no_runners_price", adoptedExisting: false, item: next });
       }
 
-      const invSum = picksWithPrice.reduce((acc, p) => acc + 1 / p.back, 0);
-      const stakes = picksWithPrice.map((p) => {
-        const frac = invSum > 0 ? (1 / p.back) / invSum : 1 / picksWithPrice.length;
-        return { ...p, stake: Math.max(2, round2(bankrollAbs * frac)) };
-      });
+      const stakes = (() => {
+        if (stakeFixed != null) {
+          return picksWithPrice.map((p) => ({ ...p, stake: stakeFixed }));
+        }
+        const invSum = picksWithPrice.reduce((acc, p) => acc + 1 / p.back, 0);
+        return picksWithPrice.map((p) => {
+          const frac = invSum > 0 ? (1 / p.back) / invSum : 1 / picksWithPrice.length;
+          return { ...p, stake: Math.max(2, round2(bankrollAbs * frac)) };
+        });
+      })();
 
       const instructions = stakes.map((s) => ({
         selectionId: s.selectionId,
@@ -3123,15 +6173,30 @@ Deno.serve(async (req) => {
         limitOrder: { size: s.stake, price: s.back, persistenceType: "LAPSE" },
       }));
 
+      if (dryRun) {
+        return json({
+          ok: true,
+          dryRun: true,
+          adoptedExisting: false,
+          placed: false,
+          marketId,
+          selections: stakes,
+          plan: { maxSelections, entryScoresCsv, minMarketMatched },
+        });
+      }
+
       const result = await placeOrders({
         adminToken: admin.adminToken,
         marketId,
-        customerRef: `cs-${matchId}-${Date.now()}`,
+        customerRef: `cs-${matchId}-${Date.now().toString(16)}`.slice(0, 32),
         instructions,
       });
 
-      const nowIso = new Date().toISOString();
-      const strategy = (current as any)?.strategy && typeof (current as any).strategy === "object" ? (current as any).strategy : {};
+      const executedAtIso = new Date().toISOString();
+      const bankrollUsed =
+        stakeFixed != null
+          ? round2(stakeFixed * Math.max(1, stakes.length))
+          : bankrollAbs;
       const next = {
         ...current,
         betfair,
@@ -3139,18 +6204,18 @@ Deno.serve(async (req) => {
           ...strategy,
           agent: "correctScore",
           correctScore: {
-            ...(strategy as any)?.correctScore,
-            lastExecutionAt: nowIso,
+            ...csState,
+            lastExecutionAt: executedAtIso,
             lastExecution: {
               selections: stakes,
-              bankroll: bankrollAbs,
+              bankroll: bankrollUsed,
               baseScore: { home: baseHome, away: baseAway },
               entryScoresCsv,
               planType: "coverage",
             },
           },
         },
-        updatedAt: nowIso,
+        updatedAt: executedAtIso,
       };
 
       await setQueueItem(matchId, next);
@@ -3255,7 +6320,7 @@ Deno.serve(async (req) => {
           await placeOrders({
             adminToken: admin.adminToken,
             marketId,
-            customerRef: `cs-auto-exit-${matchId}-${Date.now()}`,
+            customerRef: `cs-auto-exit-${matchId}-${Date.now().toString(16)}`.slice(0, 32),
             instructions: [
               {
                 selectionId,
@@ -3295,10 +6360,326 @@ Deno.serve(async (req) => {
     }
 
     if (matchPath(path, "/automation/betfair/strategy/correctScore/rebalance")) {
-      return json({ ok: true, skipped: true, reason: "not_implemented" });
+      const admin = requireAdminToken(body);
+      if (!admin.ok) return json(admin, 401);
+      const current = await getQueueItem(matchId);
+      if (!current) return json({ ok: false, error: "Item não encontrado" }, 404);
+
+      const dryRun = Boolean((body as any)?.dryRun ?? false);
+      const cfg = (body as any)?.config && typeof (body as any).config === "object" ? (body as any).config : {};
+      const force = Boolean((cfg as any)?.force ?? false);
+      const cancelOpenOrdersEnabled = typeof (cfg as any)?.cancelOpenOrders === "boolean" ? Boolean((cfg as any).cancelOpenOrders) : true;
+      const targetMinGreenAbsRaw = Number((cfg as any)?.targetMinGreenAbs ?? 0);
+      const targetMinGreenAbs = Number.isFinite(targetMinGreenAbsRaw) ? round2(Math.max(-5000, Math.min(5000, targetMinGreenAbsRaw))) : 0;
+      const maxInstructionsRaw = Number((cfg as any)?.maxInstructions ?? 3);
+      const maxInstructions = Number.isFinite(maxInstructionsRaw) ? Math.max(0, Math.min(10, Math.floor(maxInstructionsRaw))) : 3;
+      const maxStakePerInstructionRaw = Number((cfg as any)?.maxStakePerInstruction ?? 50);
+      const maxStakePerInstruction = Number.isFinite(maxStakePerInstructionRaw)
+        ? round2(Math.max(2, Math.min(2000, maxStakePerInstructionRaw)))
+        : 50;
+
+      const betfair = await resolveBetfairMatchOdds({
+        homeTeam: String(current?.homeTeam ?? ""),
+        awayTeam: String(current?.awayTeam ?? ""),
+        utcDate: current?.utcDate == null ? null : String(current.utcDate),
+        includeCorrectScore: true,
+      });
+      const marketId = String((betfair as any)?.correctScore?.marketId ?? "").trim();
+      if (!marketId) return json({ ok: true, skipped: true, reason: "correct_score_not_ready", marketId: null });
+
+      const marketStatus = String((betfair as any)?.marketStatus ?? "").toUpperCase();
+      if (marketStatus === "CLOSED") return json({ ok: true, skipped: true, reason: "market_closed", marketId });
+
+      const scoreHome = Number((current as any)?.scoreHome);
+      const scoreAway = Number((current as any)?.scoreAway);
+      const totalGoals =
+        Number.isFinite(scoreHome) && Number.isFinite(scoreAway) ? Math.max(0, Math.floor(scoreHome) + Math.floor(scoreAway)) : null;
+      const strategy = (current as any)?.strategy && typeof (current as any).strategy === "object" ? (current as any).strategy : {};
+      const csState = (strategy as any)?.correctScore && typeof (strategy as any).correctScore === "object" ? (strategy as any).correctScore : {};
+      const prevGoalsRaw = Number((csState as any)?.lastGoals);
+      const prevGoals = Number.isFinite(prevGoalsRaw) ? prevGoalsRaw : null;
+      const goalChanged = totalGoals != null && (prevGoals == null || totalGoals !== prevGoals);
+      if (!force && !goalChanged) {
+        return json({ ok: true, skipped: true, reason: "no_goal_change", totalGoals, prevGoals, marketId });
+      }
+
+      const listOrders = await listCurrentOrders({ adminToken: admin.adminToken, marketIds: [marketId] });
+      const currentOrders = Array.isArray((listOrders as any)?.currentOrders) ? (listOrders as any).currentOrders : [];
+      const openBetIds = uniqStrings(
+        currentOrders
+          .filter((o: any) => Number(o?.sizeRemaining ?? 0) > 0 && String(o?.betId ?? "").trim())
+          .map((o: any) => String(o.betId)),
+      );
+      const matchedCount = currentOrders.filter((o: any) => Number(o?.sizeMatched ?? 0) > 0).length;
+      const hasMatched = matchedCount > 0;
+
+      let cancelResult: any = null;
+      if (cancelOpenOrdersEnabled && openBetIds.length > 0) {
+        try {
+          await cancelOrders({ adminToken: admin.adminToken, marketId, betIds: openBetIds });
+          cancelResult = { cancelled: openBetIds.length };
+        } catch (e) {
+          cancelResult = { cancelled: 0, error: e instanceof Error ? e.message : String(e) };
+        }
+      }
+
+      const nowIso = new Date().toISOString();
+      if (!hasMatched) {
+        if (!dryRun) {
+          const next = {
+            ...current,
+            betfair,
+            strategy: {
+              ...strategy,
+              agent: "correctScore",
+              correctScore: {
+                ...csState,
+                ...(totalGoals != null ? { lastGoals: totalGoals } : {}),
+                lastRebalanceAt: nowIso,
+                lastRebalance: {
+                  ok: true,
+                  skipped: true,
+                  reason: "no_matched_position",
+                  cancelledOpenOrdersCount: openBetIds.length,
+                  cancelResult,
+                },
+              },
+            },
+            updatedAt: nowIso,
+          };
+          await setQueueItem(matchId, next);
+          return json({ ok: true, skipped: true, reason: "no_matched_position", cancelledOpenOrdersCount: openBetIds.length, item: next });
+        }
+        return json({ ok: true, dryRun: true, skipped: true, reason: "no_matched_position", cancelledOpenOrdersCount: openBetIds.length });
+      }
+
+      const pnlRes = await betfairRpc({
+        method: "SportsAPING/v1.0/listMarketProfitAndLoss",
+        params: { marketIds: [marketId], includeSettledBets: false, includeBspBets: false, netOfCommission: true },
+      });
+      const marketPnl = Array.isArray(pnlRes) ? pnlRes[0] : null;
+      const pnlList = Array.isArray(marketPnl?.profitAndLosses)
+        ? marketPnl.profitAndLosses
+        : Array.isArray(marketPnl?.profitAndLoss)
+          ? marketPnl.profitAndLoss
+          : [];
+      const ifWinBySel = new Map<number, number>();
+      for (const p of pnlList) {
+        const sid = Number((p as any)?.selectionId);
+        const ifWin = Number((p as any)?.ifWin);
+        if (!Number.isFinite(sid) || sid <= 0) continue;
+        ifWinBySel.set(sid, Number.isFinite(ifWin) ? round2(ifWin) : 0);
+      }
+
+      const valuesBefore = Array.from(ifWinBySel.values());
+      const minBefore = valuesBefore.length ? valuesBefore.reduce((m: number, v: number) => (v < m ? v : m), valuesBefore[0]) : null;
+      const maxBefore = valuesBefore.length ? valuesBefore.reduce((m: number, v: number) => (v > m ? v : m), valuesBefore[0]) : null;
+
+      const bookRes = await betfairRpc({
+        method: "SportsAPING/v1.0/listMarketBook",
+        params: { marketIds: [marketId], priceProjection: { priceData: ["EX_BEST_OFFERS"], virtualise: true } },
+      });
+      const book = Array.isArray(bookRes) ? bookRes[0] : null;
+      const runnersBook = Array.isArray(book?.runners) ? book.runners : [];
+      const layBySel = new Map<number, { price: number; size: number | null }>();
+      for (const rb of runnersBook) {
+        const sid = Number((rb as any)?.selectionId);
+        if (!Number.isFinite(sid) || sid <= 0) continue;
+        const lay0 = Array.isArray((rb as any)?.ex?.availableToLay) ? (rb as any).ex.availableToLay[0] : null;
+        const price = lay0 ? Number(lay0.price) : null;
+        const size = lay0 ? Number(lay0.size) : null;
+        if (price && Number.isFinite(price) && price > 1.01) {
+          layBySel.set(sid, { price, size: Number.isFinite(size) ? size : null });
+        }
+      }
+
+      const minStake = 2;
+      const instructions: any[] = [];
+      const getMin = () => {
+        const vals = Array.from(ifWinBySel.values());
+        return vals.length ? vals.reduce((m: number, v: number) => (v < m ? v : m), vals[0]) : null;
+      };
+
+      while (instructions.length < maxInstructions) {
+        const minIfWin = getMin();
+        if (!(typeof minIfWin === "number" && Number.isFinite(minIfWin))) break;
+        if (minIfWin >= targetMinGreenAbs) break;
+        const need = targetMinGreenAbs - minIfWin;
+
+        const candidates = Array.from(ifWinBySel.entries())
+          .map(([sid, ifWin]) => {
+            const lay = layBySel.get(sid) ?? null;
+            if (!lay) return null;
+            const p = lay.price;
+            const denom = p - 1;
+            if (!(Number.isFinite(p) && p > 1.01 && Number.isFinite(denom) && denom > 0)) return null;
+            const upper = (ifWin - targetMinGreenAbs) / denom;
+            const sizeCap = lay.size != null && Number.isFinite(lay.size) ? lay.size : null;
+            const maxByLiquidity = sizeCap != null ? Math.max(0, sizeCap) : null;
+            const maxSize = Math.min(maxStakePerInstruction, maxByLiquidity != null ? maxByLiquidity : maxStakePerInstruction);
+            return { sid, ifWin, p, upper: Number.isFinite(upper) ? upper : 0, maxSize };
+          })
+          .filter((x: any) => x && x.upper >= minStake && x.maxSize >= minStake && x.ifWin > targetMinGreenAbs + 1);
+
+        if (candidates.length === 0) break;
+        candidates.sort((a: any, b: any) => b.upper - a.upper);
+        const best = candidates[0];
+        const sNeed = Math.max(minStake, round2(need));
+        const sUpper = round2(Math.min(best.upper, best.maxSize));
+        if (sNeed > sUpper) break;
+        const size = round2(Math.max(minStake, Math.min(sUpper, sNeed)));
+        const price = best.p;
+
+        instructions.push({
+          selectionId: best.sid,
+          side: "LAY",
+          orderType: "LIMIT",
+          limitOrder: { size, price, persistenceType: "LAPSE" },
+        });
+
+        const liability = round2(size * (price - 1));
+        for (const [sid, ifWin] of ifWinBySel.entries()) {
+          if (sid === best.sid) ifWinBySel.set(sid, round2(ifWin - liability));
+          else ifWinBySel.set(sid, round2(ifWin + size));
+        }
+      }
+
+      const valuesAfter = Array.from(ifWinBySel.values());
+      const minAfter = valuesAfter.length ? valuesAfter.reduce((m: number, v: number) => (v < m ? v : m), valuesAfter[0]) : null;
+      const maxAfter = valuesAfter.length ? valuesAfter.reduce((m: number, v: number) => (v > m ? v : m), valuesAfter[0]) : null;
+
+      if (instructions.length === 0) {
+        if (!dryRun) {
+          const next = {
+            ...current,
+            betfair,
+            strategy: {
+              ...strategy,
+              agent: "correctScore",
+              correctScore: {
+                ...csState,
+                ...(totalGoals != null ? { lastGoals: totalGoals } : {}),
+                lastRebalanceAt: nowIso,
+                lastRebalance: {
+                  ok: true,
+                  skipped: true,
+                  reason: "no_viable_instructions",
+                  minBefore,
+                  minAfter: minBefore,
+                  maxBefore,
+                  maxAfter: maxBefore,
+                  targetMinGreenAbs,
+                  cancelledOpenOrdersCount: openBetIds.length,
+                  cancelResult,
+                },
+              },
+            },
+            updatedAt: nowIso,
+          };
+          await setQueueItem(matchId, next);
+          return json({ ok: true, skipped: true, reason: "no_viable_instructions", minBefore, minAfter: minBefore, item: next });
+        }
+        return json({ ok: true, dryRun: true, skipped: true, reason: "no_viable_instructions", minBefore, minAfter: minBefore });
+      }
+
+      if (dryRun) {
+        return json({ ok: true, dryRun: true, matchId, marketId, instructions, minBefore, minAfter, maxBefore, maxAfter, targetMinGreenAbs });
+      }
+
+      const placeResult = await placeOrders({
+        adminToken: admin.adminToken,
+        marketId,
+        customerRef: `cs-reb-${matchId}-${Date.now().toString(16)}`.slice(0, 32),
+        instructions,
+      });
+
+      const next = {
+        ...current,
+        betfair,
+        strategy: {
+          ...strategy,
+          agent: "correctScore",
+          correctScore: {
+            ...csState,
+            ...(totalGoals != null ? { lastGoals: totalGoals } : {}),
+            lastRebalanceAt: nowIso,
+            lastRebalance: {
+              ok: true,
+              skipped: false,
+              reason: null,
+              instructions,
+              placeResult,
+              minBefore,
+              minAfter,
+              maxBefore,
+              maxAfter,
+              targetMinGreenAbs,
+              cancelledOpenOrdersCount: openBetIds.length,
+              cancelResult,
+            },
+          },
+        },
+        updatedAt: nowIso,
+      };
+      await setQueueItem(matchId, next);
+      return json({ ok: true, placed: true, instructionsCount: instructions.length, minBefore, minAfter, item: next });
     }
     if (matchPath(path, "/automation/betfair/strategy/correctScore/tradePreview")) {
-      return json({ ok: true, skipped: true, reason: "not_implemented", risk: null, cashOut: null, profit: null, fetchedAt: new Date().toISOString() });
+      const admin = requireAdminToken(body);
+      if (!admin.ok) return json(admin, 401);
+      const current = await getQueueItem(matchId);
+      if (!current) return json({ ok: false, error: "Item não encontrado" }, 404);
+
+      const betfair = await resolveBetfairMatchOdds({
+        homeTeam: String(current?.homeTeam ?? ""),
+        awayTeam: String(current?.awayTeam ?? ""),
+        utcDate: current?.utcDate == null ? null : String(current.utcDate),
+        includeCorrectScore: true,
+      });
+      const marketId = String((betfair as any)?.correctScore?.marketId ?? "").trim();
+      if (!marketId) {
+        return json({ ok: true, matchId, marketId: null, risk: null, cashOut: null, profit: null, fetchedAt: new Date().toISOString() });
+      }
+
+      const listOrders = await listCurrentOrders({ adminToken: admin.adminToken, marketIds: [marketId] });
+      const currentOrders = Array.isArray((listOrders as any)?.currentOrders) ? (listOrders as any).currentOrders : [];
+      const risk = currentOrders.reduce((acc: number, o: any) => {
+        const side = String(o?.side ?? "").trim().toUpperCase();
+        const price = Number(o?.priceSize?.price);
+        const sizeRemaining = Number(o?.sizeRemaining);
+        const sizeMatched = Number(o?.sizeMatched);
+        const size = (Number.isFinite(sizeRemaining) ? sizeRemaining : 0) + (Number.isFinite(sizeMatched) ? sizeMatched : 0);
+        if (!Number.isFinite(size) || size <= 0) return acc;
+        if (side === "LAY") {
+          if (!Number.isFinite(price) || price <= 1.01) return acc;
+          return acc + size * (price - 1);
+        }
+        return acc + size;
+      }, 0);
+
+      const pnlRes = await betfairRpc({
+        method: "SportsAPING/v1.0/listMarketProfitAndLoss",
+        params: { marketIds: [marketId], includeSettledBets: false, includeBspBets: false, netOfCommission: true },
+      });
+      const marketPnl = Array.isArray(pnlRes) ? pnlRes[0] : null;
+      const pnlList = Array.isArray(marketPnl?.profitAndLosses)
+        ? marketPnl.profitAndLosses
+        : Array.isArray(marketPnl?.profitAndLoss)
+          ? marketPnl.profitAndLoss
+          : [];
+      const values = pnlList.map((x: any) => Number(x?.ifWin)).filter((v: any) => typeof v === "number" && Number.isFinite(v));
+      const profit = values.length > 0 ? values.reduce((m: number, v: number) => (v < m ? v : m), values[0]) : null;
+      const cashOut = typeof profit === "number" && Number.isFinite(profit) && Number.isFinite(risk) ? risk + profit : null;
+
+      return json({
+        ok: true,
+        matchId,
+        marketId,
+        risk: Number.isFinite(risk) ? round2(risk) : null,
+        cashOut: typeof cashOut === "number" && Number.isFinite(cashOut) ? round2(cashOut) : null,
+        profit: typeof profit === "number" && Number.isFinite(profit) ? round2(profit) : null,
+        fetchedAt: new Date().toISOString(),
+      });
     }
     if (matchPath(path, "/automation/betfair/strategy/correctScore/openOrdersSummary")) {
       const admin = requireAdminToken(body);
@@ -3380,7 +6761,7 @@ Deno.serve(async (req) => {
           await placeOrders({
             adminToken: admin.adminToken,
             marketId,
-            customerRef: `cs-cashout-${matchId}-${Date.now()}`,
+            customerRef: `cs-cashout-${matchId}-${Date.now().toString(16)}`.slice(0, 32),
             instructions: [
               {
                 selectionId,

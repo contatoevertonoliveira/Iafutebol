@@ -3068,7 +3068,9 @@ const betfairScalpingGoalsTickHandler = async (c: any) => {
     const profitTargetPct = Number.isFinite(profitTargetPctRaw) ? clamp(profitTargetPctRaw, 0.01, 0.5) : 0.1;
     const stakePctRaw = Number(cfg?.stakePct ?? 1);
     const stakePct = Number.isFinite(stakePctRaw) ? clamp(stakePctRaw, 0.01, 1) : 1;
-    const stakeBankroll = round2(clamp(bankroll * stakePct, 2, bankroll));
+    const stakeAbsRaw = Number(cfg?.stakeAbs);
+    const stakeAbs = Number.isFinite(stakeAbsRaw) ? round2(stakeAbsRaw) : NaN;
+    const stakeBankroll = Number.isFinite(stakeAbs) && stakeAbs > 0 ? round2(clamp(stakeAbs, 2, bankroll)) : round2(clamp(bankroll * stakePct, 2, bankroll));
     const entryOffsetTicksRaw = Number(cfg?.entryOffsetTicks ?? 2);
     const entryOffsetTicks = Number.isFinite(entryOffsetTicksRaw) ? clamp(Math.trunc(entryOffsetTicksRaw), -10, 10) : 2;
     const secondsToWaitMatchRaw = Number(cfg?.secondsToWaitMatch ?? 10);
@@ -3500,7 +3502,9 @@ const betfairOverGoalsLimitTickHandler = async (c: any) => {
     const minSecondsBetweenEntries = Number.isFinite(minSecondsBetweenEntriesRaw) ? clamp(minSecondsBetweenEntriesRaw, 0, 600) : 30;
     const stakePctRaw = Number(cfg?.stakePct ?? 1);
     const stakePct = Number.isFinite(stakePctRaw) ? clamp(stakePctRaw, 0.01, 1) : 1;
-    const stakeBankroll = round2(clamp(bankroll * stakePct, 2, bankroll));
+    const stakeAbsRaw = Number(cfg?.stakeAbs);
+    const stakeAbs = Number.isFinite(stakeAbsRaw) ? round2(stakeAbsRaw) : NaN;
+    const stakeBankroll = Number.isFinite(stakeAbs) && stakeAbs > 0 ? round2(clamp(stakeAbs, 2, bankroll)) : round2(clamp(bankroll * stakePct, 2, bankroll));
     const entryOffsetTicksRaw = Number(cfg?.entryOffsetTicks ?? 2);
     const entryOffsetTicks = Number.isFinite(entryOffsetTicksRaw) ? clamp(Math.trunc(entryOffsetTicksRaw), -10, 10) : 2;
     const maxSpreadTicksRaw = Number(cfg?.maxSpreadTicks ?? 2);

@@ -11,6 +11,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select';
 import { Switch } from '../components/ui/switch';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../components/ui/tooltip';
+import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '../components/ui/accordion';
 import { loadApiConfig, saveApiConfig } from '../services/apiConfig';
 import { useApiFootballLiveUpdates } from '../services/apiFootballService';
 
@@ -25,6 +26,7 @@ type AutomationMarketToggle = {
 
 type QueueItem = {
   matchId: string;
+  fixtureId?: number | null;
   source: string | null;
   utcDate: string | null;
   homeTeam: string | null;
@@ -82,12 +84,6 @@ type QueueItem = {
       adoptedExistingAt?: string | null;
       adoptedExisting?: any;
     } | null;
-    scalpingGoals?: {
-      phase?: string | null;
-      lastTickAt?: string | null;
-      adoptedExistingAt?: string | null;
-      adoptedExisting?: any;
-    } | null;
   } | null;
 };
 
@@ -107,6 +103,23 @@ type BotOrderRow = {
   status: string | null;
   error: string | null;
   updatedAt: string;
+};
+
+type DailyOperationRow = {
+  key: string;
+  matchId: string;
+  homeTeam: string | null;
+  awayTeam: string | null;
+  at: string;
+  ref: string;
+  robot: string;
+  market: string;
+  marketId: string | null;
+  price: number | null;
+  stake: number | null;
+  pnl: number | null;
+  status: string;
+  returnPct: number | null;
 };
 
 type MatchStatus = 'scheduled' | 'live' | 'finished';
@@ -163,16 +176,13 @@ const robotTrafficBadge = (
   const agent =
     agentRaw === 'overgoalslimit' || agentRaw === 'over_goals_limit'
       ? 'overGoalsLimit'
-      : agentRaw === 'scalpinggoals' || agentRaw === 'scalping_goals' || agentRaw === 'scalping_goals_above'
-        ? 'scalpingGoals'
-        : agentRaw === 'scalpingticks' || agentRaw === 'scalping_ticks'
-          ? 'scalpingTicks'
-          : agentRaw === 'asianhandicap' || agentRaw === 'asian_handicap' || agentRaw === 'handicap_asiatico' || agentRaw === 'handicapasiatico'
-            ? 'asianHandicap'
-            : 'correctScore';
+      : agentRaw === 'scalpingticks' || agentRaw === 'scalping_ticks' || agentRaw === 'scalpinggoals' || agentRaw === 'scalping_goals' || agentRaw === 'scalping_goals_above'
+        ? 'scalpingTicks'
+        : agentRaw === 'asianhandicap' || agentRaw === 'asian_handicap' || agentRaw === 'handicap_asiatico' || agentRaw === 'handicapasiatico'
+          ? 'asianHandicap'
+          : 'correctScore';
 
   const agentPhase = (() => {
-    if (agent === 'scalpingGoals') return String(x?.strategy?.scalpingGoals?.phase ?? '').trim();
     if (agent === 'scalpingTicks') return String((x as any)?.strategy?.scalpingTicks?.phase ?? '').trim();
     if (agent === 'overGoalsLimit') return String((x as any)?.strategy?.overGoalsLimit?.phase ?? '').trim();
     if (agent === 'asianHandicap') return String((x as any)?.strategy?.asianHandicap?.phase ?? '').trim();
@@ -190,8 +200,7 @@ const robotTrafficBadge = (
   }
 
   const lastActivityIso = (() => {
-    if (agent === 'scalpingGoals') return String(x?.strategy?.scalpingGoals?.lastTickAt ?? '').trim();
-    if (agent === 'scalpingTicks') return String((x as any)?.strategy?.scalpingTicks?.lastTickAt ?? '').trim();
+    if (agent === 'scalpingTicks') return String((x as any)?.strategy?.scalpingTicks?.lastTickAt ?? (x as any)?.strategy?.scalpingGoals?.lastTickAt ?? '').trim();
     if (agent === 'overGoalsLimit') return String((x as any)?.strategy?.overGoalsLimit?.lastTickAt ?? '').trim();
     if (agent === 'asianHandicap') return String((x as any)?.strategy?.asianHandicap?.lastTickAt ?? '').trim();
     const exec = String(x?.strategy?.correctScore?.lastExecutionAt ?? '').trim();
@@ -205,11 +214,9 @@ const robotTrafficBadge = (
   const maxAgeMs =
     agent === 'scalpingTicks'
       ? 12_000
-      : agent === 'scalpingGoals'
+      : agent === 'overGoalsLimit' || agent === 'asianHandicap'
         ? 20_000
-        : agent === 'overGoalsLimit' || agent === 'asianHandicap'
-          ? 20_000
-          : 45_000;
+        : 45_000;
 
   if (Number.isFinite(lastActivityMs) && nowMs - lastActivityMs > maxAgeMs) {
     const ageSec = Math.floor((nowMs - lastActivityMs) / 1000);
@@ -439,7 +446,7 @@ export default function AutomationPage() {
   const [marketsDraft, setMarketsDraft] = useState<AutomationMarketToggle[]>([]);
   const [marketsSaveBusy, setMarketsSaveBusy] = useState(false);
   const [csPlanType, setCsPlanType] = useState<'coverage' | 'ladder_volume'>('coverage');
-  const [robotType, setRobotType] = useState<'correctScore' | 'scalpingGoals' | 'overGoalsLimit' | 'scalpingTicks' | 'asianHandicap'>(
+  const [robotType, setRobotType] = useState<'correctScore' | 'overGoalsLimit' | 'scalpingTicks' | 'asianHandicap'>(
     'correctScore',
   );
   const [startConfirmOpen, setStartConfirmOpen] = useState(false);
@@ -471,18 +478,161 @@ export default function AutomationPage() {
   const [marketNameByMarketId, setMarketNameByMarketId] = useState<Record<string, string>>({});
   const marketNameByMarketIdRef = useRef<Record<string, string>>({});
   const lastMarketNamesFetchAtRef = useRef(0);
+  const [activeTab, setActiveTab] = useState<'automation' | 'dailyHistory'>('automation');
+  const dailyOpsKey = 'daily_ops_v1';
+
+  const todayYmd = () => {
+    return new Intl.DateTimeFormat('en-CA', { timeZone: TIME_ZONE, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+  };
+
+  const readDailyOpsStore = () => {
+    const ymd = todayYmd();
+    try {
+      const raw = localStorage.getItem(dailyOpsKey);
+      const parsed = raw ? (JSON.parse(raw) as any) : null;
+      if (!parsed || parsed.version !== 1 || parsed.ymd !== ymd || !parsed.items || typeof parsed.items !== 'object') {
+        return { version: 1 as const, ymd, items: {} as Record<string, DailyOperationRow> };
+      }
+      return parsed as { version: 1; ymd: string; items: Record<string, DailyOperationRow> };
+    } catch {
+      return { version: 1 as const, ymd, items: {} as Record<string, DailyOperationRow> };
+    }
+  };
+
+  const writeDailyOpsStore = (next: { version: 1; ymd: string; items: Record<string, DailyOperationRow> }) => {
+    try {
+      localStorage.setItem(dailyOpsKey, JSON.stringify(next));
+    } catch {}
+  };
+
+  const [dailyOps, setDailyOps] = useState<DailyOperationRow[]>(() => {
+    const store = readDailyOpsStore();
+    return Object.values(store.items).sort((a, b) => String(b.at).localeCompare(String(a.at)));
+  });
+
+  const [centralDb, setCentralDb] = useState<{ version: 1; updatedAt: string; items: Record<string, any> }>(() => ({
+    version: 1,
+    updatedAt: new Date(0).toISOString(),
+    items: {},
+  }));
+  const isPollingCentralDbRef = useRef(false);
+
+  const centralFeedKey = 'favorite_rescue_feed_v1';
+  const readCentralFeed = () => {
+    try {
+      const raw = localStorage.getItem(centralFeedKey);
+      const parsed = raw ? (JSON.parse(raw) as any) : null;
+      if (!parsed || parsed.version !== 1 || !parsed.items || typeof parsed.items !== 'object') {
+        return { version: 1 as const, updatedAt: new Date(0).toISOString(), items: {} as Record<string, any> };
+      }
+      return parsed as { version: 1; updatedAt: string; items: Record<string, any> };
+    } catch {
+      return { version: 1 as const, updatedAt: new Date(0).toISOString(), items: {} as Record<string, any> };
+    }
+  };
+  const [centralFeed, setCentralFeed] = useState(() => readCentralFeed());
+
+  useEffect(() => {
+    const sync = () => setCentralFeed(readCentralFeed());
+    sync();
+    const t = window.setInterval(sync, 2_000);
+    const onFeedChanged = () => sync();
+    const onStorage = (e: StorageEvent) => {
+      if (!e.key || e.key === centralFeedKey) sync();
+    };
+    window.addEventListener('favoriteRescueFeedChanged' as any, onFeedChanged as any);
+    window.addEventListener('storage', onStorage);
+    return () => {
+      window.clearInterval(t);
+      window.removeEventListener('favoriteRescueFeedChanged' as any, onFeedChanged as any);
+      window.removeEventListener('storage', onStorage);
+    };
+  }, []);
+
+  useEffect(() => {
+    const poll = async () => {
+      if (isPollingCentralDbRef.current) return;
+      isPollingCentralDbRef.current = true;
+      try {
+        const cfg = loadApiConfig();
+        const adminToken = String(cfg?.automationAdminToken ?? '').trim();
+        if (!adminToken) return;
+        const env = import.meta.env as unknown as Record<string, string | boolean | undefined>;
+        const sanitize = (v: string) => v.trim().replaceAll('`', '').replaceAll('"', '').replaceAll("'", '').trim();
+        const fromEnvUrl = sanitize(String(env.VITE_SUPABASE_URL ?? '')).replace(/\/+$/, '');
+        const fromEnvAnon = sanitize(String(env.VITE_SUPABASE_ANON_KEY ?? ''));
+        const looksLikeJwt = fromEnvAnon.split('.').filter(Boolean).length === 3;
+
+        const { projectId, publicAnonKey } = await import('/utils/supabase/info');
+        const baseUrl = fromEnvUrl && looksLikeJwt ? fromEnvUrl : `https://${projectId}.supabase.co`;
+        const anonKey = fromEnvAnon && looksLikeJwt ? fromEnvAnon : publicAnonKey;
+        const headers = {
+          'Content-Type': 'application/json',
+          apikey: anonKey,
+          Authorization: `Bearer ${anonKey}`,
+        } as const;
+        const matchIds = items
+          .filter((x) => x.status !== 'stopped')
+          .map((x) => String(x.matchId ?? '').trim())
+          .filter(Boolean)
+          .slice(0, 120);
+        const primaryBase = `${baseUrl}/functions/v1`;
+        const fallbackBase = `https://${projectId}.supabase.co/functions/v1`;
+        const body = JSON.stringify({ adminToken, matchIds });
+
+        const tryFetch = async (baseUrl: string) => {
+          const res = await fetch(`${baseUrl}/automation-server-1119702f/automation/live/snapshot/get`, { method: 'POST', headers, body }).catch(() => null);
+          if (!res || !res.ok) return null;
+          return res;
+        };
+
+        const res = (await tryFetch(primaryBase)) ?? (primaryBase !== fallbackBase ? await tryFetch(fallbackBase) : null);
+        if (!res) return;
+        const raw = await res.text().catch(() => '');
+        const data = raw ? JSON.parse(raw) : null;
+        if (!res.ok || !data?.ok || !data?.snapshot) return;
+        const snap = data.snapshot;
+        if (snap && typeof snap === 'object' && snap.version === 1 && snap.items && typeof snap.items === 'object') {
+          setCentralDb({ version: 1, updatedAt: String(snap.updatedAt ?? new Date(0).toISOString()), items: snap.items as Record<string, any> });
+        }
+      } catch {}
+      finally {
+        isPollingCentralDbRef.current = false;
+      }
+    };
+
+    void poll();
+    const t = window.setInterval(() => void poll(), 12_000);
+    return () => window.clearInterval(t);
+  }, [items]);
 
   useEffect(() => {
     try {
+      localStorage.setItem('automation_runner_mode_v1', 'page');
       localStorage.setItem('scalping_ticks_runner_mode_v1', 'page');
       localStorage.setItem('asian_handicap_runner_mode_v1', 'page');
     } catch {}
     return () => {
       try {
+        localStorage.setItem('automation_runner_mode_v1', 'layout');
         localStorage.setItem('scalping_ticks_runner_mode_v1', 'layout');
         localStorage.setItem('asian_handicap_runner_mode_v1', 'layout');
       } catch {}
     };
+  }, []);
+
+  useEffect(() => {
+    const writeBeat = () => {
+      try {
+        const ts = String(Date.now());
+        localStorage.setItem('automation_runner_page_heartbeat_v1', ts);
+        localStorage.setItem('scalping_ticks_runner_page_heartbeat_v1', ts);
+        localStorage.setItem('asian_handicap_runner_page_heartbeat_v1', ts);
+      } catch {}
+    };
+    writeBeat();
+    const t = window.setInterval(writeBeat, 5_000);
+    return () => window.clearInterval(t);
   }, []);
 
   // #region debug-point A:init
@@ -610,16 +760,30 @@ export default function AutomationPage() {
         const adminToken = String(cfg?.automationAdminToken ?? '').trim();
         if (!adminToken) return;
         const bankrollTotal = Number(cfg?.betfairBankroll ?? 0);
-        const marketPercents = (cfg?.betfairMarketPercents && typeof cfg.betfairMarketPercents === 'object') ? cfg.betfairMarketPercents : {};
-        const correctScorePct = Number(marketPercents.correctScore ?? 10);
         const bankrollForCorrectScore =
-          Number.isFinite(bankrollTotal) && bankrollTotal > 0 && Number.isFinite(correctScorePct) && correctScorePct > 0
-            ? Math.round(((bankrollTotal * correctScorePct) / 100) * 100) / 100
+          Number.isFinite(bankrollTotal) && bankrollTotal > 0
+            ? Math.round(bankrollTotal * 100) / 100
             : 50;
 
         const robotLimits = (cfg?.betfairRobotLimits && typeof cfg.betfairRobotLimits === 'object') ? cfg.betfairRobotLimits : {};
         const lim = (robotLimits as any)?.correctScore && typeof (robotLimits as any).correctScore === 'object' ? (robotLimits as any).correctScore : {};
         const profitTargetPct = Number(lim?.minProfitPct);
+        const stakeAbs = Number((lim as any)?.stakeAbs);
+        const stakePct = Number((lim as any)?.stakePct);
+        const maxSelections = Number((lim as any)?.maxSelections);
+        const maxSelectionsSafe = Number.isFinite(maxSelections) ? Math.max(1, Math.min(20, Math.floor(maxSelections))) : 6;
+        const stakeAbsSafe = Number.isFinite(stakeAbs) ? Math.max(0, Math.round(stakeAbs * 100) / 100) : NaN;
+        const stakePctSafe = Number.isFinite(stakePct) ? Math.max(0, Math.min(100, Math.round(stakePct * 10000) / 10000)) : NaN;
+        const stakeAbsUsed =
+          Number.isFinite(stakeAbsSafe) && stakeAbsSafe > 0
+            ? stakeAbsSafe
+            : Number.isFinite(bankrollForCorrectScore) && bankrollForCorrectScore > 0 && Number.isFinite(stakePctSafe) && stakePctSafe > 0
+              ? Math.max(2, Math.round(((bankrollForCorrectScore * stakePctSafe) / 100) * 100) / 100)
+              : NaN;
+        const bankrollUsed =
+          Number.isFinite(stakeAbsUsed) && stakeAbsUsed > 0
+            ? Math.round((stakeAbsUsed * maxSelectionsSafe) * 100) / 100
+            : bankrollForCorrectScore;
 
         const targets = itemsRef.current
           .filter((x) => x.status === 'running')
@@ -642,8 +806,9 @@ export default function AutomationPage() {
               matchId: x.matchId,
               adminToken,
               config: {
-                bankroll: bankrollForCorrectScore,
+                bankroll: bankrollUsed,
                 ...(Number.isFinite(profitTargetPct) ? { profitTargetPct } : {}),
+                ...(Number.isFinite(stakeAbsUsed) ? { stakeAbs: stakeAbsUsed } : {}),
               },
             }),
           }).catch(() => null);
@@ -679,7 +844,7 @@ export default function AutomationPage() {
     const normalizeAgentLite = (agentRaw: unknown) => {
       const s = String(agentRaw ?? '').trim().toLowerCase();
       if (s === 'scalpingticks' || s === 'scalping_ticks') return 'scalpingTicks';
-      if (s === 'scalpinggoals' || s === 'scalping_goals') return 'scalpingGoals';
+      if (s === 'scalpinggoals' || s === 'scalping_goals' || s === 'scalping_goals_above') return 'scalpingTicks';
       if (s === 'overgoalslimit' || s === 'over_goals_limit') return 'overGoalsLimit';
       if (s === 'asianhandicap' || s === 'asian_handicap' || s === 'handicap_asiatico' || s === 'handicapasiatico') return 'asianHandicap';
       if (s === 'favoriterescue' || s === 'favorite_rescue' || s === 'lay_favorito_perdendo') return 'favoriteRescue';
@@ -1026,17 +1191,300 @@ export default function AutomationPage() {
     return () => window.clearInterval(id);
   }, []);
 
+  useEffect(() => {
+    const round2 = (v: number) => Math.round(v * 100) / 100;
+
+    const agentLabel = (agent: string | null) => {
+      if (agent === 'favoriteRescue') return 'Agente Independente';
+      if (agent === 'scalpingTicks') return 'Scalping Ticks';
+      if (agent === 'overGoalsLimit') return 'Over Limite';
+      if (agent === 'asianHandicap') return 'Handicap';
+      if (agent === 'correctScore') return 'Correct Score';
+      return agent || '—';
+    };
+
+    const humanizeMarket = (marketId: string | null) => {
+      const mid = String(marketId ?? '').trim();
+      if (!mid) return '—';
+      const resolvedName = marketNameByMarketIdRef.current?.[mid] ? String(marketNameByMarketIdRef.current[mid] ?? '').trim() : '';
+      const raw = resolvedName || mid;
+      if (/^match\s*odds$/i.test(raw)) return 'Resultado da Partida';
+      if (/correct\s*score/i.test(raw)) return 'Placar Correto';
+      const ou = raw.match(/over\s*\/\s*under\s*([0-9]+(?:\.[0-9]+)?)/i) || raw.match(/overunder\s*([0-9]+(?:\.[0-9]+)?)/i);
+      if (ou) return `Mais/Menos ${String(ou[1] ?? '').trim()} Gols`;
+      if (/asian\s*handicap/i.test(raw)) return 'Handicap Asiático';
+      return raw;
+    };
+
+    const nowStore = readDailyOpsStore();
+    const ymd = todayYmd();
+    if (nowStore.ymd !== ymd) {
+      const reset = { version: 1 as const, ymd, items: {} as Record<string, DailyOperationRow> };
+      writeDailyOpsStore(reset);
+    }
+
+    const store = readDailyOpsStore();
+    const nextItems: Record<string, DailyOperationRow> = { ...(store.items ?? {}) };
+
+    const matchMetaById = new Map<string, { homeTeam: string | null; awayTeam: string | null }>();
+    for (const it of items) {
+      const matchId = String(it?.matchId ?? '').trim();
+      if (!matchId) continue;
+      matchMetaById.set(matchId, { homeTeam: it.homeTeam ?? null, awayTeam: it.awayTeam ?? null });
+    }
+    const getMatchMeta = (matchId: string) => matchMetaById.get(String(matchId ?? '').trim()) ?? null;
+
+    const parseMatchIdFromKey = (k: string) => {
+      const key = String(k ?? '').trim();
+      if (!key) return null;
+      const parts = key.split(':').map((p) => String(p ?? '').trim());
+      const head = parts[0] ?? '';
+      if (head === 'scalpingTicks' || head === 'asianHandicap' || head === 'correctScore') return parts[1] || null;
+      if (head === 'favoriteRescue') return parts[2] || null;
+      return null;
+    };
+
+    const parseMatchIdFromRef = (ref: string) => {
+      const s = String(ref ?? '').trim();
+      const m =
+        s.match(/^CS_(\d+)$/i) ||
+        s.match(/^FR_(?:MO|CS)_(\d+)$/i) ||
+        s.match(/(?:^|_)(\d{3,})(?:$|_)/);
+      return m ? String(m[1] ?? '').trim() || null : null;
+    };
+
+    const upsert = (row: DailyOperationRow) => {
+      if (!row.key) return;
+      if (nextItems[row.key]) return;
+      nextItems[row.key] = row;
+    };
+
+    for (const r of botOrders) {
+      const sm = Number(r.sizeMatched);
+      const sr = Number(r.sizeRemaining);
+      const hasMatched = Number.isFinite(sm) && sm > 0;
+      const hasRemaining = Number.isFinite(sr) && sr > 0;
+      const st = String(r.status ?? '').trim().toUpperCase();
+      const isOpen = Boolean(r.error) || (st && /FAIL|ERROR|REJECT|VIOLATION/.test(st)) || hasRemaining || st === 'EXECUTABLE';
+      if (isOpen) continue;
+      if (hasMatched) continue;
+      if (r.betId || r.customerRef) {
+        const at = String(r.placedAt ?? r.updatedAt ?? '').trim() || new Date().toISOString();
+        const agent = normalizeAgent(r.agent);
+        upsert({
+          key: `unmatched:${r.betId ?? r.customerRef ?? r.key}`,
+          matchId: String(r.matchId ?? '').trim() || '—',
+          homeTeam: (getMatchMeta(String(r.matchId ?? '').trim() || '')?.homeTeam ?? null),
+          awayTeam: (getMatchMeta(String(r.matchId ?? '').trim() || '')?.awayTeam ?? null),
+          at,
+          ref: String(r.betId ?? r.customerRef ?? r.key),
+          robot: agentLabel(agent),
+          market: humanizeMarket(r.marketId),
+          marketId: r.marketId,
+          price: r.price,
+          stake: null,
+          pnl: 0,
+          status: 'NÃO CORRESPONDIDA',
+          returnPct: 0,
+        });
+      }
+    }
+
+    for (const x of items) {
+      const agent = normalizeAgent(x.strategy?.agent);
+
+      const st = (x as any)?.strategy?.scalpingTicks && typeof (x as any).strategy.scalpingTicks === 'object' ? (x as any).strategy.scalpingTicks : null;
+      if (st) {
+        const closedAt = String(st?.closedAt ?? st?.lastClosedAt ?? '').trim();
+        const cycleCount = Number(st?.cycleCount);
+        if (closedAt) {
+          const stakeAbs = Number(st?.stakeAbs);
+          const hedgeSize = Number(st?.hedgeSize ?? st?.takeProfit?.size);
+          const pnl =
+            Number.isFinite(stakeAbs) && stakeAbs > 0 && Number.isFinite(hedgeSize) ? round2(hedgeSize - stakeAbs) : null;
+          const ret = pnl != null && Number.isFinite(stakeAbs) && stakeAbs > 0 ? round2((pnl / stakeAbs) * 100) : null;
+          const status = pnl == null ? 'ENCERRADA' : pnl > 0 ? 'LUCRO' : pnl < 0 ? 'PREJUÍZO' : 'ZERO';
+          const entryPrice = Number(st?.entryPrice);
+          const marketId = String(st?.entryMarketId ?? st?.marketId ?? '').trim() || null;
+          const ref = String(st?.takeProfit?.betId ?? st?.entryBetId ?? `scalp_${x.matchId}_${closedAt}`).trim();
+          upsert({
+            key: `scalpingTicks:${x.matchId}:${closedAt}:${Number.isFinite(cycleCount) ? cycleCount : ''}`,
+            matchId: String(x.matchId ?? '').trim() || '—',
+            homeTeam: x.homeTeam ?? null,
+            awayTeam: x.awayTeam ?? null,
+            at: closedAt,
+            ref,
+            robot: agentLabel(agent),
+            market: humanizeMarket(marketId),
+            marketId,
+            price: Number.isFinite(entryPrice) ? entryPrice : null,
+            stake: Number.isFinite(stakeAbs) && stakeAbs > 0 ? round2(stakeAbs) : null,
+            pnl,
+            status,
+            returnPct: ret,
+          });
+        }
+      }
+
+      const ah = (x as any)?.strategy?.asianHandicap && typeof (x as any).strategy.asianHandicap === 'object' ? (x as any).strategy.asianHandicap : null;
+      if (ah) {
+        const closedAt = String(ah?.closedAt ?? '').trim();
+        const cycleCount = Number(ah?.cycleCount);
+        if (closedAt) {
+          const stakeAbs = Number(ah?.stakeAbs);
+          const tpSize = Number(ah?.takeProfit?.size);
+          const pnl =
+            Number.isFinite(stakeAbs) && stakeAbs > 0 && Number.isFinite(tpSize) ? round2(tpSize - stakeAbs) : null;
+          const ret = pnl != null && Number.isFinite(stakeAbs) && stakeAbs > 0 ? round2((pnl / stakeAbs) * 100) : null;
+          const status = pnl == null ? 'ENCERRADA' : pnl > 0 ? 'LUCRO' : pnl < 0 ? 'PREJUÍZO' : 'ZERO';
+          const entryPrice = Number(ah?.entryPrice);
+          const marketId = String(ah?.marketId ?? '').trim() || null;
+          const ref = String(ah?.takeProfit?.betId ?? ah?.entryBetId ?? `ah_${x.matchId}_${closedAt}`).trim();
+          upsert({
+            key: `asianHandicap:${x.matchId}:${closedAt}:${Number.isFinite(cycleCount) ? cycleCount : ''}`,
+            matchId: String(x.matchId ?? '').trim() || '—',
+            homeTeam: x.homeTeam ?? null,
+            awayTeam: x.awayTeam ?? null,
+            at: closedAt,
+            ref,
+            robot: agentLabel(agent),
+            market: humanizeMarket(marketId) || 'Handicap Asiático',
+            marketId,
+            price: Number.isFinite(entryPrice) ? entryPrice : null,
+            stake: Number.isFinite(stakeAbs) && stakeAbs > 0 ? round2(stakeAbs) : null,
+            pnl,
+            status,
+            returnPct: ret,
+          });
+        }
+      }
+
+      const cs = (x as any)?.strategy?.correctScore && typeof (x as any).strategy.correctScore === 'object' ? (x as any).strategy.correctScore : null;
+      if (cs) {
+        const phase = String(cs?.phase ?? '').trim().toLowerCase();
+        const closedAt = String(cs?.closedAt ?? '').trim();
+        if (phase === 'closed' && closedAt) {
+          const lockedProfitAbs = Number(cs?.lockedProfitAbs);
+          const lastExec = cs?.lastExecution && typeof cs.lastExecution === 'object' ? cs.lastExecution : null;
+          const selections = Array.isArray(lastExec?.selections) ? lastExec.selections : [];
+          const stake = selections.reduce((sum: number, s: any) => sum + (Number(s?.stake) || 0), 0);
+          const stakeAbs = Number.isFinite(stake) && stake > 0 ? round2(stake) : null;
+          const pnl = Number.isFinite(lockedProfitAbs) ? round2(lockedProfitAbs) : null;
+          const ret = pnl != null && stakeAbs != null && stakeAbs > 0 ? round2((pnl / stakeAbs) * 100) : null;
+          const status = pnl == null ? 'ENCERRADA' : pnl > 0 ? 'LUCRO' : pnl < 0 ? 'PREJUÍZO' : 'ZERO';
+          const marketId = String((x as any)?.betfair?.correctScore?.marketId ?? '').trim() || null;
+          upsert({
+            key: `correctScore:${x.matchId}:${closedAt}`,
+            matchId: String(x.matchId ?? '').trim() || '—',
+            homeTeam: x.homeTeam ?? null,
+            awayTeam: x.awayTeam ?? null,
+            at: closedAt,
+            ref: `CS_${x.matchId}`,
+            robot: agentLabel(agent),
+            market: 'Placar Correto',
+            marketId,
+            price: null,
+            stake: stakeAbs,
+            pnl,
+            status,
+            returnPct: ret,
+          });
+        }
+      }
+    }
+
+    try {
+      const raw = localStorage.getItem('favorite_rescue_state_v1');
+      const parsed = raw ? (JSON.parse(raw) as any) : null;
+      if (parsed && parsed.version === 1 && parsed.items && typeof parsed.items === 'object') {
+        for (const [matchId, entry] of Object.entries(parsed.items)) {
+          const e = entry as any;
+          const closedAt = String(e?.closed?.at ?? '').trim();
+          if (!closedAt) continue;
+          if (e?.closed?.matchOdds) {
+            const stake = Number(e?.matchOdds?.stake);
+            const pnl = Number(e?.matchOdds?.takeProfitAbs);
+            const stakeAbs = Number.isFinite(stake) && stake > 0 ? round2(stake) : null;
+            const pnlAbs = Number.isFinite(pnl) ? round2(pnl) : null;
+            const ret = pnlAbs != null && stakeAbs != null && stakeAbs > 0 ? round2((pnlAbs / stakeAbs) * 100) : null;
+            const marketId = String(e?.matchOdds?.marketId ?? '').trim() || null;
+          const meta = getMatchMeta(String(matchId ?? '').trim()) ?? null;
+            upsert({
+              key: `favoriteRescue:matchOdds:${matchId}:${closedAt}`,
+            matchId: String(matchId ?? '').trim() || '—',
+            homeTeam: meta?.homeTeam ?? null,
+            awayTeam: meta?.awayTeam ?? null,
+              at: closedAt,
+              ref: `FR_MO_${matchId}`,
+              robot: 'Agente Independente',
+              market: humanizeMarket(marketId),
+              marketId,
+              price: Number(e?.matchOdds?.layPrice),
+              stake: stakeAbs,
+              pnl: pnlAbs,
+              status: pnlAbs != null && pnlAbs > 0 ? 'LUCRO' : 'ENCERRADA',
+              returnPct: ret,
+            });
+          }
+          if (e?.closed?.correctScore) {
+            const selections = Array.isArray(e?.correctScore?.selections) ? e.correctScore.selections : [];
+            const stake = selections.reduce((sum: number, s: any) => sum + (Number(s?.stake) || 0), 0);
+            const takeProfitAbs = selections.reduce((best: number, s: any) => Math.max(best, Number(s?.takeProfitAbs) || 0), 0);
+            const stakeAbs = Number.isFinite(stake) && stake > 0 ? round2(stake) : null;
+            const pnlAbs = Number.isFinite(takeProfitAbs) && takeProfitAbs > 0 ? round2(takeProfitAbs) : null;
+            const ret = pnlAbs != null && stakeAbs != null && stakeAbs > 0 ? round2((pnlAbs / stakeAbs) * 100) : null;
+            const marketId = String(e?.correctScore?.marketId ?? '').trim() || null;
+          const meta = getMatchMeta(String(matchId ?? '').trim()) ?? null;
+            upsert({
+              key: `favoriteRescue:correctScore:${matchId}:${closedAt}`,
+            matchId: String(matchId ?? '').trim() || '—',
+            homeTeam: meta?.homeTeam ?? null,
+            awayTeam: meta?.awayTeam ?? null,
+              at: closedAt,
+              ref: `FR_CS_${matchId}`,
+              robot: 'Agente Independente',
+              market: humanizeMarket(marketId) || 'Placar Correto',
+              marketId,
+              price: null,
+              stake: stakeAbs,
+              pnl: pnlAbs,
+              status: pnlAbs != null && pnlAbs > 0 ? 'LUCRO' : 'ENCERRADA',
+              returnPct: ret,
+            });
+          }
+        }
+      }
+    } catch {}
+
+    for (const v of Object.values(nextItems)) {
+      const existingMatchId = String((v as any)?.matchId ?? '').trim();
+      if (existingMatchId && existingMatchId !== '—') continue;
+      const fromKey = parseMatchIdFromKey(String((v as any)?.key ?? '').trim());
+      const fromRef = parseMatchIdFromRef(String((v as any)?.ref ?? '').trim());
+      const resolved = String(fromKey ?? fromRef ?? '').trim();
+      if (!resolved) continue;
+      const meta = getMatchMeta(resolved);
+      (v as any).matchId = resolved;
+      if ((v as any).homeTeam == null) (v as any).homeTeam = meta?.homeTeam ?? null;
+      if ((v as any).awayTeam == null) (v as any).awayTeam = meta?.awayTeam ?? null;
+    }
+
+    const nextStore = { version: 1 as const, ymd: todayYmd(), items: nextItems };
+    writeDailyOpsStore(nextStore);
+    setDailyOps(Object.values(nextItems).sort((a, b) => String(b.at).localeCompare(String(a.at))));
+  }, [botOrders, items]);
+
   const apiFootballLiveFixtureIds = useMemo(() => {
     return items
-      .filter((x) => x.status !== 'stopped')
+      .filter((x) => x.status === 'running' || x.status === 'paused' || Boolean(x.betfair?.inPlay) || typeof x.live?.elapsed === 'number')
       .filter((x) => {
         const marketStatus = String(x.betfair?.marketStatus ?? '').toUpperCase();
         if (String(x.betfair?.marketId ?? '').trim() && marketStatus === 'CLOSED') return false;
         return true;
       })
-      .map((x) => Number(x.matchId))
+      .map((x) => Number(x.fixtureId ?? x.matchId))
       .filter((id) => Number.isFinite(id) && id > 0)
-      .slice(0, 80);
+      .slice(0, 20);
   }, [items]);
 
   const apiFootballLiveDetailedFixtureIds = useMemo(() => {
@@ -1047,14 +1495,14 @@ export default function AutomationPage() {
         if (String(x.betfair?.marketId ?? '').trim() && marketStatus === 'CLOSED') return false;
         return true;
       })
-      .map((x) => Number(x.matchId))
+      .map((x) => Number(x.fixtureId ?? x.matchId))
       .filter((id) => Number.isFinite(id) && id > 0)
       .slice(0, 12);
   }, [items]);
 
   const apiFootballLiveBaseRaw = useApiFootballLiveUpdates(apiFootballLiveFixtureIds, {
     enabled: apiFootballLiveFixtureIds.length > 0,
-    fast: true,
+    fast: false,
   });
   const apiFootballLiveDetailedRaw = useApiFootballLiveUpdates(apiFootballLiveDetailedFixtureIds, {
     enabled: apiFootballLiveDetailedFixtureIds.length > 0,
@@ -1087,8 +1535,14 @@ export default function AutomationPage() {
         cornersAway: number | null;
       }
     > = {};
-    for (const [id, u] of Object.entries(apiFootballLiveRaw)) {
-      out[id] = {
+    for (const x of items) {
+      const matchId = String(x.matchId ?? '').trim();
+      if (!matchId) continue;
+      const fid = Number(x.fixtureId ?? x.matchId);
+      if (!Number.isFinite(fid) || fid <= 0) continue;
+      const u = apiFootballLiveRaw[String(Math.floor(fid))];
+      if (!u) continue;
+      out[matchId] = {
         elapsed: u.elapsed ?? null,
         extra: u.extra ?? null,
         statusShort: u.statusShort ?? null,
@@ -1108,84 +1562,7 @@ export default function AutomationPage() {
       };
     }
     return out;
-  }, [apiFootballLiveRaw]);
-
-  useEffect(() => {
-    const mode = (() => {
-      try {
-        return String(localStorage.getItem('favorite_rescue_runner_mode_v1') ?? '').trim().toLowerCase();
-      } catch {
-        return '';
-      }
-    })();
-    if (mode !== 'layout') return;
-
-    const feedKey = 'favorite_rescue_feed_v1';
-    const nowIso = new Date().toISOString();
-    const isLiveStatusShort = (s: string) => {
-      const k = String(s ?? '').trim().toUpperCase();
-      if (!k) return false;
-      return ['1H', '2H', 'HT', 'ET', 'LIVE', 'IN_PLAY', 'INPLAY', 'PAUSED', 'BREAK', 'INT', 'SUSP', 'SUSPENDED'].includes(k);
-    };
-    const isFinishedStatusShort = (s: string) => {
-      const k = String(s ?? '').trim().toUpperCase();
-      if (!k) return false;
-      return ['FT', 'AET', 'PEN', 'AWD', 'CANC', 'PST', 'ABD'].includes(k);
-    };
-
-    const itemsOut: Record<string, any> = {};
-    for (const x of items) {
-      const matchId = String(x.matchId ?? '').trim();
-      if (!matchId) continue;
-      if (x.status === 'stopped') continue;
-
-      const apiLive = apiFootballLiveByMatchId[matchId] ?? null;
-      const statusShort = String(apiLive?.statusShort ?? x.live?.statusShort ?? '').trim() || null;
-
-      const status =
-        (statusShort && isFinishedStatusShort(statusShort)) || String(x.betfair?.marketStatus ?? '').toUpperCase() === 'CLOSED'
-          ? 'finished'
-          : (statusShort && isLiveStatusShort(statusShort)) || Boolean(x.betfair?.inPlay) || typeof apiLive?.elapsed === 'number' || typeof x.live?.elapsed === 'number'
-            ? 'live'
-            : 'scheduled';
-
-      const scoreHome =
-        typeof apiLive?.goalsHome === 'number' ? apiLive.goalsHome : typeof x.scoreHome === 'number' ? x.scoreHome : null;
-      const scoreAway =
-        typeof apiLive?.goalsAway === 'number' ? apiLive.goalsAway : typeof x.scoreAway === 'number' ? x.scoreAway : null;
-
-      const liveElapsed =
-        typeof apiLive?.elapsed === 'number' ? apiLive.elapsed : typeof x.live?.elapsed === 'number' ? x.live.elapsed : null;
-
-      itemsOut[matchId] = {
-        updatedAt: nowIso,
-        status,
-        utcDate: typeof x.utcDate === 'string' ? x.utcDate : null,
-        homeTeam: typeof x.homeTeam === 'string' ? x.homeTeam : null,
-        awayTeam: typeof x.awayTeam === 'string' ? x.awayTeam : null,
-        liveElapsed,
-        liveStatusShort: statusShort,
-        scoreHome,
-        scoreAway,
-        betfair: x.betfair ?? null,
-      };
-    }
-
-    if (Object.keys(itemsOut).length === 0) return;
-
-    try {
-      const raw = localStorage.getItem(feedKey);
-      const parsed = raw ? (JSON.parse(raw) as any) : null;
-      const prevItems = parsed?.version === 1 && parsed?.items && typeof parsed.items === 'object' ? parsed.items : {};
-      const nextItems = { ...prevItems, ...itemsOut };
-      const prunedEntries = Object.entries(nextItems)
-        .map(([id, v]) => [id, v] as const)
-        .filter(([, v]) => v && typeof v === 'object')
-        .slice(0, 1000);
-      localStorage.setItem(feedKey, JSON.stringify({ version: 1, updatedAt: nowIso, items: Object.fromEntries(prunedEntries) }));
-      window.dispatchEvent(new Event('favoriteRescueFeedChanged'));
-    } catch {}
-  }, [apiFootballLiveByMatchId, items]);
+  }, [apiFootballLiveRaw, items]);
 
   useEffect(() => {
     const expandedIds = Object.keys(expandedById).filter((id) => Boolean(expandedById[id]));
@@ -1326,11 +1703,65 @@ export default function AutomationPage() {
     return `${weekday} ${day} ${month}`.replace('.', '');
   };
 
+  const getCentralLive = (matchIdRaw: string) => {
+    const matchId = String(matchIdRaw ?? '').trim();
+    if (!matchId) return null;
+    const dbItem = (centralDb?.items && typeof centralDb.items === 'object' ? (centralDb.items as any)[matchId] : null) ?? null;
+    const feedItem =
+      dbItem ??
+      ((centralFeed?.items && typeof centralFeed.items === 'object' ? (centralFeed.items as any)[matchId] : null) ?? null);
+    const apiLive = apiFootballLiveByMatchId[matchId] ?? null;
+
+    const live = feedItem && typeof feedItem === 'object'
+      ? {
+          fetchedAt: String((feedItem as any)?.updatedAt ?? centralDb?.updatedAt ?? centralFeed?.updatedAt ?? apiLive?.fetchedAt ?? new Date(0).toISOString()),
+          elapsed: typeof (feedItem as any)?.liveElapsed === 'number' ? (feedItem as any).liveElapsed : (apiLive?.elapsed ?? null),
+          extra: apiLive?.extra ?? null,
+          statusShort: String((feedItem as any)?.liveStatusShort ?? apiLive?.statusShort ?? '').trim() || null,
+          goalsHome: typeof (feedItem as any)?.scoreHome === 'number' ? (feedItem as any).scoreHome : (apiLive?.goalsHome ?? null),
+          goalsAway: typeof (feedItem as any)?.scoreAway === 'number' ? (feedItem as any).scoreAway : (apiLive?.goalsAway ?? null),
+          cardsHome: typeof (feedItem as any)?.cardsHome === 'number' ? (feedItem as any).cardsHome : (apiLive?.cardsHome ?? null),
+          cardsAway: typeof (feedItem as any)?.cardsAway === 'number' ? (feedItem as any).cardsAway : (apiLive?.cardsAway ?? null),
+          shotsOnGoalHome: typeof (feedItem as any)?.shotsOnGoalHome === 'number' ? (feedItem as any).shotsOnGoalHome : (apiLive?.shotsOnGoalHome ?? null),
+          shotsOnGoalAway: typeof (feedItem as any)?.shotsOnGoalAway === 'number' ? (feedItem as any).shotsOnGoalAway : (apiLive?.shotsOnGoalAway ?? null),
+          dangerousAttacksHome:
+            typeof (feedItem as any)?.dangerousAttacksHome === 'number' ? (feedItem as any).dangerousAttacksHome : (apiLive?.dangerousAttacksHome ?? null),
+          dangerousAttacksAway:
+            typeof (feedItem as any)?.dangerousAttacksAway === 'number' ? (feedItem as any).dangerousAttacksAway : (apiLive?.dangerousAttacksAway ?? null),
+          attacksHome: typeof (feedItem as any)?.attacksHome === 'number' ? (feedItem as any).attacksHome : (apiLive?.attacksHome ?? null),
+          attacksAway: typeof (feedItem as any)?.attacksAway === 'number' ? (feedItem as any).attacksAway : (apiLive?.attacksAway ?? null),
+          cornersHome: typeof (feedItem as any)?.cornersHome === 'number' ? (feedItem as any).cornersHome : (apiLive?.cornersHome ?? null),
+          cornersAway: typeof (feedItem as any)?.cornersAway === 'number' ? (feedItem as any).cornersAway : (apiLive?.cornersAway ?? null),
+        }
+      : apiLive
+        ? {
+            fetchedAt: apiLive.fetchedAt,
+            elapsed: apiLive.elapsed ?? null,
+            extra: apiLive.extra ?? null,
+            statusShort: apiLive.statusShort ?? null,
+            goalsHome: apiLive.goalsHome ?? null,
+            goalsAway: apiLive.goalsAway ?? null,
+            cardsHome: apiLive.cardsHome ?? null,
+            cardsAway: apiLive.cardsAway ?? null,
+            shotsOnGoalHome: apiLive.shotsOnGoalHome ?? null,
+            shotsOnGoalAway: apiLive.shotsOnGoalAway ?? null,
+            dangerousAttacksHome: apiLive.dangerousAttacksHome ?? null,
+            dangerousAttacksAway: apiLive.dangerousAttacksAway ?? null,
+            attacksHome: apiLive.attacksHome ?? null,
+            attacksAway: apiLive.attacksAway ?? null,
+            cornersHome: apiLive.cornersHome ?? null,
+            cornersAway: apiLive.cornersAway ?? null,
+          }
+        : null;
+
+    return live;
+  };
+
   const isLive = (x: QueueItem) => {
     const marketStatus = String(x.betfair?.marketStatus ?? '').toUpperCase();
     const hasMarket = Boolean(x.betfair?.marketId);
     if (hasMarket && marketStatus === 'CLOSED') return false;
-    const apiShort = apiFootballLiveByMatchId[x.matchId]?.statusShort ?? null;
+    const apiShort = getCentralLive(x.matchId)?.statusShort ?? null;
     if (apiShort && toMatchStatus(apiShort) === 'live') return x.status !== 'stopped';
     const liveStatus = toMatchStatus(x.live?.statusShort);
     if (liveStatus === 'live') return x.status !== 'stopped';
@@ -1343,7 +1774,7 @@ export default function AutomationPage() {
     const hasMarket = Boolean(x.betfair?.marketId);
     const marketStatus = String(x.betfair?.marketStatus ?? '').toUpperCase();
     if (hasMarket && marketStatus === 'CLOSED') return true;
-    const apiShort = apiFootballLiveByMatchId[x.matchId]?.statusShort ?? null;
+    const apiShort = getCentralLive(x.matchId)?.statusShort ?? null;
     if (apiShort && toMatchStatus(apiShort) === 'finished') return true;
     if (toMatchStatus(x.live?.statusShort) === 'finished') return true;
     return false;
@@ -1364,7 +1795,7 @@ export default function AutomationPage() {
     const k = kickoffDate(x);
     if (isFinished(x)) return 'FT';
     if (isLive(x)) {
-      const apiLive = apiFootballLiveByMatchId[x.matchId] ?? null;
+      const apiLive = getCentralLive(x.matchId);
       const statusShort = String(apiLive?.statusShort ?? x.live?.statusShort ?? '').toUpperCase();
       if (['HT', 'BREAK', 'INT'].includes(statusShort)) return 'INT';
       const fromApi = apiLive ? minuteLabel(toNum(apiLive.elapsed), toNum(apiLive.extra)) : null;
@@ -1487,9 +1918,6 @@ export default function AutomationPage() {
       dbg('B', 'adminToken check', { hasAdminToken: Boolean(adminToken), len: adminToken.length });
       // #endregion
       const bankrollTotalStored = Number(cfg?.betfairBankroll ?? 0);
-      const marketPercents = (cfg?.betfairMarketPercents && typeof cfg.betfairMarketPercents === 'object') ? cfg.betfairMarketPercents : {};
-      const correctScorePct = Number(marketPercents.correctScore ?? 10);
-      const overUnderPct = Number(marketPercents.overUnder ?? 10);
       let bankrollTotal = bankrollTotalStored;
       const robotLimits = (cfg?.betfairRobotLimits && typeof cfg.betfairRobotLimits === 'object') ? cfg.betfairRobotLimits : {};
 
@@ -1526,12 +1954,12 @@ export default function AutomationPage() {
       }
 
       const bankrollForCorrectScore =
-        Number.isFinite(bankrollTotal) && bankrollTotal > 0 && Number.isFinite(correctScorePct) && correctScorePct > 0
-          ? Math.round(((bankrollTotal * correctScorePct) / 100) * 100) / 100
+        Number.isFinite(bankrollTotal) && bankrollTotal > 0
+          ? Math.round(bankrollTotal * 100) / 100
           : 50;
       const bankrollForOverUnder =
-        Number.isFinite(bankrollTotal) && bankrollTotal > 0 && Number.isFinite(overUnderPct) && overUnderPct > 0
-          ? Math.round(((bankrollTotal * overUnderPct) / 100) * 100) / 100
+        Number.isFinite(bankrollTotal) && bankrollTotal > 0
+          ? Math.round(bankrollTotal * 100) / 100
           : 50;
 
       const testModeActive = isTestModeRef.current;
@@ -1605,11 +2033,18 @@ export default function AutomationPage() {
         const csMaxSelections = Number(csLim?.maxSelections);
         const csEntryScoresCsv = String(csLim?.entryScoresCsv ?? '0-0,0-1,1-0,1-1');
         const csMinMarketMatched = Number(csLim?.minMarketMatched);
+        const csStakeAbs = Number((csLim as any)?.stakeAbs);
+        const csMaxSelectionsSafe = Number.isFinite(csMaxSelections) ? Math.max(1, Math.min(20, Math.floor(csMaxSelections))) : 6;
+        const csStakeAbsSafe = Number.isFinite(csStakeAbs) ? Math.max(0, Math.round(csStakeAbs * 100) / 100) : NaN;
+        const bankrollUsed =
+          Number.isFinite(csStakeAbsSafe) && csStakeAbsSafe > 0
+            ? Math.round((csStakeAbsSafe * csMaxSelectionsSafe) * 100) / 100
+            : bankrollForCorrectScore;
 
         for (const x of targets) {
           const lastExec = String(x.strategy?.correctScore?.lastExecutionAt ?? '').trim();
           if (lastExec) continue;
-          const apiLive = apiFootballLiveByMatchId[String(x.matchId)] ?? null;
+          const apiLive = getCentralLive(String(x.matchId));
 
           // #region debug-point D:correctScore-exec
           dbg('D', 'correctScore execute call', { matchId: x.matchId, planType: 'coverage' });
@@ -1629,7 +2064,7 @@ export default function AutomationPage() {
                     scoreAway: apiLive.goalsAway,
                   }
                 : null,
-              config: { bankroll: bankrollForCorrectScore },
+              config: { bankroll: bankrollUsed, ...(Number.isFinite(csStakeAbsSafe) ? { stakeAbs: csStakeAbsSafe } : {}) },
               planConfig: {
                 planType: 'coverage',
                 maxSelections: Number.isFinite(csMaxSelections) ? csMaxSelections : undefined,
@@ -1687,7 +2122,7 @@ export default function AutomationPage() {
           const lastRebTs = lastReb ? new Date(lastReb).getTime() : 0;
           if (lastRebTs && Number.isFinite(lastRebTs) && nowTs - lastRebTs < 30_000) continue;
 
-          const apiLive = apiFootballLiveByMatchId[String(x.matchId)] ?? null;
+          const apiLive = getCentralLive(String(x.matchId));
           const goalsHome = typeof apiLive?.goalsHome === 'number' ? apiLive.goalsHome : x.scoreHome;
           const goalsAway = typeof apiLive?.goalsAway === 'number' ? apiLive.goalsAway : x.scoreAway;
           const totalGoals = typeof goalsHome === 'number' && typeof goalsAway === 'number' ? Math.max(0, Math.floor(goalsHome) + Math.floor(goalsAway)) : null;
@@ -1741,75 +2176,6 @@ export default function AutomationPage() {
 
       if (adminToken) {
         const snapshot = itemsRef.current;
-        const scalpingTargets = snapshot
-          .filter((x) => x.status === 'running')
-          .filter((x) => {
-            const agent = normalizeAgent(x.strategy?.agent);
-            return agent === 'scalpingGoals';
-          })
-          .slice(0, 4);
-        // #region debug-point C:targets-scalpingGoals
-        dbg('C', 'targets scalpingGoals', { count: scalpingTargets.length, ids: scalpingTargets.map((t) => t.matchId) });
-        // #endregion
-
-        for (const x of scalpingTargets) {
-          const lastTick = String(x.strategy?.scalpingGoals?.lastTickAt ?? '').trim();
-          const lastTickTs = lastTick ? new Date(lastTick).getTime() : 0;
-          if (lastTickTs && Number.isFinite(lastTickTs) && Date.now() - lastTickTs < 10_000) continue;
-          const lim = (robotLimits as any)?.scalpingGoals && typeof (robotLimits as any).scalpingGoals === 'object' ? (robotLimits as any).scalpingGoals : {};
-          const profitTargetPct = Number(lim?.profitTargetPct);
-          const stakePct = Number(lim?.stakePct);
-          const entryOffsetTicks = Number(lim?.entryOffsetTicks);
-          const secondsToWaitMatch = Number(lim?.secondsToWaitMatch);
-          // #region debug-point D:scalpingGoals-tick-call
-          dbg('D', 'scalpingGoals tick call', { matchId: x.matchId });
-          // #endregion
-          const tickRes = await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/strategy/scalpingGoals/tick`, {
-            method: 'POST',
-            headers,
-            body: JSON.stringify({
-              matchId: x.matchId,
-              adminToken,
-              config: {
-                bankroll: bankrollForOverUnder,
-                ...(Number.isFinite(profitTargetPct) ? { profitTargetPct } : {}),
-                ...(Number.isFinite(stakePct) ? { stakePct } : {}),
-                ...(Number.isFinite(entryOffsetTicks) ? { entryOffsetTicks } : {}),
-                ...(Number.isFinite(secondsToWaitMatch) ? { secondsToWaitMatch } : {}),
-              },
-            }),
-          }).catch((e) => {
-            // #region debug-point E:scalpingGoals-tick-error
-            dbg('E', 'scalpingGoals tick fetch error', { matchId: x.matchId, error: e instanceof Error ? e.message : String(e) });
-            // #endregion
-            return null;
-          });
-          if (tickRes) {
-            const t = await tickRes.text().catch(() => '');
-            let j: any = null;
-            try {
-              j = t ? JSON.parse(t) : null;
-            } catch {}
-            // #region debug-point D:scalpingGoals-tick-response
-            dbg('D', 'scalpingGoals tick response', {
-              matchId: x.matchId,
-              status: tickRes.status,
-              ok: Boolean(tickRes.ok && j?.ok),
-              skipped: Boolean(j?.skipped),
-              reason: j?.reason ?? null,
-              entered: Boolean(j?.entered),
-              closed: Boolean(j?.closed),
-              error: j?.error ?? null,
-            });
-            // #endregion
-          }
-        }
-
-        await loadQueue({ silent: true });
-      }
-
-      if (adminToken) {
-        const snapshot = itemsRef.current;
         const scalpingTicksTargets = snapshot
           .filter((x) => x.status === 'running')
           .filter((x) => normalizeAgent(x.strategy?.agent) === 'scalpingTicks')
@@ -1822,7 +2188,7 @@ export default function AutomationPage() {
           const lastTick = String((x as any).strategy?.scalpingTicks?.lastTickAt ?? '').trim();
           const lastTickTs = lastTick ? new Date(lastTick).getTime() : 0;
           if (lastTickTs && Number.isFinite(lastTickTs) && Date.now() - lastTickTs < 5_000) continue;
-          const live = apiFootballLiveByMatchId[String(x.matchId)] ?? null;
+          const live = getCentralLive(String(x.matchId));
           const lim = (robotLimits as any)?.scalpingTicks && typeof (robotLimits as any).scalpingTicks === 'object' ? (robotLimits as any).scalpingTicks : {};
           const targetTicks = Number(lim?.targetTicks);
           const entryOffsetTicks = Number(lim?.entryOffsetTicks);
@@ -1830,6 +2196,7 @@ export default function AutomationPage() {
           const maxSpreadTicks = Number(lim?.maxSpreadTicks);
           const minSecondsBetweenCycles = Number(lim?.minSecondsBetweenCycles);
           const stakePct = Number(lim?.stakePct);
+          const stakeAbs = Number((lim as any)?.stakeAbs);
           const maxCycles = Number(lim?.maxCycles);
           const secondsToWaitMatch = Number(lim?.secondsToWaitMatch);
           const invertVolumePct = Number(lim?.invertVolumePct);
@@ -1869,6 +2236,7 @@ export default function AutomationPage() {
                 ...(Number.isFinite(maxSpreadTicks) ? { maxSpreadTicks } : {}),
                 ...(Number.isFinite(minSecondsBetweenCycles) ? { minSecondsBetweenCycles } : {}),
                 ...(Number.isFinite(stakePct) ? { stakePct } : {}),
+                ...(Number.isFinite(stakeAbs) ? { stakeAbs } : {}),
                 ...(Number.isFinite(maxCycles) ? { maxCycles } : {}),
                 ...(Number.isFinite(secondsToWaitMatch) ? { secondsToWaitMatch } : {}),
                 ...(Number.isFinite(invertVolumePct) ? { invertVolumePct } : {}),
@@ -1923,7 +2291,7 @@ export default function AutomationPage() {
         const overGoalsLimitTargets = snapshot
           .filter((x) => x.status === 'running')
           .filter((x) => normalizeAgent(x.strategy?.agent) === 'overGoalsLimit')
-          .slice(0, 4);
+          .slice(0, 8);
         // #region debug-point C:targets-overGoalsLimit
         dbg('C', 'targets overGoalsLimit', { count: overGoalsLimitTargets.length, ids: overGoalsLimitTargets.map((t) => t.matchId) });
         // #endregion
@@ -1932,7 +2300,7 @@ export default function AutomationPage() {
           const lastTick = String(x.strategy?.overGoalsLimit?.lastTickAt ?? '').trim();
           const lastTickTs = lastTick ? new Date(lastTick).getTime() : 0;
           if (lastTickTs && Number.isFinite(lastTickTs) && Date.now() - lastTickTs < 10_000) continue;
-          const live = apiFootballLiveByMatchId[String(x.matchId)] ?? null;
+          const live = getCentralLive(String(x.matchId));
           const lim = (robotLimits as any)?.overGoalsLimit && typeof (robotLimits as any).overGoalsLimit === 'object' ? (robotLimits as any).overGoalsLimit : {};
           const minOdds = Number(lim?.minOdds);
           const maxEntries = Number(lim?.maxEntries);
@@ -1941,6 +2309,7 @@ export default function AutomationPage() {
           const dominanceRatio = Number(lim?.dominanceRatio);
           const minSecondsBetweenEntries = Number(lim?.minSecondsBetweenEntries);
           const stakePct = Number(lim?.stakePct);
+          const stakeAbs = Number((lim as any)?.stakeAbs);
           const entryOffsetTicks = Number(lim?.entryOffsetTicks);
           const secondsToWaitMatch = Number(lim?.secondsToWaitMatch);
           // #region debug-point D:overGoalsLimit-tick-call
@@ -1977,6 +2346,7 @@ export default function AutomationPage() {
                 ...(Number.isFinite(dominanceRatio) ? { dominanceRatio } : {}),
                 ...(Number.isFinite(minSecondsBetweenEntries) ? { minSecondsBetweenEntries } : {}),
                 ...(Number.isFinite(stakePct) ? { stakePct } : {}),
+                ...(Number.isFinite(stakeAbs) ? { stakeAbs } : {}),
                 ...(Number.isFinite(entryOffsetTicks) ? { entryOffsetTicks } : {}),
                 ...(Number.isFinite(secondsToWaitMatch) ? { secondsToWaitMatch } : {}),
               },
@@ -2014,7 +2384,7 @@ export default function AutomationPage() {
         const asianHandicapTargets = snapshot
           .filter((x) => x.status === 'running')
           .filter((x) => normalizeAgent(x.strategy?.agent) === 'asianHandicap')
-          .slice(0, 4);
+          .slice(0, 8);
         // #region debug-point C:targets-asianHandicap
         dbg('C', 'targets asianHandicap', { count: asianHandicapTargets.length, ids: asianHandicapTargets.map((t) => t.matchId) });
         // #endregion
@@ -2023,10 +2393,11 @@ export default function AutomationPage() {
           const lastTick = String((x as any).strategy?.asianHandicap?.lastTickAt ?? '').trim();
           const lastTickTs = lastTick ? new Date(lastTick).getTime() : 0;
           if (lastTickTs && Number.isFinite(lastTickTs) && Date.now() - lastTickTs < 10_000) continue;
-          const live = apiFootballLiveByMatchId[String(x.matchId)] ?? null;
+          const live = getCentralLive(String(x.matchId));
           const lim = (robotLimits as any)?.asianHandicap && typeof (robotLimits as any).asianHandicap === 'object' ? (robotLimits as any).asianHandicap : {};
           const profitTargetPct = Number(lim?.profitTargetPct);
           const stakePct = Number(lim?.stakePct);
+          const stakeAbs = Number((lim as any)?.stakeAbs);
           const entryOffsetTicks = Number(lim?.entryOffsetTicks);
           const targetTicks = Number(lim?.targetTicks);
           const maxEntries = Number(lim?.maxEntries);
@@ -2067,6 +2438,7 @@ export default function AutomationPage() {
                 bankrollTotal,
                 ...(Number.isFinite(profitTargetPct) ? { profitTargetPct } : {}),
                 ...(Number.isFinite(stakePct) ? { stakePct } : {}),
+                ...(Number.isFinite(stakeAbs) ? { stakeAbs } : {}),
                 ...(Number.isFinite(entryOffsetTicks) ? { entryOffsetTicks } : {}),
                 ...(Number.isFinite(targetTicks) ? { targetTicks } : {}),
                 ...(Number.isFinite(maxEntries) ? { maxEntries } : {}),
@@ -2435,11 +2807,11 @@ export default function AutomationPage() {
 
   const normalizeAgent = (
     raw: unknown,
-  ): 'correctScore' | 'scalpingGoals' | 'overGoalsLimit' | 'scalpingTicks' | 'asianHandicap' | 'favoriteRescue' => {
+  ): 'correctScore' | 'overGoalsLimit' | 'scalpingTicks' | 'asianHandicap' | 'favoriteRescue' => {
     const agentRaw = String(raw ?? '').trim().toLowerCase();
     if (agentRaw === 'overgoalslimit' || agentRaw === 'over_goals_limit') return 'overGoalsLimit';
-    if (agentRaw === 'scalpinggoals' || agentRaw === 'scalping_goals' || agentRaw === 'scalping_goals_above') return 'scalpingGoals';
     if (agentRaw === 'scalpingticks' || agentRaw === 'scalping_ticks') return 'scalpingTicks';
+    if (agentRaw === 'scalpinggoals' || agentRaw === 'scalping_goals' || agentRaw === 'scalping_goals_above') return 'scalpingTicks';
     if (agentRaw === 'asianhandicap' || agentRaw === 'asian_handicap' || agentRaw === 'handicap_asiatico' || agentRaw === 'handicapasiatico')
       return 'asianHandicap';
     if (agentRaw === 'favoriterescue' || agentRaw === 'favorite_rescue' || agentRaw === 'lay_favorito_perdendo') return 'favoriteRescue';
@@ -2454,14 +2826,12 @@ export default function AutomationPage() {
       const agent =
       agentRaw === 'overgoalslimit' || agentRaw === 'over_goals_limit'
         ? 'overGoalsLimit'
-        : agentRaw === 'scalpinggoals' || agentRaw === 'scalping_goals' || agentRaw === 'scalping_goals_above'
-          ? 'scalpingGoals'
-          : agentRaw === 'scalpingticks' || agentRaw === 'scalping_ticks'
-            ? 'scalpingTicks'
-            : agentRaw === 'asianhandicap' || agentRaw === 'asian_handicap' || agentRaw === 'handicap_asiatico' || agentRaw === 'handicapasiatico'
-              ? 'asianHandicap'
-                : agentRaw === 'favoriterescue' || agentRaw === 'favorite_rescue' || agentRaw === 'lay_favorito_perdendo'
-                  ? 'favoriteRescue'
+        : agentRaw === 'scalpingticks' || agentRaw === 'scalping_ticks' || agentRaw === 'scalpinggoals' || agentRaw === 'scalping_goals' || agentRaw === 'scalping_goals_above'
+          ? 'scalpingTicks'
+          : agentRaw === 'asianhandicap' || agentRaw === 'asian_handicap' || agentRaw === 'handicap_asiatico' || agentRaw === 'handicapasiatico'
+            ? 'asianHandicap'
+            : agentRaw === 'favoriterescue' || agentRaw === 'favorite_rescue' || agentRaw === 'lay_favorito_perdendo'
+              ? 'favoriteRescue'
               : 'correctScore';
     setRobotType(agent);
     setCsPlanType('coverage');
@@ -2497,13 +2867,11 @@ export default function AutomationPage() {
         agent:
           robotType === 'overGoalsLimit'
             ? 'overGoalsLimit'
-            : robotType === 'scalpingGoals'
-              ? 'scalpingGoals'
-              : robotType === 'scalpingTicks'
-                ? 'scalpingTicks'
-                : robotType === 'asianHandicap'
-                  ? 'asianHandicap'
-                  : 'correctScore',
+            : robotType === 'scalpingTicks'
+              ? 'scalpingTicks'
+              : robotType === 'asianHandicap'
+                ? 'asianHandicap'
+                : 'correctScore',
       };
       if (robotType === 'correctScore') {
         nextStrategy.correctScore = {
@@ -2687,32 +3055,6 @@ export default function AutomationPage() {
     return true;
   };
 
-  const executeScalpingGoalsOnce = async (
-    matchId: string,
-    config: { bankroll: number; profitTargetPct?: number; stakePct?: number; entryOffsetTicks?: number; secondsToWaitMatch?: number },
-  ) => {
-    const adminToken = getAdminTokenOrToast();
-    if (!adminToken) return false;
-    const { projectId } = await import('/utils/supabase/info');
-    const headers = await getEdgeHeaders();
-    const res = await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/strategy/scalpingGoals/tick`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ matchId, adminToken, config }),
-    });
-    const raw = await res.text().catch(() => '');
-    let data: any = null;
-    if (raw) {
-      try {
-        data = JSON.parse(raw);
-      } catch {
-        throw new Error(`HTTP ${res.status} ${res.statusText} | Resposta inválida: ${raw.slice(0, 200)}`);
-      }
-    }
-    if (!res.ok || !data?.ok) throw new Error(String(data?.error ?? `HTTP ${res.status} ${res.statusText}`));
-    return true;
-  };
-
   const executeOverGoalsLimitOnce = async (
     matchId: string,
     config: {
@@ -2725,6 +3067,7 @@ export default function AutomationPage() {
       dominanceRatio?: number;
       minSecondsBetweenEntries?: number;
       stakePct?: number;
+      stakeAbs?: number;
       entryOffsetTicks?: number;
       secondsToWaitMatch?: number;
     },
@@ -2758,6 +3101,7 @@ export default function AutomationPage() {
       bankrollTotal?: number;
       profitTargetPct?: number;
       stakePct?: number;
+      stakeAbs?: number;
       entryOffsetTicks?: number;
       entryMaxWaitSeconds?: number;
       targetTicks?: number;
@@ -2801,6 +3145,7 @@ export default function AutomationPage() {
       maxSpreadTicks?: number;
       minSecondsBetweenCycles?: number;
       stakePct?: number;
+      stakeAbs?: number;
       maxCycles?: number;
       secondsToWaitMatch?: number;
       invertVolumePct?: number;
@@ -2932,14 +3277,12 @@ export default function AutomationPage() {
         return;
       }
       if (agent === 'favoriteRescue') return;
-      if (agent === 'scalpingGoals' || agent === 'overGoalsLimit' || agent === 'scalpingTicks' || agent === 'asianHandicap') {
+      if (agent === 'overGoalsLimit' || agent === 'scalpingTicks' || agent === 'asianHandicap') {
         const cfg = loadApiConfig();
         const bankrollTotal = Number(cfg?.betfairBankroll ?? 0);
-        const marketPercents = (cfg?.betfairMarketPercents && typeof cfg.betfairMarketPercents === 'object') ? cfg.betfairMarketPercents : {};
-        const overUnderPct = Number(marketPercents.overUnder ?? 10);
         const bankroll =
-          Number.isFinite(bankrollTotal) && bankrollTotal > 0 && Number.isFinite(overUnderPct) && overUnderPct > 0
-            ? Math.round(((bankrollTotal * overUnderPct) / 100) * 100) / 100
+          Number.isFinite(bankrollTotal) && bankrollTotal > 0
+            ? Math.round(bankrollTotal * 100) / 100
             : 50;
         const robotLimits = (cfg?.betfairRobotLimits && typeof cfg.betfairRobotLimits === 'object') ? cfg.betfairRobotLimits : {};
         if (agent === 'overGoalsLimit') {
@@ -2954,6 +3297,7 @@ export default function AutomationPage() {
             dominanceRatio: Number(lim?.dominanceRatio),
             minSecondsBetweenEntries: Number(lim?.minSecondsBetweenEntries),
             stakePct: Number(lim?.stakePct),
+            stakeAbs: Number((lim as any)?.stakeAbs),
             entryOffsetTicks: Number(lim?.entryOffsetTicks),
             secondsToWaitMatch: Number(lim?.secondsToWaitMatch),
           });
@@ -2966,6 +3310,7 @@ export default function AutomationPage() {
             bankrollTotal,
             profitTargetPct: Number(lim?.profitTargetPct),
             stakePct: Number(lim?.stakePct),
+            stakeAbs: Number((lim as any)?.stakeAbs),
             entryOffsetTicks: Number(lim?.entryOffsetTicks),
             entryMaxWaitSeconds: Number(lim?.entryMaxWaitSeconds),
             targetTicks: Number(lim?.targetTicks),
@@ -2986,6 +3331,7 @@ export default function AutomationPage() {
             maxSpreadTicks: Number(lim?.maxSpreadTicks),
             minSecondsBetweenCycles: Number(lim?.minSecondsBetweenCycles),
             stakePct: Number(lim?.stakePct),
+            stakeAbs: Number((lim as any)?.stakeAbs),
             maxCycles: Number(lim?.maxCycles),
             secondsToWaitMatch: Number(lim?.secondsToWaitMatch),
             invertVolumePct: Number(lim?.invertVolumePct),
@@ -3001,32 +3347,17 @@ export default function AutomationPage() {
             recoveryIncreasePct: Number((lim as any)?.recoveryIncreasePct),
             recoveryMaxStakeAbs: Number((lim as any)?.recoveryMaxStakeAbs),
           });
-        } else {
-          const lim = (robotLimits as any)?.scalpingGoals && typeof (robotLimits as any).scalpingGoals === 'object' ? (robotLimits as any).scalpingGoals : {};
-          const profitTargetPct = Number(lim?.profitTargetPct);
-          const stakePct = Number(lim?.stakePct);
-          const entryOffsetTicks = Number(lim?.entryOffsetTicks);
-          const secondsToWaitMatch = Number(lim?.secondsToWaitMatch);
-          await executeScalpingGoalsOnce(x.matchId, {
-            bankroll,
-            ...(Number.isFinite(profitTargetPct) ? { profitTargetPct } : {}),
-            ...(Number.isFinite(stakePct) ? { stakePct } : {}),
-            ...(Number.isFinite(entryOffsetTicks) ? { entryOffsetTicks } : {}),
-            ...(Number.isFinite(secondsToWaitMatch) ? { secondsToWaitMatch } : {}),
-          });
         }
       } else {
         const cfg = loadApiConfig();
         const bankrollTotal = Number(cfg?.betfairBankroll ?? 0);
-        const marketPercents = (cfg?.betfairMarketPercents && typeof cfg.betfairMarketPercents === 'object') ? cfg.betfairMarketPercents : {};
-        const correctScorePct = Number(marketPercents.correctScore ?? 10);
         const bankroll =
-          Number.isFinite(bankrollTotal) && bankrollTotal > 0 && Number.isFinite(correctScorePct) && correctScorePct > 0
-            ? Math.round(((bankrollTotal * correctScorePct) / 100) * 100) / 100
+          Number.isFinite(bankrollTotal) && bankrollTotal > 0
+            ? Math.round(bankrollTotal * 100) / 100
             : 50;
         const robotLimits = (cfg?.betfairRobotLimits && typeof cfg.betfairRobotLimits === 'object') ? cfg.betfairRobotLimits : {};
         const csLim = (robotLimits as any)?.correctScore && typeof (robotLimits as any).correctScore === 'object' ? (robotLimits as any).correctScore : {};
-        const apiLive = apiFootballLiveByMatchId[String(x.matchId)] ?? null;
+        const apiLive = getCentralLive(String(x.matchId));
         await executeCorrectScoreOnce(x.matchId, {
           bankroll,
           maxSelections: Number(csLim?.maxSelections),
@@ -3115,11 +3446,9 @@ export default function AutomationPage() {
         const adminToken = String(cfg?.automationAdminToken ?? '').trim();
         if (!adminToken) return;
         const bankrollTotal = Number(cfg?.betfairBankroll ?? 0);
-        const marketPercents = (cfg?.betfairMarketPercents && typeof cfg.betfairMarketPercents === 'object') ? cfg.betfairMarketPercents : {};
-        const overUnderPct = Number(marketPercents.overUnder ?? 10);
         const bankrollForOverUnder =
-          Number.isFinite(bankrollTotal) && bankrollTotal > 0 && Number.isFinite(overUnderPct) && overUnderPct > 0
-            ? Math.round(((bankrollTotal * overUnderPct) / 100) * 100) / 100
+          Number.isFinite(bankrollTotal) && bankrollTotal > 0
+            ? Math.round(bankrollTotal * 100) / 100
             : 50;
         const robotLimits = (cfg?.betfairRobotLimits && typeof cfg.betfairRobotLimits === 'object') ? cfg.betfairRobotLimits : {};
         const lim = (robotLimits as any)?.scalpingTicks && typeof (robotLimits as any).scalpingTicks === 'object' ? (robotLimits as any).scalpingTicks : {};
@@ -3161,6 +3490,7 @@ export default function AutomationPage() {
                 ...(Number.isFinite(Number(lim?.maxSpreadTicks)) ? { maxSpreadTicks: Number(lim?.maxSpreadTicks) } : {}),
                 ...(Number.isFinite(Number(lim?.minSecondsBetweenCycles)) ? { minSecondsBetweenCycles: Number(lim?.minSecondsBetweenCycles) } : {}),
                 ...(Number.isFinite(Number(lim?.stakePct)) ? { stakePct: Number(lim?.stakePct) } : {}),
+                ...(Number.isFinite(Number((lim as any)?.stakeAbs)) ? { stakeAbs: Number((lim as any).stakeAbs) } : {}),
                 ...(Number.isFinite(Number(lim?.maxCycles)) ? { maxCycles: Number(lim?.maxCycles) } : {}),
                 ...(Number.isFinite(Number(lim?.secondsToWaitMatch)) ? { secondsToWaitMatch: Number(lim?.secondsToWaitMatch) } : {}),
                 ...(Number.isFinite(Number(lim?.invertVolumePct)) ? { invertVolumePct: Number(lim?.invertVolumePct) } : {}),
@@ -3269,19 +3599,16 @@ export default function AutomationPage() {
                     const v =
                       e.target.value === 'overGoalsLimit'
                         ? 'overGoalsLimit'
-                        : e.target.value === 'scalpingGoals'
-                          ? 'scalpingGoals'
-                          : e.target.value === 'scalpingTicks'
-                            ? 'scalpingTicks'
-                            : e.target.value === 'asianHandicap'
-                              ? 'asianHandicap'
-                            : 'correctScore';
+                        : e.target.value === 'scalpingTicks'
+                          ? 'scalpingTicks'
+                          : e.target.value === 'asianHandicap'
+                            ? 'asianHandicap'
+                          : 'correctScore';
                     setRobotType(v);
                   }}
                   className="mt-2 h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
                 >
                   <option value="correctScore">Correct Score (Placar Correto)</option>
-                  <option value="scalpingGoals">Scalping Gol Acima</option>
                   <option value="overGoalsLimit">Over Gols Limite</option>
                   <option value="scalpingTicks">Scalping em Ticks</option>
                   <option value="asianHandicap">Handicap Asiático</option>
@@ -3292,10 +3619,6 @@ export default function AutomationPage() {
                 <div className="mt-4">
                   <div className="text-sm font-semibold text-gray-900">Estratégia (Correct Score)</div>
                   <div className="mt-1 text-xs text-gray-600">Modo único: Dutching (Cobertura).</div>
-                </div>
-              ) : robotType === 'scalpingGoals' ? (
-                <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
-                  Opera mercados de gols (Under/Over) com estratégia de scalping e cashout/hedge automático.
                 </div>
               ) : robotType === 'scalpingTicks' ? (
                 <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
@@ -3363,11 +3686,7 @@ export default function AutomationPage() {
 
                 <div className="mt-2 space-y-2">
                   {title ? <div className="text-sm font-semibold text-gray-900">{title}</div> : null}
-                  {agent === 'scalpingGoals' ? (
-                    <div className="text-sm text-gray-700">
-                      Robô: <span className="font-semibold">Scalping Gol Acima</span>
-                    </div>
-                  ) : agent === 'scalpingTicks' ? (
+                  {agent === 'scalpingTicks' ? (
                     <div className="text-sm text-gray-700">
                       Robô: <span className="font-semibold">Scalping em Ticks</span>
                     </div>
@@ -3785,7 +4104,18 @@ export default function AutomationPage() {
           </div>
         </div>
 
-        <Card className="p-4">
+        <div className="mb-4 flex items-center gap-2">
+          <Button variant={activeTab === 'automation' ? 'default' : 'outline'} onClick={() => setActiveTab('automation')}>
+            Automações
+          </Button>
+          <Button variant={activeTab === 'dailyHistory' ? 'default' : 'outline'} onClick={() => setActiveTab('dailyHistory')}>
+            Histórico do dia
+          </Button>
+        </div>
+
+        {activeTab === 'automation' ? (
+          <>
+            <Card className="p-4">
           <div className="flex items-start justify-between gap-4">
             <div>
               <div className="font-semibold text-gray-900">Lista (estilo Exchange)</div>
@@ -4104,7 +4434,7 @@ export default function AutomationPage() {
                                   )}
                                 >
                                   {(() => {
-                                    const apiLive = apiFootballLiveByMatchId[x.matchId] ?? null;
+                                    const apiLive = getCentralLive(x.matchId);
                                     const h = typeof apiLive?.goalsHome === 'number' ? apiLive.goalsHome : x.scoreHome;
                                     const a = typeof apiLive?.goalsAway === 'number' ? apiLive.goalsAway : x.scoreAway;
                                     return (
@@ -4173,15 +4503,13 @@ export default function AutomationPage() {
                                   if (!mapped) return { text: 'Mapeando evento/mercado na Betfair...', className: 'text-gray-600' };
                                   if (finished) return { text: 'Jogo finalizado.', className: 'text-gray-600' };
                                   const phase =
-                                    agent === 'scalpingGoals'
-                                      ? String(x.strategy?.scalpingGoals?.phase ?? '').trim()
-                                      : agent === 'scalpingTicks'
-                                        ? String((x as any).strategy?.scalpingTicks?.phase ?? '').trim()
-                                        : agent === 'overGoalsLimit'
-                                          ? String((x as any).strategy?.overGoalsLimit?.phase ?? '').trim()
-                                          : agent === 'asianHandicap'
-                                            ? String((x as any).strategy?.asianHandicap?.phase ?? '').trim()
-                                            : String(x.strategy?.correctScore?.lastPlan?.mode ?? x.strategy?.correctScore?.planType ?? '').trim();
+                                    agent === 'scalpingTicks'
+                                      ? String((x as any).strategy?.scalpingTicks?.phase ?? (x as any).strategy?.scalpingGoals?.phase ?? '').trim()
+                                      : agent === 'overGoalsLimit'
+                                        ? String((x as any).strategy?.overGoalsLimit?.phase ?? '').trim()
+                                        : agent === 'asianHandicap'
+                                          ? String((x as any).strategy?.asianHandicap?.phase ?? '').trim()
+                                          : String(x.strategy?.correctScore?.lastPlan?.mode ?? x.strategy?.correctScore?.planType ?? '').trim();
 
                                   if (!phase) {
                                     return {
@@ -4638,7 +4966,6 @@ export default function AutomationPage() {
 
             const agentLabel = (r: BotOrderRow) => {
               if (r.agent === 'scalpingTicks') return 'Scalping Ticks';
-              if (r.agent === 'scalpingGoals') return 'Scalping Gols';
               if (r.agent === 'overGoalsLimit') return 'Over Limite';
               if (r.agent === 'asianHandicap') return 'Handicap';
               if (r.agent === 'correctScore') return 'Correct Score';
@@ -4774,7 +5101,7 @@ export default function AutomationPage() {
                   const agent = normalizeAgent(x.strategy?.agent);
                   const d = kickoffDate(x);
                   const day = d ? d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' }) : '—';
-                  const apiLive = apiFootballLiveByMatchId[x.matchId] ?? null;
+                  const apiLive = getCentralLive(x.matchId);
                   const h = typeof apiLive?.goalsHome === 'number' ? apiLive.goalsHome : x.scoreHome;
                   const a = typeof apiLive?.goalsAway === 'number' ? apiLive.goalsAway : x.scoreAway;
 
@@ -4792,17 +5119,15 @@ export default function AutomationPage() {
                   })();
 
                   const agentLabel =
-                    agent === 'scalpingGoals'
-                      ? 'Scalping Gols'
-                      : agent === 'scalpingTicks'
-                        ? 'Scalping Ticks'
-                        : agent === 'overGoalsLimit'
-                          ? 'Over Limite'
-                          : agent === 'asianHandicap'
-                            ? 'Handicap'
-                            : agent === 'correctScore'
-                              ? 'Correct Score'
-                              : agent || '—';
+                    agent === 'scalpingTicks'
+                      ? 'Scalping Ticks'
+                      : agent === 'overGoalsLimit'
+                        ? 'Over Limite'
+                        : agent === 'asianHandicap'
+                          ? 'Handicap'
+                          : agent === 'correctScore'
+                            ? 'Correct Score'
+                            : agent || '—';
 
                   return (
                     <div key={x.matchId} className="grid grid-cols-[92px_1fr_92px_140px_200px_160px_140px] border-b border-gray-100 text-sm">
@@ -4830,6 +5155,323 @@ export default function AutomationPage() {
             </div>
           )}
         </Card>
+          </>
+        ) : (
+          <Card className="p-4">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <div className="font-semibold text-gray-900">Histórico do dia</div>
+                <div className="text-sm text-gray-600 mt-1">
+                  Operações registradas hoje ({todayYmd()}). Verde: lucro, cinza: não correspondida, vermelho: prejuízo.
+                </div>
+              </div>
+              <Badge variant="outline" className="tabular-nums">
+                {dailyOps.length}
+              </Badge>
+            </div>
+
+            {dailyOps.length === 0 ? (
+              <div className="mt-3 text-sm text-gray-600">Nenhuma operação registrada hoje.</div>
+            ) : (
+              <div className="mt-4">
+                {(() => {
+                  const cfg = loadApiConfig();
+                  const bankrollTotal = Number(cfg?.betfairBankroll ?? 0);
+                  const bankrollOk = Number.isFinite(bankrollTotal) && bankrollTotal > 0;
+
+                  const matchMetaById = new Map<string, { homeTeam: string | null; awayTeam: string | null }>();
+                  for (const it of items) {
+                    const matchId = String(it?.matchId ?? '').trim();
+                    if (!matchId) continue;
+                    matchMetaById.set(matchId, { homeTeam: it.homeTeam ?? null, awayTeam: it.awayTeam ?? null });
+                  }
+
+                  const groupsMap = new Map<
+                    string,
+                    {
+                      matchId: string;
+                      homeTeam: string | null;
+                      awayTeam: string | null;
+                      rows: DailyOperationRow[];
+                      lastAt: string;
+                    }
+                  >();
+
+                  for (const r of dailyOps) {
+                    const matchId = String((r as any)?.matchId ?? '').trim() || '—';
+                    const meta = matchMetaById.get(matchId) ?? null;
+                    const homeTeam = (r as any)?.homeTeam ?? meta?.homeTeam ?? null;
+                    const awayTeam = (r as any)?.awayTeam ?? meta?.awayTeam ?? null;
+                    const g = groupsMap.get(matchId) ?? { matchId, homeTeam, awayTeam, rows: [], lastAt: String(r.at ?? '') };
+                    g.rows.push(r);
+                    if (String(r.at ?? '').localeCompare(g.lastAt) > 0) g.lastAt = String(r.at ?? '');
+                    if (g.homeTeam == null) g.homeTeam = homeTeam ?? null;
+                    if (g.awayTeam == null) g.awayTeam = awayTeam ?? null;
+                    groupsMap.set(matchId, g);
+                  }
+
+                  const groups = Array.from(groupsMap.values())
+                    .map((g) => ({
+                      ...g,
+                      rows: g.rows.slice().sort((a, b) => String(b.at).localeCompare(String(a.at))),
+                    }))
+                    .sort((a, b) => String(b.lastAt).localeCompare(String(a.lastAt)));
+
+                  const fmtSignedMoney = (v: number | null) => {
+                    if (typeof v !== 'number' || !Number.isFinite(v)) return '—';
+                    const abs = Math.abs(v);
+                    const sign = v > 0 ? '+' : v < 0 ? '-' : '';
+                    return `${sign}${formatMoneyBR(abs)}`;
+                  };
+
+                  const fmtSignedPct = (v: number | null) => {
+                    if (typeof v !== 'number' || !Number.isFinite(v)) return '—';
+                    const sign = v > 0 ? '+' : v < 0 ? '-' : '';
+                    return `${sign}${Math.abs(v).toFixed(2)}%`;
+                  };
+
+                  return (
+                    <div className="border border-gray-200 rounded-lg bg-white">
+                        <div className="hidden lg:grid grid-cols-[minmax(0,1fr)_minmax(0,180px)_72px_120px_120px_140px_140px_140px] text-xs font-semibold text-gray-700 bg-gray-100 border-b border-gray-200">
+                          <div className="px-3 py-2">Jogo</div>
+                          <div className="px-3 py-2">Robôs</div>
+                          <div className="px-3 py-2 text-center">Mercados</div>
+                          <div className="px-3 py-2 text-center">Média Cotação</div>
+                          <div className="px-3 py-2 text-right">Volume</div>
+                          <div className="px-3 py-2 text-right">Lucro/Perda</div>
+                          <div className="px-3 py-2 text-right">Status</div>
+                          <div className="px-3 py-2 text-right">Retorno</div>
+                        </div>
+
+                        <Accordion type="single" collapsible>
+                          {groups.map((g) => {
+                            const robots = Array.from(new Set(g.rows.map((r) => String((r as any)?.robot ?? '').trim()).filter(Boolean)));
+                            const robotsTitle = robots.join(', ');
+                            const robotsLabel = robots.length <= 2 ? robotsTitle : `${robots.length} robôs`;
+
+                            const marketKeys = new Set<string>();
+                            for (const r of g.rows) {
+                              const mk = String((r as any)?.marketId ?? (r as any)?.market ?? '').trim();
+                              if (mk) marketKeys.add(mk);
+                            }
+                            const marketsCount = marketKeys.size;
+
+                            let oddsWeightedSum = 0;
+                            let oddsWeight = 0;
+                            let oddsSum = 0;
+                            let oddsCount = 0;
+                            let stakeSum = 0;
+                            let pnlSum = 0;
+                            let pnlCount = 0;
+
+                            let allUnmatched = true;
+                            for (const r of g.rows) {
+                              const st = String((r as any)?.status ?? '').trim();
+                              if (st && st !== 'NÃO CORRESPONDIDA') allUnmatched = false;
+
+                              const stake = typeof (r as any)?.stake === 'number' && Number.isFinite((r as any).stake) ? Number((r as any).stake) : null;
+                              const pnl = typeof (r as any)?.pnl === 'number' && Number.isFinite((r as any).pnl) ? Number((r as any).pnl) : null;
+                              const price = typeof (r as any)?.price === 'number' && Number.isFinite((r as any).price) ? Number((r as any).price) : null;
+
+                              if (stake != null && stake > 0) stakeSum += stake;
+                              if (pnl != null) {
+                                pnlSum += pnl;
+                                pnlCount += 1;
+                              }
+                              if (price != null && price > 1) {
+                                oddsSum += price;
+                                oddsCount += 1;
+                                if (stake != null && stake > 0) {
+                                  oddsWeightedSum += price * stake;
+                                  oddsWeight += stake;
+                                }
+                              }
+                            }
+
+                            const avgOdd =
+                              oddsWeight > 0
+                                ? oddsWeightedSum / oddsWeight
+                                : oddsCount > 0
+                                  ? oddsSum / oddsCount
+                                  : null;
+
+                            const overallStatus = allUnmatched ? 'NÃO CORRESPONDIDA' : pnlSum > 0 ? 'LUCRO' : pnlSum < 0 ? 'PREJUÍZO' : 'ZERO';
+                            const overallTone =
+                              overallStatus === 'NÃO CORRESPONDIDA'
+                                ? 'bg-gray-50'
+                                : pnlSum < 0
+                                  ? 'bg-red-50'
+                                  : pnlSum > 0
+                                    ? 'bg-emerald-50'
+                                    : 'bg-white';
+                            const overallBadgeClass =
+                              overallStatus === 'NÃO CORRESPONDIDA'
+                                ? 'bg-gray-100 text-gray-800 border-gray-200'
+                                : pnlSum < 0
+                                  ? 'bg-red-100 text-red-900 border-red-200'
+                                  : pnlSum > 0
+                                    ? 'bg-emerald-100 text-emerald-900 border-emerald-200'
+                                    : 'bg-gray-100 text-gray-800 border-gray-200';
+
+                            const walletReturnPct = bankrollOk ? (pnlSum / bankrollTotal) * 100 : null;
+
+                            const matchLabel = g.homeTeam || g.awayTeam ? `${g.homeTeam ?? '—'} x ${g.awayTeam ?? '—'}` : `Jogo ${g.matchId}`;
+
+                            return (
+                              <AccordionItem key={g.matchId} value={g.matchId}>
+                                <AccordionTrigger className={cn('px-3 py-2 hover:no-underline', overallTone)}>
+                                  <div className="w-full min-w-0">
+                                    <div className="lg:hidden">
+                                      <div className="flex items-start justify-between gap-3">
+                                        <div className="min-w-0 truncate font-semibold text-gray-900" title={matchLabel}>
+                                          {matchLabel}
+                                        </div>
+                                        <Badge variant="outline" className={cn('shrink-0 tabular-nums', overallBadgeClass)}>
+                                          {overallStatus}
+                                        </Badge>
+                                      </div>
+                                      <div className="mt-1 text-xs text-gray-700 flex flex-wrap gap-x-3 gap-y-1">
+                                        <span className="truncate" title={robotsTitle}>{robotsLabel || '—'}</span>
+                                        <span className="tabular-nums">M: {marketsCount}</span>
+                                        <span className="tabular-nums">Odd: {avgOdd != null ? formatOdd(avgOdd) : '—'}</span>
+                                        <span className="tabular-nums">Vol: {stakeSum > 0 ? formatMoneyBR(stakeSum) : '—'}</span>
+                                        <span className="tabular-nums font-semibold">P/L: {pnlCount > 0 ? fmtSignedMoney(pnlSum) : '—'}</span>
+                                        <span className="tabular-nums">Ret: {bankrollOk ? fmtSignedPct(walletReturnPct) : '—'}</span>
+                                      </div>
+                                    </div>
+
+                                    <div className="hidden lg:grid grid-cols-[minmax(0,1fr)_minmax(0,180px)_72px_120px_120px_140px_140px_140px] items-center w-full text-sm">
+                                      <div className="truncate font-semibold text-gray-900 pr-2" title={matchLabel}>
+                                        {matchLabel}
+                                      </div>
+                                      <div className="truncate pr-2" title={robotsTitle}>
+                                        {robotsLabel || '—'}
+                                      </div>
+                                      <div className="text-center tabular-nums">{marketsCount}</div>
+                                      <div className="text-center tabular-nums">{avgOdd != null ? formatOdd(avgOdd) : '—'}</div>
+                                      <div className="text-right tabular-nums">{stakeSum > 0 ? formatMoneyBR(stakeSum) : '—'}</div>
+                                      <div className="text-right tabular-nums font-semibold">{pnlCount > 0 ? fmtSignedMoney(pnlSum) : '—'}</div>
+                                      <div className="text-right">
+                                        <Badge variant="outline" className={cn('tabular-nums', overallBadgeClass)}>
+                                          {overallStatus}
+                                        </Badge>
+                                      </div>
+                                      <div className="text-right tabular-nums">{bankrollOk ? fmtSignedPct(walletReturnPct) : '—'}</div>
+                                    </div>
+                                  </div>
+                                </AccordionTrigger>
+
+                                <AccordionContent className="px-3">
+                                  <div className="border border-gray-200 rounded-lg bg-white overflow-hidden">
+                                    <div className="hidden lg:grid grid-cols-[minmax(0,180px)_72px_minmax(0,140px)_minmax(0,1fr)_72px_110px_120px_120px_90px] text-xs font-semibold text-gray-700 bg-gray-100 border-b border-gray-200">
+                                      <div className="px-3 py-2">ID/Refª</div>
+                                      <div className="px-3 py-2 text-center">Hora</div>
+                                      <div className="px-3 py-2">Robô</div>
+                                      <div className="px-3 py-2">Mercado</div>
+                                      <div className="px-3 py-2 text-center">Odd</div>
+                                      <div className="px-3 py-2 text-right">Stake</div>
+                                      <div className="px-3 py-2 text-right">P/L</div>
+                                      <div className="px-3 py-2 text-right">Status</div>
+                                      <div className="px-3 py-2 text-right">Ret.</div>
+                                    </div>
+
+                                    <div className="lg:hidden">
+                                      {g.rows.map((r) => {
+                                        const at = String(r.at ?? '').trim();
+                                        const dt = at ? new Date(at) : null;
+                                        const time = dt && Number.isFinite(dt.getTime()) ? dt.toLocaleTimeString('pt-BR', { hour12: false }) : '—';
+                                        const pnl = typeof r.pnl === 'number' && Number.isFinite(r.pnl) ? r.pnl : null;
+                                        const stake = typeof r.stake === 'number' && Number.isFinite(r.stake) ? r.stake : null;
+                                        const ret = typeof r.returnPct === 'number' && Number.isFinite(r.returnPct) ? r.returnPct : null;
+
+                                        const tone =
+                                          r.status === 'NÃO CORRESPONDIDA'
+                                            ? 'bg-gray-100'
+                                            : pnl != null && pnl < 0
+                                              ? 'bg-red-100'
+                                              : pnl != null && pnl > 0
+                                                ? 'bg-emerald-100'
+                                                : 'bg-gray-50';
+
+                                        return (
+                                          <div key={r.key} className={cn('border-b border-gray-100 p-3 text-sm', tone)}>
+                                            <div className="flex items-start justify-between gap-3">
+                                              <div className="min-w-0">
+                                                <div className="font-semibold tabular-nums truncate">{r.ref || '—'}</div>
+                                                <div className="text-[11px] text-gray-700 tabular-nums truncate">{time}</div>
+                                              </div>
+                                              <div className="text-right tabular-nums font-semibold">{fmtSignedMoney(pnl)}</div>
+                                            </div>
+                                            <div className="mt-1 text-xs text-gray-700">
+                                              <div className="truncate">{r.robot || '—'}</div>
+                                              <div className="truncate">{r.market || '—'}</div>
+                                            </div>
+                                            <div className="mt-2 text-xs text-gray-700 flex flex-wrap gap-x-3 gap-y-1">
+                                              <span className="tabular-nums">Odd: {formatOdd(r.price)}</span>
+                                              <span className="tabular-nums">Stake: {stake != null ? formatMoneyBR(stake) : '—'}</span>
+                                              <span className="tabular-nums font-semibold">{r.status || '—'}</span>
+                                              <span className="tabular-nums">Ret: {ret != null ? `${ret.toFixed(2)}%` : '—'}</span>
+                                            </div>
+                                          </div>
+                                        );
+                                      })}
+                                    </div>
+
+                                    <div className="hidden lg:block">
+                                      {g.rows.map((r) => {
+                                        const at = String(r.at ?? '').trim();
+                                        const dt = at ? new Date(at) : null;
+                                        const time = dt && Number.isFinite(dt.getTime()) ? dt.toLocaleTimeString('pt-BR', { hour12: false }) : '—';
+                                        const pnl = typeof r.pnl === 'number' && Number.isFinite(r.pnl) ? r.pnl : null;
+                                        const stake = typeof r.stake === 'number' && Number.isFinite(r.stake) ? r.stake : null;
+                                        const ret = typeof r.returnPct === 'number' && Number.isFinite(r.returnPct) ? r.returnPct : null;
+
+                                        const tone =
+                                          r.status === 'NÃO CORRESPONDIDA'
+                                            ? 'bg-gray-100'
+                                            : pnl != null && pnl < 0
+                                              ? 'bg-red-100'
+                                              : pnl != null && pnl > 0
+                                                ? 'bg-emerald-100'
+                                                : 'bg-gray-50';
+
+                                        return (
+                                          <div
+                                            key={r.key}
+                                            className={cn(
+                                              'grid grid-cols-[minmax(0,180px)_72px_minmax(0,140px)_minmax(0,1fr)_72px_110px_120px_120px_90px] border-b border-gray-100 text-sm',
+                                              tone,
+                                            )}
+                                          >
+                                            <div className="px-3 py-2 min-w-0">
+                                              <div className="font-semibold tabular-nums truncate">{r.ref || '—'}</div>
+                                              {r.marketId ? <div className="text-[11px] text-gray-700 tabular-nums truncate">{r.marketId}</div> : null}
+                                            </div>
+                                            <div className="px-3 py-2 text-center tabular-nums">{time}</div>
+                                            <div className="px-3 py-2 truncate">{r.robot || '—'}</div>
+                                            <div className="px-3 py-2 truncate">{r.market || '—'}</div>
+                                            <div className="px-3 py-2 text-center tabular-nums">{formatOdd(r.price)}</div>
+                                            <div className="px-3 py-2 text-right tabular-nums">{stake != null ? formatMoneyBR(stake) : '—'}</div>
+                                            <div className="px-3 py-2 text-right tabular-nums font-semibold">{fmtSignedMoney(pnl)}</div>
+                                            <div className="px-3 py-2 text-right tabular-nums font-semibold truncate">{r.status || '—'}</div>
+                                            <div className="px-3 py-2 text-right tabular-nums">{ret != null ? `${ret.toFixed(2)}%` : '—'}</div>
+                                          </div>
+                                        );
+                                      })}
+                                    </div>
+                                  </div>
+                                </AccordionContent>
+                              </AccordionItem>
+                            );
+                          })}
+                        </Accordion>
+                    </div>
+                  );
+                })()}
+              </div>
+            )}
+          </Card>
+        )}
       </div>
     </div>
   );

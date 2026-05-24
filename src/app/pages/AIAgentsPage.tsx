@@ -7,6 +7,22 @@ import { loadTrainingSessions } from '../services/optimizedTrainingService';
 export default function AIAgentsPage() {
   // Carrega os agentes dinâmicos calculados pelo sistema
   const dynamicProfiles = getDynamicAgentProfiles();
+
+  const aggByPrefix = (
+    stats: Record<string, { total: number; correct: number; accuracy: number }> | undefined,
+    prefix: string,
+  ) => {
+    if (!stats) return null as null | { total: number; correct: number; accuracy: number };
+    let total = 0;
+    let correct = 0;
+    for (const [k, v] of Object.entries(stats)) {
+      if (!k.startsWith(prefix)) continue;
+      total += Number(v?.total ?? 0) || 0;
+      correct += Number(v?.correct ?? 0) || 0;
+    }
+    if (total <= 0) return null;
+    return { total, correct, accuracy: (correct / total) * 100 };
+  };
   
   const history = (() => {
     try {
@@ -140,6 +156,19 @@ export default function AIAgentsPage() {
                   <div className="flex items-center gap-2 mb-1">
                     <div className="text-2xl font-bold text-purple-600">{metric.accuracy.toFixed(1)}%</div>
                   </div>
+                  {(() => {
+                    const ah = aggByPrefix(metric.marketKeyStats, 'ah:');
+                    const ahAcc = metric.marketAccuracies?.asianHandicap;
+                    const label = typeof ahAcc === 'number' && Number.isFinite(ahAcc) ? ahAcc.toFixed(1) : ah ? ah.accuracy.toFixed(1) : null;
+                    const n = ah ? ah.total : 0;
+                    if (!label) return null;
+                    return (
+                      <div className="text-xs text-gray-600 mt-1">
+                        AH: <span className="font-semibold text-gray-900">{label}%</span>
+                        {n > 0 ? <span className="text-gray-500"> ({n})</span> : null}
+                      </div>
+                    );
+                  })()}
                   <div className="flex items-center gap-1 text-sm">
                     <span className="text-gray-500">De {metric.previousAccuracy.toFixed(1)}%</span>
                     <div className={`flex items-center ${
@@ -223,7 +252,7 @@ export default function AIAgentsPage() {
                   </div>
 
                   {/* Estatísticas */}
-                  <div className="grid md:grid-cols-3 gap-4 mb-4">
+                  <div className="grid md:grid-cols-4 gap-4 mb-4">
                     <div className="bg-gray-50 rounded-lg p-3">
                       <div className="text-sm text-gray-600 mb-1">Total de Previsões</div>
                       <div className="text-2xl font-bold text-gray-900">
@@ -242,6 +271,24 @@ export default function AIAgentsPage() {
                       <div className="text-sm text-gray-600 mb-1">Taxa de Acerto</div>
                       <div className="text-2xl font-bold text-blue-600">
                         {((agent.correctPredictions / agent.totalPredictions) * 100).toFixed(1)}%
+                      </div>
+                    </div>
+
+                    <div className="bg-gray-50 rounded-lg p-3">
+                      <div className="text-sm text-gray-600 mb-1">Handicap Asiático</div>
+                      <div className="text-2xl font-bold text-orange-700">
+                        {(() => {
+                          const ah = aggByPrefix(agent.marketKeyStats, 'ah:');
+                          if (agent.marketAccuracies?.asianHandicap != null) return `${agent.marketAccuracies.asianHandicap.toFixed(1)}%`;
+                          if (ah) return `${ah.accuracy.toFixed(1)}%`;
+                          return '—';
+                        })()}
+                      </div>
+                      <div className="text-xs text-gray-500 mt-1">
+                        {(() => {
+                          const ah = aggByPrefix(agent.marketKeyStats, 'ah:');
+                          return ah ? `${ah.correct}/${ah.total}` : 'Sem amostras';
+                        })()}
                       </div>
                     </div>
                   </div>

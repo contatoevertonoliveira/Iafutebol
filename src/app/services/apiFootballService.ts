@@ -858,6 +858,12 @@ const liveHub = (() => {
   let state: Record<number, ApiFootballLiveUpdate> = {};
   const detailedAt = new Map<number, number>();
 
+  const isLiveStatusShort = (s: string | null | undefined) => {
+    const k = String(s ?? '').trim().toUpperCase();
+    if (!k) return false;
+    return ['1H', '2H', 'HT', 'ET', 'LIVE', 'IN_PLAY', 'INPLAY', 'PAUSED', 'BREAK', 'INT', 'SUSP', 'SUSPENDED'].includes(k);
+  };
+
   const notify = () => {
     for (const l of listeners) {
       try {
@@ -867,7 +873,7 @@ const liveHub = (() => {
   };
 
   const ensureTimer = () => {
-    const desired = fastTracked.size > 0 ? 10_000 : 30_000;
+    const desired = fastTracked.size > 0 ? 5_000 : 30_000;
     if (timerId != null && desired === currentIntervalMs) return;
     if (timerId != null) {
       window.clearInterval(timerId);
@@ -882,7 +888,7 @@ const liveHub = (() => {
   const poll = async () => {
     if (inFlight) return;
     const now = Date.now();
-    if (now - lastPollAt < 5_000) return;
+    if (now - lastPollAt < 2_500) return;
     if (tracked.size === 0) return;
 
     const config = loadApiConfig();
@@ -893,7 +899,23 @@ const liveHub = (() => {
     lastPollAt = now;
     try {
       const service = new ApiFootballService(apiKey);
-      const ids = Array.from(tracked.keys()).slice(0, 80);
+      const ids = Array.from(tracked.keys())
+        .map((id) => {
+          const baseCount = tracked.get(id) ?? 0;
+          const isFast = fastTracked.has(id);
+          const isDetailed = detailedTracked.has(id);
+          const prev = state[id] ?? null;
+          const likelyLive = isLiveStatusShort(prev?.statusShort) || (typeof prev?.elapsed === 'number' && Number.isFinite(prev.elapsed));
+          const score =
+            baseCount * 10 +
+            (isFast ? 1000 : 0) +
+            (isDetailed ? 500 : 0) +
+            (likelyLive ? 2000 : 0);
+          return { id, score };
+        })
+        .sort((a, b) => (b.score - a.score) || (a.id - b.id))
+        .map((x) => x.id)
+        .slice(0, 80);
       const tz = 'America/Sao_Paulo';
 
       const liveItems = await service.getFixtures({ live: 'all', timezone: tz, maxPages: 5 }).catch(() => []);
@@ -915,18 +937,31 @@ const liveHub = (() => {
 
       const missingIds = ids.filter((id) => !liveById.has(id));
       if (missingIds.length > 0) {
-        const cap = fastTracked.size > 0 ? 12 : 4;
-        const toFetch = missingIds
+        const cap = fastTracked.size > 0 ? 30 : 8;
+        const fastFirst = missingIds
+          .slice()
+          .sort((a, b) => {
+            const af = fastTracked.has(a) ? 1 : 0;
+            const bf = fastTracked.has(b) ? 1 : 0;
+            if (af !== bf) return bf - af;
+            const ad = detailedTracked.has(a) ? 1 : 0;
+            const bd = detailedTracked.has(b) ? 1 : 0;
+            if (ad !== bd) return bd - ad;
+            return a - b;
+          });
+
+        const toFetch = fastFirst
           .filter((id) => {
             const prev = next[id];
             const prevAt = prev?.fetchedAt ? new Date(prev.fetchedAt).getTime() : 0;
-            if (prevAt && Number.isFinite(prevAt) && now - prevAt < 20_000) return false;
+            const minAgeMs = fastTracked.has(id) ? 8_000 : 20_000;
+            if (prevAt && Number.isFinite(prevAt) && now - prevAt < minAgeMs) return false;
             return true;
           })
           .slice(0, cap);
 
         if (toFetch.length > 0) {
-          const fetched = await mapWithConcurrency(toFetch, 2, async (id) => {
+          const fetched = await mapWithConcurrency(toFetch, 4, async (id) => {
             const rows = await service.getFixturesOnce({ fixtureId: id }).catch(() => []);
             const m = Array.isArray(rows) ? rows[0] : null;
             if (!m) return null;

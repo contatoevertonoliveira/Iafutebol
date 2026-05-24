@@ -617,7 +617,8 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
     if (isSaving) return;
     setIsSaving(true);
     try {
-      saveApiConfig(config);
+      const { betfairMarketPercents: _removed, ...cleaned } = (config as any) ?? {};
+      saveApiConfig(cleaned as ApiConfig);
       toast.success('Configurações salvas com sucesso!');
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Falha ao salvar configurações';
@@ -1345,118 +1346,49 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
               </div>
 
               <div className="mt-6 border-t pt-4">
-                <div className="text-sm font-semibold text-gray-900">Banca por mercado (percentual)</div>
+                <div className="text-sm font-semibold text-gray-900">Banca total</div>
                 <div className="text-sm text-gray-600 mt-1">
-                  Define quanto da banca total cada mercado pode usar por jogo (ex.: Correct Score 10%).
+                  Define o valor total da banca/carteira usada para os cálculos de stake por porcentagem.
                 </div>
 
-                {(() => {
-                  const bankroll = Number(config.betfairBankroll ?? 0);
-                  const perc = (config.betfairMarketPercents && typeof config.betfairMarketPercents === 'object') ? config.betfairMarketPercents : {};
-                  const keys: Array<{ key: string; label: string }> = [
-                    { key: 'correctScore', label: 'Correct Score (Placar Correto)' },
-                    { key: 'winner', label: 'Match Odds (1X2)' },
-                    { key: 'overUnder', label: 'Over/Under' },
-                    { key: 'btts', label: 'Ambas marcam (BTTS)' },
-                    { key: 'asianHandicap', label: 'Asian Handicap' },
-                    { key: 'firstHalf', label: '1º tempo' },
-                    { key: 'secondHalf', label: '2º tempo' },
-                  ];
-                  const totalPct = keys.reduce((acc, x) => acc + (Number(perc[x.key]) || 0), 0);
-
-                  const setPct = (k: string, v: number) => {
-                    const next = {
-                      ...(config.betfairMarketPercents ?? {}),
-                      [k]: v,
-                    };
-                    setConfig({ ...config, betfairMarketPercents: next });
-                  };
-
-                  return (
-                    <div className="mt-4 space-y-4">
-                      <div className="flex items-center justify-between gap-3 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
-                        <div className="text-sm text-gray-700">
-                          {betfairFunds.status === 'ok' && typeof betfairFunds.availableToBetBalance === 'number'
-                            ? `Betfair disponível: ${betfairFunds.availableToBetBalance.toFixed(2)} ${betfairFunds.currencyCode ?? ''}`.trim()
-                            : 'Betfair disponível: —'}
-                          {betfairFunds.fetchedAt ? (
-                            <div className="text-[11px] text-gray-600 tabular-nums mt-1">{betfairFunds.fetchedAt}</div>
-                          ) : null}
-                        </div>
-                        <Button variant="outline" onClick={fetchBetfairFunds} disabled={betfairFunds.status === 'loading'}>
-                          {betfairFunds.status === 'loading' ? 'Buscando…' : 'Buscar banca na Betfair'}
-                        </Button>
-                      </div>
-
-                      <div className="grid md:grid-cols-3 gap-3">
-                        <div className="md:col-span-2">
-                          <Label htmlFor="betfairBankroll">Banca total (R$)</Label>
-                          <Input
-                            id="betfairBankroll"
-                            inputMode="decimal"
-                            placeholder="Ex: 1000"
-                            value={String(config.betfairBankroll ?? '')}
-                            onChange={(e) => {
-                              const raw = String(e.target.value ?? '').replace(',', '.');
-                              const n = Number(raw);
-                              setConfig({ ...config, betfairBankroll: Number.isFinite(n) ? n : 0 });
-                            }}
-                            className="mt-2"
-                          />
-                        </div>
-                        <div className="bg-gray-50 border border-gray-200 rounded-lg p-3">
-                          <div className="text-xs text-gray-600">Soma (%)</div>
-                          <div className={`mt-1 font-semibold tabular-nums ${totalPct > 100 ? 'text-red-700' : 'text-gray-900'}`}>
-                            {totalPct.toFixed(2)}%
-                          </div>
-                          <div className="text-[11px] text-gray-600 mt-1">
-                            {totalPct > 100 ? 'Ajuste para no máximo 100%.' : 'OK'}
-                          </div>
-                        </div>
-                      </div>
-
-                      <div className="grid md:grid-cols-2 gap-3">
-                        {keys.map((x) => {
-                          const p = Number(perc[x.key]) || 0;
-                          const budget = Number.isFinite(bankroll) && bankroll > 0 ? (bankroll * p) / 100 : 0;
-                          return (
-                            <div key={x.key} className="border border-gray-200 rounded-lg p-3 bg-white">
-                              <div className="flex items-start justify-between gap-3">
-                                <div className="min-w-0">
-                                  <div className="text-sm font-semibold text-gray-900 truncate">{x.label}</div>
-                                  <div className="text-[11px] text-gray-600 tabular-nums mt-1">
-                                    Disponível por jogo: R$ {budget.toFixed(2)}
-                                  </div>
-                                </div>
-                                <div className="w-28 shrink-0 text-right">
-                                  <Label htmlFor={`pct_${x.key}`}>%</Label>
-                                  <Input
-                                    id={`pct_${x.key}`}
-                                    inputMode="decimal"
-                                    value={String(p)}
-                                    onChange={(e) => {
-                                      const raw = String(e.target.value ?? '').replace(',', '.');
-                                      const n = Number(raw);
-                                      const v = Number.isFinite(n) ? Math.min(100, Math.max(0, n)) : 0;
-                                      setPct(x.key, v);
-                                    }}
-                                    className="mt-2"
-                                  />
-                                </div>
-                              </div>
-                            </div>
-                          );
-                        })}
-                      </div>
-
-                      <div className="flex justify-end">
-                        <Button onClick={handleSave} disabled={isSaving || totalPct > 100}>
-                          {isSaving ? 'Salvando…' : 'Salvar banca por mercado'}
-                        </Button>
-                      </div>
+                <div className="mt-4 space-y-4">
+                  <div className="flex items-center justify-between gap-3 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
+                    <div className="text-sm text-gray-700">
+                      {betfairFunds.status === 'ok' && typeof betfairFunds.availableToBetBalance === 'number'
+                        ? `Betfair disponível: ${betfairFunds.availableToBetBalance.toFixed(2)} ${betfairFunds.currencyCode ?? ''}`.trim()
+                        : 'Betfair disponível: —'}
+                      {betfairFunds.fetchedAt ? (
+                        <div className="text-[11px] text-gray-600 tabular-nums mt-1">{betfairFunds.fetchedAt}</div>
+                      ) : null}
                     </div>
-                  );
-                })()}
+                    <Button variant="outline" onClick={fetchBetfairFunds} disabled={betfairFunds.status === 'loading'}>
+                      {betfairFunds.status === 'loading' ? 'Buscando…' : 'Buscar banca na Betfair'}
+                    </Button>
+                  </div>
+
+                  <div className="grid md:grid-cols-3 gap-3">
+                    <div className="md:col-span-2">
+                      <Label htmlFor="betfairBankroll">Banca total (R$)</Label>
+                      <Input
+                        id="betfairBankroll"
+                        inputMode="decimal"
+                        placeholder="Ex: 1000"
+                        value={String(config.betfairBankroll ?? '')}
+                        onChange={(e) => {
+                          const raw = String(e.target.value ?? '').replace(',', '.');
+                          const n = Number(raw);
+                          setConfig({ ...config, betfairBankroll: Number.isFinite(n) ? n : 0 });
+                        }}
+                        className="mt-2"
+                      />
+                    </div>
+                    <div className="flex items-end justify-end">
+                      <Button onClick={handleSave} disabled={isSaving}>
+                        {isSaving ? 'Salvando…' : 'Salvar banca'}
+                      </Button>
+                    </div>
+                  </div>
+                </div>
               </div>
 
               <div className="mt-6 border-t pt-4">
@@ -1467,7 +1399,6 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
 
                 {(() => {
                   const raw = (config.betfairRobotLimits && typeof config.betfairRobotLimits === 'object') ? config.betfairRobotLimits : {};
-                  const scalping = (raw as any)?.scalpingGoals && typeof (raw as any).scalpingGoals === 'object' ? (raw as any).scalpingGoals : {};
                   const ticks = (raw as any)?.scalpingTicks && typeof (raw as any).scalpingTicks === 'object' ? (raw as any).scalpingTicks : {};
                   const over = (raw as any)?.overGoalsLimit && typeof (raw as any).overGoalsLimit === 'object' ? (raw as any).overGoalsLimit : {};
                   const asian = (raw as any)?.asianHandicap && typeof (raw as any).asianHandicap === 'object' ? (raw as any).asianHandicap : {};
@@ -1481,15 +1412,6 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
                       ...(patch ?? {}),
                     };
                     setConfig({ ...config, betfairRobotLimits: next });
-                  };
-
-                  const setScalping = (patch: any) => {
-                    setLimits({
-                      scalpingGoals: {
-                        ...(config.betfairRobotLimits?.scalpingGoals ?? {}),
-                        ...(patch ?? {}),
-                      },
-                    });
                   };
 
                   const setTicks = (patch: any) => {
@@ -1537,19 +1459,35 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
                     });
                   };
 
-                  const sgProfitPct = Number(scalping?.profitTargetPct);
-                  const sgStakePct = Number(scalping?.stakePct);
-                  const sgEntryOffsetTicks = Number(scalping?.entryOffsetTicks);
-                  const sgSecondsToWaitMatch = Number(scalping?.secondsToWaitMatch);
                   const stTargetTicks = Number(ticks?.targetTicks);
                   const stEntryOffsetTicks = Number(ticks?.entryOffsetTicks);
                   const stEntryMaxWaitSeconds = Number((ticks as any)?.entryMaxWaitSeconds);
                   const stMaxSpreadTicks = Number(ticks?.maxSpreadTicks);
                   const stMinSecondsBetweenCycles = Number(ticks?.minSecondsBetweenCycles);
                   const stStakePct = Number(ticks?.stakePct);
+                  const stStakeAbs = Number((ticks as any)?.stakeAbs);
+                  const stStakeModeRaw = String((ticks as any)?.stakeMode ?? '').trim().toLowerCase();
+                  const stStakeModeAbs =
+                    stStakeModeRaw === 'abs' ? true
+                      : stStakeModeRaw === 'pct' ? false
+                      : (Number.isFinite(stStakeAbs) && stStakeAbs > 0);
                   const stMaxCycles = Number(ticks?.maxCycles);
                   const stSecondsToWaitMatch = Number(ticks?.secondsToWaitMatch);
                   const stInvertVolumePct = Number(ticks?.invertVolumePct);
+                  const stOverReevalMinMinutes = Number((ticks as any)?.overReevalMinMinutes);
+                  const stOverReevalMaxMinutes = Number((ticks as any)?.overReevalMaxMinutes);
+                  const stLateNoGoalEnabled = Boolean((ticks as any)?.lateNoGoalEnabled ?? true);
+                  const stLateNoGoalMinMinute = Number((ticks as any)?.lateNoGoalMinMinute);
+                  const stLateUnderLimitEnabled = Boolean((ticks as any)?.lateUnderLimitEnabled ?? true);
+                  const stLateUnderLimitMinMinute = Number((ticks as any)?.lateUnderLimitMinMinute);
+                  const stLateUnderLimitTargetTicksMin = Number((ticks as any)?.lateUnderLimitTargetTicksMin);
+                  const stLateUnderLimitTargetTicksMax = Number((ticks as any)?.lateUnderLimitTargetTicksMax);
+                  const stLateUnderLimitMinSecondsBetweenCycles = Number((ticks as any)?.lateUnderLimitMinSecondsBetweenCycles);
+                  const stHedgeUnderEnabled = Boolean((ticks as any)?.hedgeUnderEnabled ?? true);
+                  const stHedgeUnderAboveGoals = Number((ticks as any)?.hedgeUnderAboveGoals);
+                  const stHedgeUnderMinMinute = Number((ticks as any)?.hedgeUnderMinMinute);
+                  const stHedgeUnderStakePct = Number((ticks as any)?.hedgeUnderStakePct);
+                  const stHedgeUnderTargetTicks = Number((ticks as any)?.hedgeUnderTargetTicks);
                   const stMomentOverThreshold = Number(ticks?.momentOverThreshold);
                   const stMomentOverThresholdLate = Number(ticks?.momentOverThresholdLate);
                   const stMomentOverThresholdOffDelta = Number(ticks?.momentOverThresholdOffDelta);
@@ -1568,6 +1506,7 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
                   const ogDominance = Number(over?.dominanceRatio);
                   const ogMinSeconds = Number(over?.minSecondsBetweenEntries);
                   const ogStakePct = Number(over?.stakePct);
+                  const ogStakeAbs = Number((over as any)?.stakeAbs);
                   const ogEntryOffsetTicks = Number(over?.entryOffsetTicks);
                   const ogSecondsToWaitMatch = Number(over?.secondsToWaitMatch);
                   const ahTargetTicks = Number(asian?.targetTicks);
@@ -1575,6 +1514,7 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
                   const ahMinMarketMatched = Number(asian?.minMarketMatched);
                   const ahMinRunnerMatched = Number(asian?.minRunnerMatched);
                   const ahStakePct = Number(asian?.stakePct);
+                  const ahStakeAbs = Number((asian as any)?.stakeAbs);
                   const ahProfitPct = Number(asian?.profitTargetPct);
                   const ahSecondsToWaitMatch = Number(asian?.secondsToWaitMatch);
                   const ahMaxEntries = Number((asian as any)?.maxEntries);
@@ -1589,6 +1529,13 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
                   const csMinProfitPct = Number(correctScore?.minProfitPct);
                   const csEntryScoresCsv = String(correctScore?.entryScoresCsv ?? '0-0,0-1,1-0,1-1');
                   const csMinMarketMatched = Number((correctScore as any)?.minMarketMatched);
+                  const csStakeAbs = Number((correctScore as any)?.stakeAbs);
+                  const csStakePct = Number((correctScore as any)?.stakePct);
+                  const csStakeModeRaw = String((correctScore as any)?.stakeMode ?? '').trim().toLowerCase();
+                  const csStakeModeAbs =
+                    csStakeModeRaw === 'abs' ? true
+                      : csStakeModeRaw === 'pct' ? false
+                      : (Number.isFinite(csStakeAbs) && csStakeAbs > 0);
 
                   const frEnabled = Boolean(favoriteRescue?.enabled ?? true);
                   const frMinFavProb = Number(favoriteRescue?.minFavWinProb);
@@ -1606,77 +1553,6 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
 
                   return (
                     <div className="mt-4 space-y-4">
-                      <div className="rounded-lg border border-gray-200 bg-white p-3">
-                        <div className="text-sm font-semibold text-gray-900">Scalping Gol Acima</div>
-                        <div className="text-xs text-gray-600 mt-1">Cashout automático quando atingir a meta de lucro.</div>
-                        <div className="mt-3 grid md:grid-cols-3 gap-3">
-                          <div>
-                            <Label htmlFor="sg_profitTargetPct">Meta de lucro (%)</Label>
-                            <Input
-                              id="sg_profitTargetPct"
-                              inputMode="decimal"
-                              placeholder="Ex: 10"
-                              value={Number.isFinite(sgProfitPct) ? String(Math.round(sgProfitPct * 10000) / 100) : ''}
-                              onChange={(e) => {
-                                const raw = String(e.target.value ?? '').replace(',', '.');
-                                const n = Number(raw);
-                                const v = Number.isFinite(n) ? Math.max(0, Math.min(100, n)) / 100 : 0.1;
-                                setScalping({ profitTargetPct: v });
-                              }}
-                              className="mt-2"
-                            />
-                          </div>
-                          <div>
-                            <Label htmlFor="sg_stakePct">Stake (% da cota)</Label>
-                            <Input
-                              id="sg_stakePct"
-                              inputMode="decimal"
-                              placeholder="Ex: 100"
-                              value={Number.isFinite(sgStakePct) ? String(Math.round(sgStakePct * 10000) / 100) : ''}
-                              onChange={(e) => {
-                                const raw = String(e.target.value ?? '').replace(',', '.');
-                                const n = Number(raw);
-                                const v = Number.isFinite(n) ? Math.max(1, Math.min(100, n)) / 100 : 1;
-                                setScalping({ stakePct: v });
-                              }}
-                              className="mt-2"
-                            />
-                          </div>
-                          <div>
-                            <Label htmlFor="sg_entryOffsetTicks">Ticks de entrada (±)</Label>
-                            <Input
-                              id="sg_entryOffsetTicks"
-                              inputMode="numeric"
-                              placeholder="Ex: 2"
-                              value={Number.isFinite(sgEntryOffsetTicks) ? String(Math.max(-10, Math.min(10, Math.trunc(sgEntryOffsetTicks)))) : ''}
-                              onChange={(e) => {
-                                const raw = String(e.target.value ?? '').replace(',', '.');
-                                const n = Number(raw);
-                                const v = Number.isFinite(n) ? Math.max(-10, Math.min(10, Math.trunc(n))) : 2;
-                                setScalping({ entryOffsetTicks: v });
-                              }}
-                              className="mt-2"
-                            />
-                          </div>
-                          <div>
-                            <Label htmlFor="sg_secondsToWaitMatch">Esperar corresponder (s)</Label>
-                            <Input
-                              id="sg_secondsToWaitMatch"
-                              inputMode="numeric"
-                              placeholder="Ex: 10"
-                              value={Number.isFinite(sgSecondsToWaitMatch) ? String(Math.max(1, Math.min(120, Math.floor(sgSecondsToWaitMatch)))) : ''}
-                              onChange={(e) => {
-                                const raw = String(e.target.value ?? '').replace(',', '.');
-                                const n = Number(raw);
-                                const v = Number.isFinite(n) ? Math.max(1, Math.min(120, Math.floor(n))) : 10;
-                                setScalping({ secondsToWaitMatch: v });
-                              }}
-                              className="mt-2"
-                            />
-                          </div>
-                        </div>
-                      </div>
-
                       <div className="rounded-lg border border-gray-200 bg-white p-3">
                         <div className="text-sm font-semibold text-gray-900">Scalping em Ticks</div>
                         <div className="text-xs text-gray-600 mt-1">Scalping no Under 0.5 acima do placar (0x0 → U1.5, 1 gol → U2.5, …).</div>
@@ -1783,17 +1659,57 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
                           </div>
 
                           <div>
-                            <Label htmlFor="st_stakePct">Stake (% da cota)</Label>
+                            <div className="flex items-center justify-between">
+                              <Label htmlFor="st_stake_value">Stake</Label>
+                              <div className="flex items-center gap-2">
+                                <div className="text-[11px] text-gray-600">% banca</div>
+                                <Switch
+                                  checked={stStakeModeAbs}
+                                  onCheckedChange={(checked) => {
+                                    const bankroll = Number(config.betfairBankroll ?? 0);
+                                    if (checked) {
+                                      const pct = Number(stStakePct);
+                                      const nextAbs =
+                                        Number.isFinite(stStakeAbs) && stStakeAbs > 0
+                                          ? Math.round(stStakeAbs * 100) / 100
+                                          : Number.isFinite(bankroll) && bankroll > 0 && Number.isFinite(pct) && pct > 0
+                                            ? Math.max(2, Math.round(((bankroll * pct) / 100) * 100) / 100)
+                                            : 2;
+                                      setTicks({ stakeMode: 'abs', stakeAbs: nextAbs, stakePct: 0 });
+                                      return;
+                                    }
+                                    const abs = Number(stStakeAbs);
+                                    const nextPct =
+                                      Number.isFinite(stStakePct) && stStakePct > 0
+                                        ? Math.round(stStakePct * 10000) / 10000
+                                        : Number.isFinite(bankroll) && bankroll > 0 && Number.isFinite(abs) && abs > 0
+                                          ? Math.max(0, Math.round(((abs / bankroll) * 100) * 10000) / 10000)
+                                          : 1;
+                                    setTicks({ stakeMode: 'pct', stakePct: nextPct, stakeAbs: 0 });
+                                  }}
+                                />
+                                <div className="text-[11px] text-gray-600">R$</div>
+                              </div>
+                            </div>
                             <Input
-                              id="st_stakePct"
+                              id="st_stake_value"
                               inputMode="decimal"
-                              placeholder="Ex: 100"
-                              value={Number.isFinite(stStakePct) ? String(Math.round(stStakePct * 10000) / 100) : ''}
+                              placeholder={stStakeModeAbs ? 'Ex: 2' : 'Ex: 1'}
+                              value={
+                                stStakeModeAbs
+                                  ? (Number.isFinite(stStakeAbs) ? String(Math.round(stStakeAbs * 100) / 100) : '')
+                                  : (Number.isFinite(stStakePct) ? String(Math.round(stStakePct * 10000) / 10000) : '')
+                              }
                               onChange={(e) => {
                                 const raw = String(e.target.value ?? '').replace(',', '.');
                                 const n = Number(raw);
-                                const v = Number.isFinite(n) ? Math.max(1, Math.min(100, n)) / 100 : 1;
-                                setTicks({ stakePct: v });
+                                if (stStakeModeAbs) {
+                                  const v = Number.isFinite(n) ? Math.max(0, Math.min(100000, Math.round(n * 100) / 100)) : 2;
+                                  setTicks({ stakeMode: 'abs', stakeAbs: v, stakePct: 0 });
+                                  return;
+                                }
+                                const v = Number.isFinite(n) ? Math.max(0, Math.min(100, Math.round(n * 10000) / 10000)) : 1;
+                                setTicks({ stakeMode: 'pct', stakePct: v, stakeAbs: 0 });
                               }}
                               className="mt-2"
                             />
@@ -1828,6 +1744,226 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
                                 const n = Number(raw);
                                 const v = Number.isFinite(n) ? Math.max(50, Math.min(1000, Math.floor(n))) : 300;
                                 setTicks({ invertVolumePct: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="st_overReevalMinMinutes">Reavaliar OVER (min)</Label>
+                            <Input
+                              id="st_overReevalMinMinutes"
+                              inputMode="numeric"
+                              placeholder="Ex: 5"
+                              value={Number.isFinite(stOverReevalMinMinutes) ? String(Math.max(1, Math.floor(stOverReevalMinMinutes))) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(1, Math.min(60, Math.floor(n))) : 5;
+                                setTicks({ overReevalMinMinutes: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="st_overReevalMaxMinutes">Reavaliar OVER (max)</Label>
+                            <Input
+                              id="st_overReevalMaxMinutes"
+                              inputMode="numeric"
+                              placeholder="Ex: 10"
+                              value={Number.isFinite(stOverReevalMaxMinutes) ? String(Math.max(1, Math.floor(stOverReevalMaxMinutes))) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(1, Math.min(60, Math.floor(n))) : 10;
+                                setTicks({ overReevalMaxMinutes: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <div className="flex items-center justify-between">
+                              <Label htmlFor="st_lateNoGoalEnabled">Late 0x0 (capturar ticks)</Label>
+                              <Switch
+                                id="st_lateNoGoalEnabled"
+                                checked={Boolean(stLateNoGoalEnabled)}
+                                onCheckedChange={(checked) => setTicks({ lateNoGoalEnabled: Boolean(checked) })}
+                              />
+                            </div>
+                          </div>
+
+                          <div>
+                            <Label htmlFor="st_lateNoGoalMinMinute">Late 0x0 (minuto)</Label>
+                            <Input
+                              id="st_lateNoGoalMinMinute"
+                              inputMode="numeric"
+                              placeholder="Ex: 80"
+                              value={Number.isFinite(stLateNoGoalMinMinute) ? String(Math.max(60, Math.floor(stLateNoGoalMinMinute))) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(60, Math.min(120, Math.floor(n))) : 80;
+                                setTicks({ lateNoGoalMinMinute: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <div className="flex items-center justify-between">
+                              <Label htmlFor="st_lateUnderLimitEnabled">Scalp Under limite (75+)</Label>
+                              <Switch
+                                id="st_lateUnderLimitEnabled"
+                                checked={Boolean(stLateUnderLimitEnabled)}
+                                onCheckedChange={(checked) => setTicks({ lateUnderLimitEnabled: Boolean(checked) })}
+                              />
+                            </div>
+                          </div>
+
+                          <div>
+                            <Label htmlFor="st_lateUnderLimitMinMinute">Scalp Under limite (minuto)</Label>
+                            <Input
+                              id="st_lateUnderLimitMinMinute"
+                              inputMode="numeric"
+                              placeholder="Ex: 75"
+                              value={Number.isFinite(stLateUnderLimitMinMinute) ? String(Math.max(0, Math.floor(stLateUnderLimitMinMinute))) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(0, Math.min(120, Math.floor(n))) : 75;
+                                setTicks({ lateUnderLimitMinMinute: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="st_lateUnderLimitTargetTicksMin">Scalp ticks (min)</Label>
+                            <Input
+                              id="st_lateUnderLimitTargetTicksMin"
+                              inputMode="numeric"
+                              placeholder="Ex: 5"
+                              value={Number.isFinite(stLateUnderLimitTargetTicksMin) ? String(Math.max(2, Math.floor(stLateUnderLimitTargetTicksMin))) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(2, Math.min(50, Math.floor(n))) : 5;
+                                setTicks({ lateUnderLimitTargetTicksMin: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="st_lateUnderLimitTargetTicksMax">Scalp ticks (max)</Label>
+                            <Input
+                              id="st_lateUnderLimitTargetTicksMax"
+                              inputMode="numeric"
+                              placeholder="Ex: 10"
+                              value={Number.isFinite(stLateUnderLimitTargetTicksMax) ? String(Math.max(2, Math.floor(stLateUnderLimitTargetTicksMax))) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(2, Math.min(50, Math.floor(n))) : 10;
+                                setTicks({ lateUnderLimitTargetTicksMax: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="st_lateUnderLimitMinSecondsBetweenCycles">Scalp cooldown (s)</Label>
+                            <Input
+                              id="st_lateUnderLimitMinSecondsBetweenCycles"
+                              inputMode="numeric"
+                              placeholder="Ex: 4"
+                              value={Number.isFinite(stLateUnderLimitMinSecondsBetweenCycles) ? String(Math.max(1, Math.floor(stLateUnderLimitMinSecondsBetweenCycles))) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(1, Math.min(120, Math.floor(n))) : 4;
+                                setTicks({ lateUnderLimitMinSecondsBetweenCycles: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <div className="flex items-center justify-between">
+                              <Label htmlFor="st_hedgeUnderEnabled">Hedge Under acima</Label>
+                              <Switch
+                                id="st_hedgeUnderEnabled"
+                                checked={Boolean(stHedgeUnderEnabled)}
+                                onCheckedChange={(checked) => setTicks({ hedgeUnderEnabled: Boolean(checked) })}
+                              />
+                            </div>
+                          </div>
+
+                          <div>
+                            <Label htmlFor="st_hedgeUnderAboveGoals">Hedge (gols acima)</Label>
+                            <Input
+                              id="st_hedgeUnderAboveGoals"
+                              inputMode="numeric"
+                              placeholder="Ex: 2"
+                              value={Number.isFinite(stHedgeUnderAboveGoals) ? String(Math.max(1, Math.floor(stHedgeUnderAboveGoals))) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(1, Math.min(4, Math.floor(n))) : 2;
+                                setTicks({ hedgeUnderAboveGoals: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="st_hedgeUnderMinMinute">Hedge (minuto)</Label>
+                            <Input
+                              id="st_hedgeUnderMinMinute"
+                              inputMode="numeric"
+                              placeholder="Ex: 70"
+                              value={Number.isFinite(stHedgeUnderMinMinute) ? String(Math.max(0, Math.floor(stHedgeUnderMinMinute))) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(0, Math.min(120, Math.floor(n))) : 70;
+                                setTicks({ hedgeUnderMinMinute: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="st_hedgeUnderStakePct">Hedge stake (% do stake)</Label>
+                            <Input
+                              id="st_hedgeUnderStakePct"
+                              inputMode="decimal"
+                              placeholder="Ex: 25"
+                              value={Number.isFinite(stHedgeUnderStakePct) ? String(Math.round(stHedgeUnderStakePct * 10000) / 100) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(5, Math.min(100, n)) / 100 : 0.25;
+                                setTicks({ hedgeUnderStakePct: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="st_hedgeUnderTargetTicks">Hedge TP (ticks)</Label>
+                            <Input
+                              id="st_hedgeUnderTargetTicks"
+                              inputMode="numeric"
+                              placeholder="Ex: 6"
+                              value={Number.isFinite(stHedgeUnderTargetTicks) ? String(Math.max(2, Math.floor(stHedgeUnderTargetTicks))) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(2, Math.min(50, Math.floor(n))) : 6;
+                                setTicks({ hedgeUnderTargetTicks: v });
                               }}
                               className="mt-2"
                             />
@@ -2040,17 +2176,62 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
                           </div>
 
                           <div>
-                            <Label htmlFor="ah_stakePct">Stake (% banca do mercado)</Label>
+                            <div className="flex items-center justify-between">
+                              <Label htmlFor="ah_stake_value">Stake</Label>
+                              <div className="flex items-center gap-2">
+                                <div className="text-[11px] text-gray-600">% banca</div>
+                                <Switch
+                                  checked={Number.isFinite(ahStakeAbs) && ahStakeAbs > 0 ? true : String((asian as any)?.stakeMode ?? '').trim().toLowerCase() === 'abs'}
+                                  onCheckedChange={(checked) => {
+                                    const bankroll = Number(config.betfairBankroll ?? 0);
+                                    if (checked) {
+                                      const pct = Number(ahStakePct);
+                                      const nextAbs =
+                                        Number.isFinite(ahStakeAbs) && ahStakeAbs > 0
+                                          ? Math.round(ahStakeAbs * 100) / 100
+                                          : Number.isFinite(bankroll) && bankroll > 0 && Number.isFinite(pct) && pct > 0
+                                            ? Math.max(2, Math.round(((bankroll * pct) / 100) * 100) / 100)
+                                            : 2;
+                                      setAsian({ stakeMode: 'abs', stakeAbs: nextAbs, stakePct: 0 });
+                                      return;
+                                    }
+                                    const abs = Number(ahStakeAbs);
+                                    const nextPct =
+                                      Number.isFinite(ahStakePct) && ahStakePct > 0
+                                        ? Math.round(ahStakePct * 10000) / 10000
+                                        : Number.isFinite(bankroll) && bankroll > 0 && Number.isFinite(abs) && abs > 0
+                                          ? Math.max(0, Math.round(((abs / bankroll) * 100) * 10000) / 10000)
+                                          : 1;
+                                    setAsian({ stakeMode: 'pct', stakePct: nextPct, stakeAbs: 0 });
+                                  }}
+                                />
+                                <div className="text-[11px] text-gray-600">R$</div>
+                              </div>
+                            </div>
                             <Input
-                              id="ah_stakePct"
+                              id="ah_stake_value"
                               inputMode="decimal"
-                              placeholder="Ex: 1"
-                              value={Number.isFinite(ahStakePct) ? String(Math.round(ahStakePct * 10000) / 100) : ''}
+                              placeholder={
+                                (Number.isFinite(ahStakeAbs) && ahStakeAbs > 0) || String((asian as any)?.stakeMode ?? '').trim().toLowerCase() === 'abs'
+                                  ? 'Ex: 2'
+                                  : 'Ex: 1'
+                              }
+                              value={
+                                ((Number.isFinite(ahStakeAbs) && ahStakeAbs > 0) || String((asian as any)?.stakeMode ?? '').trim().toLowerCase() === 'abs')
+                                  ? (Number.isFinite(ahStakeAbs) ? String(Math.round(ahStakeAbs * 100) / 100) : '')
+                                  : (Number.isFinite(ahStakePct) ? String(Math.round(ahStakePct * 10000) / 10000) : '')
+                              }
                               onChange={(e) => {
+                                const modeAbs = (Number.isFinite(ahStakeAbs) && ahStakeAbs > 0) || String((asian as any)?.stakeMode ?? '').trim().toLowerCase() === 'abs';
                                 const raw = String(e.target.value ?? '').replace(',', '.');
                                 const n = Number(raw);
-                                const v = Number.isFinite(n) ? Math.max(0, Math.min(100, n)) : 1;
-                                setAsian({ stakePct: v });
+                                if (modeAbs) {
+                                  const v = Number.isFinite(n) ? Math.max(0, Math.min(100000, Math.round(n * 100) / 100)) : 2;
+                                  setAsian({ stakeMode: 'abs', stakeAbs: v, stakePct: 0 });
+                                  return;
+                                }
+                                const v = Number.isFinite(n) ? Math.max(0, Math.min(100, Math.round(n * 10000) / 10000)) : 1;
+                                setAsian({ stakeMode: 'pct', stakePct: v, stakeAbs: 0 });
                               }}
                               className="mt-2"
                             />
@@ -2298,13 +2479,69 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
                             <Input
                               id="cs_minMarketMatched"
                               inputMode="numeric"
-                              placeholder="Ex: 1000"
+                              placeholder="Ex: 0"
                               value={Number.isFinite(csMinMarketMatched) ? String(Math.max(0, Math.floor(csMinMarketMatched))) : ''}
                               onChange={(e) => {
                                 const raw = String(e.target.value ?? '').replace(',', '.');
                                 const n = Number(raw);
-                                const v = Number.isFinite(n) ? Math.max(0, Math.floor(n)) : 1000;
+                                const v = Number.isFinite(n) ? Math.max(0, Math.floor(n)) : 0;
                                 setCorrectScore({ minMarketMatched: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+                          <div>
+                            <div className="flex items-center justify-between">
+                              <Label htmlFor="cs_stake_value">Stake por placar</Label>
+                              <div className="flex items-center gap-2">
+                                <div className="text-[11px] text-gray-600">% banca</div>
+                                <Switch
+                                  checked={csStakeModeAbs}
+                                  onCheckedChange={(checked) => {
+                                    const bankroll = Number(config.betfairBankroll ?? 0);
+                                    if (checked) {
+                                      const pct = Number(csStakePct);
+                                      const nextAbs =
+                                        Number.isFinite(csStakeAbs) && csStakeAbs > 0
+                                          ? Math.round(csStakeAbs * 100) / 100
+                                          : Number.isFinite(bankroll) && bankroll > 0 && Number.isFinite(pct) && pct > 0
+                                            ? Math.max(2, Math.round(((bankroll * pct) / 100) * 100) / 100)
+                                            : 2;
+                                      setCorrectScore({ stakeMode: 'abs', stakeAbs: nextAbs, stakePct: 0 });
+                                      return;
+                                    }
+                                    const abs = Number(csStakeAbs);
+                                    const nextPct =
+                                      Number.isFinite(csStakePct) && csStakePct > 0
+                                        ? Math.round(csStakePct * 10000) / 10000
+                                        : Number.isFinite(bankroll) && bankroll > 0 && Number.isFinite(abs) && abs > 0
+                                          ? Math.max(0, Math.round(((abs / bankroll) * 100) * 10000) / 10000)
+                                          : 1;
+                                    setCorrectScore({ stakeMode: 'pct', stakePct: nextPct, stakeAbs: 0 });
+                                  }}
+                                />
+                                <div className="text-[11px] text-gray-600">R$</div>
+                              </div>
+                            </div>
+                            <Input
+                              id="cs_stake_value"
+                              inputMode="decimal"
+                              placeholder={csStakeModeAbs ? 'Ex: 2' : 'Ex: 1'}
+                              value={
+                                csStakeModeAbs
+                                  ? (Number.isFinite(csStakeAbs) ? String(Math.round(csStakeAbs * 100) / 100) : '')
+                                  : (Number.isFinite(csStakePct) ? String(Math.round(csStakePct * 10000) / 10000) : '')
+                              }
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                if (csStakeModeAbs) {
+                                  const v = Number.isFinite(n) ? Math.max(0, Math.min(100000, Math.round(n * 100) / 100)) : 2;
+                                  setCorrectScore({ stakeMode: 'abs', stakeAbs: v, stakePct: 0 });
+                                  return;
+                                }
+                                const v = Number.isFinite(n) ? Math.max(0, Math.min(100, Math.round(n * 10000) / 10000)) : 1;
+                                setCorrectScore({ stakeMode: 'pct', stakePct: v, stakeAbs: 0 });
                               }}
                               className="mt-2"
                             />
@@ -2664,17 +2901,62 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
                           </div>
 
                           <div>
-                            <Label htmlFor="og_stakePct">Stake (% da cota)</Label>
+                            <div className="flex items-center justify-between">
+                              <Label htmlFor="og_stake_value">Stake</Label>
+                              <div className="flex items-center gap-2">
+                                <div className="text-[11px] text-gray-600">% banca</div>
+                                <Switch
+                                  checked={Number.isFinite(ogStakeAbs) && ogStakeAbs > 0 ? true : String((over as any)?.stakeMode ?? '').trim().toLowerCase() === 'abs'}
+                                  onCheckedChange={(checked) => {
+                                    const bankroll = Number(config.betfairBankroll ?? 0);
+                                    if (checked) {
+                                      const pct = Number(ogStakePct);
+                                      const nextAbs =
+                                        Number.isFinite(ogStakeAbs) && ogStakeAbs > 0
+                                          ? Math.round(ogStakeAbs * 100) / 100
+                                          : Number.isFinite(bankroll) && bankroll > 0 && Number.isFinite(pct) && pct > 0
+                                            ? Math.max(2, Math.round(((bankroll * pct) / 100) * 100) / 100)
+                                            : 2;
+                                      setOver({ stakeMode: 'abs', stakeAbs: nextAbs, stakePct: 0 });
+                                      return;
+                                    }
+                                    const abs = Number(ogStakeAbs);
+                                    const nextPct =
+                                      Number.isFinite(ogStakePct) && ogStakePct > 0
+                                        ? Math.round(ogStakePct * 10000) / 10000
+                                        : Number.isFinite(bankroll) && bankroll > 0 && Number.isFinite(abs) && abs > 0
+                                          ? Math.max(0, Math.round(((abs / bankroll) * 100) * 10000) / 10000)
+                                          : 1;
+                                    setOver({ stakeMode: 'pct', stakePct: nextPct, stakeAbs: 0 });
+                                  }}
+                                />
+                                <div className="text-[11px] text-gray-600">R$</div>
+                              </div>
+                            </div>
                             <Input
-                              id="og_stakePct"
+                              id="og_stake_value"
                               inputMode="decimal"
-                              placeholder="Ex: 100"
-                              value={Number.isFinite(ogStakePct) ? String(Math.round(ogStakePct * 10000) / 100) : ''}
+                              placeholder={
+                                (Number.isFinite(ogStakeAbs) && ogStakeAbs > 0) || String((over as any)?.stakeMode ?? '').trim().toLowerCase() === 'abs'
+                                  ? 'Ex: 2'
+                                  : 'Ex: 1'
+                              }
+                              value={
+                                ((Number.isFinite(ogStakeAbs) && ogStakeAbs > 0) || String((over as any)?.stakeMode ?? '').trim().toLowerCase() === 'abs')
+                                  ? (Number.isFinite(ogStakeAbs) ? String(Math.round(ogStakeAbs * 100) / 100) : '')
+                                  : (Number.isFinite(ogStakePct) ? String(Math.round(ogStakePct * 10000) / 10000) : '')
+                              }
                               onChange={(e) => {
+                                const modeAbs = (Number.isFinite(ogStakeAbs) && ogStakeAbs > 0) || String((over as any)?.stakeMode ?? '').trim().toLowerCase() === 'abs';
                                 const raw = String(e.target.value ?? '').replace(',', '.');
                                 const n = Number(raw);
-                                const v = Number.isFinite(n) ? Math.max(1, Math.min(100, n)) / 100 : 1;
-                                setOver({ stakePct: v });
+                                if (modeAbs) {
+                                  const v = Number.isFinite(n) ? Math.max(0, Math.min(100000, Math.round(n * 100) / 100)) : 2;
+                                  setOver({ stakeMode: 'abs', stakeAbs: v, stakePct: 0 });
+                                  return;
+                                }
+                                const v = Number.isFinite(n) ? Math.max(0, Math.min(100, Math.round(n * 10000) / 10000)) : 1;
+                                setOver({ stakeMode: 'pct', stakePct: v, stakeAbs: 0 });
                               }}
                               className="mt-2"
                             />

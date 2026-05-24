@@ -2314,11 +2314,13 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
     const enqueueAutomation = async (m: DisplayMatch, pred: any) => {
       const { projectId } = await import('/utils/supabase/info');
       const headers = await getEdgeHeaders();
+      const fixtureId = apiSource === 'api-football' ? (Number.isFinite(Number(m.id)) && Number(m.id) > 0 ? Math.floor(Number(m.id)) : null) : null;
       const res = await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/queue/add`, {
         method: 'POST',
         headers,
         body: JSON.stringify({
           matchId: m.id,
+          fixtureId,
           source: apiSource,
           utcDate: m.date ? new Date(m.date).toISOString() : null,
           homeTeam: m.homeTeam,

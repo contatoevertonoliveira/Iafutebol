@@ -685,6 +685,7 @@ export default function GeneralMatchesPage() {
         headers,
         body: JSON.stringify({
           matchId: fixtureId,
+          fixtureId: Number(fixtureId),
           source: 'api-football',
           utcDate: utcDate || null,
           homeTeam: homeTeam || null,

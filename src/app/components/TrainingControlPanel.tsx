@@ -11,7 +11,7 @@ import { Progress } from './ui/progress';
 import { Switch } from './ui/switch';
 import { Label } from './ui/label';
 import { toast } from 'sonner';
-import { hydrateMetaModelFromServer, importTrainingSamplesFromCsvText } from '../services/aiAgents';
+import { getTrainingSamplesCountFromServer, hydrateMetaModelFromServer, importTrainingSamplesFromCsvText } from '../services/aiAgents';
 import { loadApiConfig } from '../services/apiConfig';
 import {
   trainingWorker,
@@ -49,6 +49,10 @@ export default function TrainingControlPanel({ className = '' }: TrainingControl
   const [datasets, setDatasets] = useState<IncrementalDataset[]>([]);
   const [isDownloading, setIsDownloading] = useState(false);
   const [summary, setSummary] = useState(getTrainingSummary());
+  const [localSamplesTotal, setLocalSamplesTotal] = useState(0);
+  const [localSamplesToday, setLocalSamplesToday] = useState(0);
+  const [serverSamplesTotal, setServerSamplesTotal] = useState<number | null>(null);
+  const lastServerSamplesRefreshAtRef = useRef(0);
   const [selectedAgentIds, setSelectedAgentIds] = useState<string[]>([]);
   const [kaggleCsvFile, setKaggleCsvFile] = useState<File | null>(null);
   const [isImportingKaggle, setIsImportingKaggle] = useState(false);
@@ -103,6 +107,29 @@ export default function TrainingControlPanel({ className = '' }: TrainingControl
     setCurrentSession(trainingWorker.getCurrentSession());
     setDatasets(loadIncrementalDatasets());
     setSummary(getTrainingSummary());
+    try {
+      const raw = localStorage.getItem('training_samples_v1');
+      const parsed = raw ? (JSON.parse(raw) as any) : null;
+      const items = parsed && parsed.version === 1 && parsed.items && typeof parsed.items === 'object' ? parsed.items : {};
+      const rows = Object.values(items) as any[];
+      setLocalSamplesTotal(rows.length);
+
+      const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+      const todayCount = rows.filter((s) => s && typeof s === 'object' && typeof (s as any).day === 'string' && String((s as any).day) === today).length;
+      setLocalSamplesToday(todayCount);
+    } catch {
+      setLocalSamplesTotal(0);
+      setLocalSamplesToday(0);
+    }
+
+    const now = Date.now();
+    if (now - lastServerSamplesRefreshAtRef.current > 30_000) {
+      lastServerSamplesRefreshAtRef.current = now;
+      void (async () => {
+        const n = await getTrainingSamplesCountFromServer().catch(() => null);
+        setServerSamplesTotal(typeof n === 'number' && Number.isFinite(n) ? n : null);
+      })();
+    }
   };
 
   const norm = (s: string) => String(s ?? '').trim().toLowerCase().replaceAll(' ', '').replaceAll('-', '_');
@@ -1117,7 +1144,7 @@ export default function TrainingControlPanel({ className = '' }: TrainingControl
           Estatísticas de Treinamento
         </h3>
         
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <div className="grid grid-cols-2 md:grid-cols-6 gap-4">
           <div className="bg-blue-50 rounded-lg p-4 border border-blue-200">
             <div className="text-sm text-blue-700 mb-1">Sessões Totais</div>
             <div className="text-2xl font-bold text-blue-900">{summary.totalSessions}</div>
@@ -1136,6 +1163,19 @@ export default function TrainingControlPanel({ className = '' }: TrainingControl
           <div className="bg-purple-50 rounded-lg p-4 border border-purple-200">
             <div className="text-sm text-purple-700 mb-1">Melhoria Média (simulado)</div>
             <div className="text-2xl font-bold text-purple-900">+{summary.averageAccuracyImprovement}%</div>
+          </div>
+
+          <div className="bg-gray-50 rounded-lg p-4 border border-gray-200">
+            <div className="text-sm text-gray-700 mb-1">Amostras reais (hoje)</div>
+            <div className="text-2xl font-bold text-gray-900">{localSamplesToday.toLocaleString()}</div>
+          </div>
+
+          <div className="bg-emerald-50 rounded-lg p-4 border border-emerald-200">
+            <div className="text-sm text-emerald-700 mb-1">Amostras reais (servidor)</div>
+            <div className="text-2xl font-bold text-emerald-900">
+              {typeof serverSamplesTotal === 'number' ? serverSamplesTotal.toLocaleString() : '—'}
+            </div>
+            <div className="text-xs text-emerald-800 mt-1">Local: {localSamplesTotal.toLocaleString()}</div>
           </div>
         </div>
         

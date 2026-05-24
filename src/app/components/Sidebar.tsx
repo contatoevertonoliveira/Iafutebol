@@ -1,11 +1,7 @@
 import { NavLink } from 'react-router';
 import { 
   Home, 
-  TrendingUp, 
-  Calendar, 
-  BarChart3, 
   Bot,
-  Trophy, 
   Activity,
   Globe,
   Star,
@@ -19,12 +15,8 @@ import {
 export function Sidebar({ collapsed = false, onToggle }: { collapsed?: boolean; onToggle?: () => void }) {
   const navItems = [
     { to: '/', icon: Home, label: 'Início' },
-    { to: '/today', icon: Calendar, label: 'Hoje' },
-    { to: '/week', icon: TrendingUp, label: 'Esta Semana' },
-    { to: '/month', icon: BarChart3, label: 'Este Mês' },
     { to: '/panorama', icon: Activity, label: 'Panorama do Dia' },
     { to: '/general', icon: Globe, label: 'Jogos em Geral' },
-    { to: '/leagues', icon: Trophy, label: 'Ligas' },
     { to: '/agents', icon: Brain, label: 'Agentes IA' },
     { to: '/bots', icon: Bot, label: 'Bots' },
     { to: '/automation', icon: Zap, label: 'Automação' },
@@ -85,58 +77,6 @@ export function Sidebar({ collapsed = false, onToggle }: { collapsed?: boolean; 
           ))}
         </div>
 
-        {/* Seção de Ligas Principais */}
-        {!collapsed ? (
-        <div className="mt-8">
-          <div className="px-4 mb-3">
-            <h3 className="text-xs uppercase text-gray-500 font-semibold">Ligas Principais</h3>
-          </div>
-          <div className="space-y-1">
-            <NavLink
-              to="/leagues?league=Premier%20League&country=Inglaterra"
-              className="w-full block text-left px-4 py-2 text-sm text-gray-300 hover:bg-gray-700 hover:text-white rounded-lg transition-colors"
-            >
-              🏴 Premier League
-            </NavLink>
-            <NavLink
-              to="/leagues?league=La%20Liga&country=Espanha"
-              className="w-full block text-left px-4 py-2 text-sm text-gray-300 hover:bg-gray-700 hover:text-white rounded-lg transition-colors"
-            >
-              🇪🇸 La Liga
-            </NavLink>
-            <NavLink
-              to="/leagues?league=Serie%20A&country=Itália"
-              className="w-full block text-left px-4 py-2 text-sm text-gray-300 hover:bg-gray-700 hover:text-white rounded-lg transition-colors"
-            >
-              🇮🇹 Serie A
-            </NavLink>
-            <NavLink
-              to="/leagues?league=Bundesliga&country=Alemanha"
-              className="w-full block text-left px-4 py-2 text-sm text-gray-300 hover:bg-gray-700 hover:text-white rounded-lg transition-colors"
-            >
-              🇩🇪 Bundesliga
-            </NavLink>
-            <NavLink
-              to="/leagues?league=Ligue%201&country=França"
-              className="w-full block text-left px-4 py-2 text-sm text-gray-300 hover:bg-gray-700 hover:text-white rounded-lg transition-colors"
-            >
-              🇫🇷 Ligue 1
-            </NavLink>
-            <NavLink
-              to="/leagues?league=Brasileirão%20Série%20A&country=Brasil"
-              className="w-full block text-left px-4 py-2 text-sm text-gray-300 hover:bg-gray-700 hover:text-white rounded-lg transition-colors"
-            >
-              🇧🇷 Brasileirão
-            </NavLink>
-            <NavLink
-              to="/leagues?league=UEFA%20Champions%20League"
-              className="w-full block text-left px-4 py-2 text-sm text-gray-300 hover:bg-gray-700 hover:text-white rounded-lg transition-colors"
-            >
-              ⭐ Champions League
-            </NavLink>
-          </div>
-        </div>
-        ) : null}
       </nav>
 
       {/* Footer */}

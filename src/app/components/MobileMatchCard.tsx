@@ -88,14 +88,11 @@ const computeRobotTraffic = (item: any) => {
   const agent =
     agentRaw === 'overgoalslimit' || agentRaw === 'over_goals_limit'
       ? 'overGoalsLimit'
-      : agentRaw === 'scalpinggoals' || agentRaw === 'scalping_goals' || agentRaw === 'scalping_goals_above'
-        ? 'scalpingGoals'
-        : agentRaw === 'scalpingticks' || agentRaw === 'scalping_ticks'
-          ? 'scalpingTicks'
-          : 'correctScore';
+      : agentRaw === 'scalpingticks' || agentRaw === 'scalping_ticks' || agentRaw === 'scalpinggoals' || agentRaw === 'scalping_goals' || agentRaw === 'scalping_goals_above'
+        ? 'scalpingTicks'
+        : 'correctScore';
 
   const phase = (() => {
-    if (agent === 'scalpingGoals') return String(item?.strategy?.scalpingGoals?.phase ?? '').trim();
     if (agent === 'scalpingTicks') return String(item?.strategy?.scalpingTicks?.phase ?? '').trim();
     if (agent === 'overGoalsLimit') return String(item?.strategy?.overGoalsLimit?.phase ?? '').trim();
     return String(item?.strategy?.correctScore?.lastPlan?.mode ?? item?.strategy?.correctScore?.planType ?? '').trim();
@@ -108,8 +105,7 @@ const computeRobotTraffic = (item: any) => {
   if (hasError) return { label: 'Erro no Robô!', className: 'bg-red-600 text-white border-red-700' };
 
   const lastIso = (() => {
-    if (agent === 'scalpingGoals') return String(item?.strategy?.scalpingGoals?.lastTickAt ?? '').trim();
-    if (agent === 'scalpingTicks') return String(item?.strategy?.scalpingTicks?.lastTickAt ?? '').trim();
+    if (agent === 'scalpingTicks') return String(item?.strategy?.scalpingTicks?.lastTickAt ?? item?.strategy?.scalpingGoals?.lastTickAt ?? '').trim();
     if (agent === 'overGoalsLimit') return String(item?.strategy?.overGoalsLimit?.lastTickAt ?? '').trim();
     const exec = String(item?.strategy?.correctScore?.lastExecutionAt ?? '').trim();
     if (exec) return exec;
@@ -118,8 +114,7 @@ const computeRobotTraffic = (item: any) => {
     return String(item?.updatedAt ?? '').trim();
   })();
   const lastMs = lastIso ? new Date(lastIso).getTime() : NaN;
-  const maxAgeMs =
-    agent === 'scalpingTicks' ? 12_000 : agent === 'scalpingGoals' ? 20_000 : agent === 'overGoalsLimit' ? 20_000 : 45_000;
+  const maxAgeMs = agent === 'scalpingTicks' ? 12_000 : agent === 'overGoalsLimit' ? 20_000 : 45_000;
   if (Number.isFinite(lastMs) && Date.now() - lastMs > maxAgeMs) {
     return { label: 'Oscilando', className: 'bg-amber-200 text-amber-950 border-amber-300' };
   }
@@ -528,11 +523,26 @@ export function MobileMatchCard({
     try {
       const { projectId } = await import('/utils/supabase/info');
       const headers = await getEdgeHeaders();
+      let fixtureId: number | null = null;
+      if (apiSource === 'api-football') {
+        const fid = Number(match.id);
+        fixtureId = Number.isFinite(fid) && fid > 0 ? Math.floor(fid) : null;
+      } else {
+        const cfg = loadApiConfig();
+        const apiFootballKey = String(cfg?.apiFootballKey ?? '').trim();
+        if (apiFootballKey) {
+          const service = new ApiFootballService(apiFootballKey);
+          const resolved = await resolveTeamIdsViaFixtureDate(service, match);
+          const fid = Number(resolved?.fixture?.fixture?.id);
+          fixtureId = Number.isFinite(fid) && fid > 0 ? Math.floor(fid) : null;
+        }
+      }
       const res = await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/queue/add`, {
         method: 'POST',
         headers,
         body: JSON.stringify({
           matchId: match.id,
+          fixtureId,
           source: apiSource,
           utcDate: match.date ? new Date(match.date).toISOString() : null,
           homeTeam: match.homeTeam,
@@ -746,6 +756,19 @@ export function MobileMatchCard({
     const layAway = Math.max(0, 100 - prob.away);
     return { over15, bttsYes, layHome, layAway };
   })();
+
+  const ahDisplay = useMemo(() => {
+    const ah = prediction?.asianHandicap as any;
+    if (!ah || typeof ah !== 'object') return null;
+    const team = ah.team === 'away' ? ('away' as const) : ah.team === 'home' ? ('home' as const) : null;
+    const lineRaw = Number(ah.line);
+    const confRaw = Number(ah.confidence);
+    if (!team || !Number.isFinite(lineRaw) || !Number.isFinite(confRaw)) return null;
+    const lineBase = Math.abs(lineRaw % 1) < 1e-9 ? lineRaw.toFixed(0) : lineRaw.toFixed(2);
+    const line = lineBase.replace(/0+$/g, '').replace(/\.$/g, '');
+    const signedLine = `${lineRaw > 0 ? '+' : ''}${line}`;
+    return { team, teamLabel: team === 'home' ? 'Casa' : 'Fora', signedLine, confidence: Math.round(confRaw) };
+  }, [prediction]);
 
   useEffect(() => {
     if (!formOpen) return;
@@ -1102,6 +1125,11 @@ export function MobileMatchCard({
             {signals.over15 !== null ? (
               <div className="text-[11px] font-semibold px-3 py-1 rounded-full bg-blue-100 text-blue-800 border border-blue-200">
                 Over 1.5 {signals.over15}%
+              </div>
+            ) : null}
+            {ahDisplay ? (
+              <div className="text-[11px] font-semibold px-3 py-1 rounded-full bg-orange-100 text-orange-800 border border-orange-200 tabular-nums">
+                AH {ahDisplay.teamLabel} {ahDisplay.signedLine} {ahDisplay.confidence}%
               </div>
             ) : null}
             <div className="text-[11px] font-semibold px-3 py-1 rounded-full bg-gray-100 text-gray-800 border border-gray-200">
@@ -1588,6 +1616,11 @@ export function MobileMatchCard({
                             <div className="text-[11px] font-semibold px-2 py-1 rounded-full border bg-gray-100 text-gray-800 border-gray-200 tabular-nums">
                               Placar: {prediction.correctScore.score} {Math.round(prediction.correctScore.confidence)}%
                             </div>
+                            {ahDisplay ? (
+                              <div className="text-[11px] font-semibold px-2 py-1 rounded-full border bg-orange-100 text-orange-800 border-orange-200 tabular-nums">
+                                AH: {ahDisplay.teamLabel} ({ahDisplay.signedLine}) {ahDisplay.confidence}%
+                              </div>
+                            ) : null}
                           </div>
                         </div>
                       ) : null}

@@ -169,6 +169,7 @@ export interface AgentProfile {
     winner: number;
     btts: number;
     overUnder: number;
+    asianHandicap?: number;
   };
   marketKeyStats?: Record<string, { total: number; correct: number; accuracy: number }>;
   topMarkets?: Array<{ key: string; label: string; total: number; correct: number; accuracy: number }>;
@@ -201,6 +202,7 @@ type TrainingSample = {
     overUnder: AgentPrediction['overUnder'];
     btts: AgentPrediction['btts'];
     correctScore: AgentPrediction['correctScore'];
+    asianHandicap?: AgentPrediction['asianHandicap'];
   }>;
 };
 
@@ -581,6 +583,7 @@ const buildTrainingSample = (match: FootballMatch, predictions: AgentPrediction[
       overUnder: p.overUnder,
       btts: p.btts,
       correctScore: p.correctScore,
+      asianHandicap: (p as any)?.asianHandicap ?? undefined,
     })),
   };
 
@@ -1018,6 +1021,29 @@ export function recordTrainingSample(match: FootballMatch, predictions: AgentPre
   if (!sample) return false;
   if (TRAINING_SAMPLES_SEEN_IDS.has(sample.id)) return false;
   TRAINING_SAMPLES_SEEN_IDS.add(sample.id);
+  try {
+    const key = 'training_samples_v1';
+    const raw = localStorage.getItem(key);
+    const parsed = raw ? (JSON.parse(raw) as any) : null;
+    const base =
+      parsed && parsed.version === 1 && parsed.items && typeof parsed.items === 'object'
+        ? (parsed as { version: 1; items: Record<string, TrainingSample> })
+        : ({ version: 1 as const, items: {} as Record<string, TrainingSample> });
+
+    if (!base.items[sample.id]) {
+      base.items[sample.id] = sample;
+      const ids = Object.keys(base.items);
+      const maxKeep = 1500;
+      if (ids.length > maxKeep) {
+        const rows = Object.values(base.items)
+          .filter(Boolean)
+          .sort((a, b) => String(a.utcDate).localeCompare(String(b.utcDate)));
+        const toRemove = rows.slice(0, Math.max(0, rows.length - maxKeep));
+        for (const r of toRemove) delete base.items[r.id];
+      }
+      localStorage.setItem(key, JSON.stringify(base));
+    }
+  } catch {}
   void upsertTrainingSamplesToServer([sample]).catch(() => {});
   return true;
 }
@@ -1205,6 +1231,7 @@ export function getDynamicAgentProfiles(): AgentProfile[] {
     const winnerAccV3 = aggByPrefix('winner:');
     const bttsAccV3 = aggByPrefix('btts:');
     const ouAccV3 = aggByPrefix('ou:');
+    const ahAccV3 = aggByPrefix('ah:');
 
     return {
       ...agent,
@@ -1213,6 +1240,7 @@ export function getDynamicAgentProfiles(): AgentProfile[] {
         winner: Math.min(95, Math.max(40, winnerAccV3 ?? winnerAcc)),
         btts: Math.min(95, Math.max(40, bttsAccV3 ?? bttsAcc)),
         overUnder: Math.min(95, Math.max(40, ouAccV3 ?? overUnderAcc)),
+        ...(ahAccV3 != null ? { asianHandicap: Math.min(95, Math.max(40, ahAccV3)) } : {}),
       },
       marketKeyStats,
       topMarkets,
@@ -1238,6 +1266,28 @@ export function learnFromMatchResult(match: FootballMatch, predictions: AgentPre
     if (!Number.isFinite(line)) return '2.5';
     const s = Math.abs(line % 1) < 1e-9 ? line.toFixed(0) : line.toFixed(2);
     return s.replace(/0+$/g, '').replace(/\.$/g, '');
+  };
+
+  const asianHandicapProfitUnits = (teamGoals: number, oppGoals: number, line: number) => {
+    if (!Number.isFinite(line)) return null;
+    const diff = teamGoals - oppGoals;
+    const q = Math.round(line * 4) / 4;
+    const frac = ((q % 1) + 1) % 1;
+
+    const settleSingle = (ln: number) => {
+      const v = diff + ln;
+      if (v > 0) return 1;
+      if (v < 0) return -1;
+      return 0;
+    };
+
+    if (Math.abs(frac - 0.25) < 1e-9) {
+      return 0.5 * settleSingle(q - 0.25) + 0.5 * settleSingle(q + 0.25);
+    }
+    if (Math.abs(frac - 0.75) < 1e-9) {
+      return 0.5 * settleSingle(q - 0.25) + 0.5 * settleSingle(q + 0.25);
+    }
+    return settleSingle(q);
   };
 
   const historyRaw = localStorage.getItem('agent_learning_history');
@@ -1290,6 +1340,19 @@ export function learnFromMatchResult(match: FootballMatch, predictions: AgentPre
     const ouLine = typeof p.overUnder?.line === 'number' ? p.overUnder.line : 2.5;
     const ouOk = p.overUnder?.prediction === realOverUnderForLine(ouLine);
     const csOk = String(p.correctScore?.score ?? '') === `${homeScore}-${awayScore}`;
+    const ahOk = (() => {
+      const ah = (p as any)?.asianHandicap;
+      const team = String(ah?.team ?? '').trim().toLowerCase();
+      const line = Number(ah?.line);
+      if (!(team === 'home' || team === 'away')) return null;
+      if (!Number.isFinite(line)) return null;
+      const profitUnits =
+        team === 'home'
+          ? asianHandicapProfitUnits(homeScore, awayScore, line)
+          : asianHandicapProfitUnits(awayScore, homeScore, line);
+      if (typeof profitUnits !== 'number' || !Number.isFinite(profitUnits)) return null;
+      return profitUnits >= 0;
+    })();
 
     if (shouldScoreWinnerMarket) {
       rec.total += 1;
@@ -1326,6 +1389,12 @@ export function learnFromMatchResult(match: FootballMatch, predictions: AgentPre
     bump(`btts:${p.btts?.prediction}`, bttsOk);
     bump(`ou:${p.overUnder?.prediction}:${formatLineKey(ouLine)}`, ouOk);
     bump(`cs:${p.correctScore?.score}`, csOk);
+    if (ahOk != null) {
+      const ah = (p as any)?.asianHandicap;
+      const team = String(ah?.team ?? '').trim().toLowerCase();
+      const line = Number(ah?.line);
+      bump(`ah:${team}:${formatLineKey(line)}`, ahOk);
+    }
   });
 
   localStorage.setItem('agent_learning_history', JSON.stringify(history));
