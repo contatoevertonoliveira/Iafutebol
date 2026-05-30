@@ -695,6 +695,7 @@ export default function GeneralMatchesPage() {
           scoreHome,
           scoreAway,
           prediction: prediction ?? null,
+          includeCorrectScore: true,
         }),
       });
       const raw = await res.text().catch(() => '');

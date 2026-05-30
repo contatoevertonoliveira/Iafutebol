@@ -323,8 +323,20 @@ const betfairJsonRpcRawWithUrl = async (params: { url: string; method: string; p
     body: JSON.stringify([{ jsonrpc: "2.0", id: 1, method, params: params.params ?? {} }]),
   });
 
-  const data = await res.json().catch(() => null);
-  if (!res.ok) throw new Error(`Betfair API falhou (HTTP ${res.status})`);
+  const text = await res.text().catch(() => "");
+  const data = (() => {
+    try {
+      return text ? JSON.parse(text) : null;
+    } catch {
+      return null;
+    }
+  })();
+  if (!res.ok) {
+    const isSessionInvalid = res.status === 401 || res.status === 403 || /INVALID_SESSION|NO_SESSION|SESSION.*INVALID/i.test(text);
+    const err = new Error(`Betfair API falhou (HTTP ${res.status})${text ? `: ${text.slice(0, 260)}` : ""}`) as any;
+    err.__betfairSessionInvalid = isSessionInvalid;
+    throw err;
+  }
   const first = Array.isArray(data) ? data[0] : data;
   if (first?.error) {
     const msg = first?.error?.message ? String(first.error.message) : JSON.stringify(first.error);
@@ -534,7 +546,9 @@ Deno.serve(async (req) => {
       const marketIds = Array.isArray((body as any)?.marketIds) ? (body as any).marketIds.map(String).filter(Boolean).slice(0, 50) : null;
       const orderProjection = String((body as any)?.orderProjection ?? "").trim() || "ALL";
       const sessionToken = await getBetfairSessionToken();
-      const result = await betfairJsonRpcTrading({
+      let result: any = null;
+      try {
+        result = await betfairJsonRpcTrading({
         method: "SportsAPING/v1.0/listCurrentOrders",
         params: {
           ...(betIds && betIds.length > 0 ? { betIds } : {}),
@@ -543,6 +557,20 @@ Deno.serve(async (req) => {
         },
         sessionToken,
       });
+      } catch (e) {
+        const invalid = Boolean((e as any)?.__betfairSessionInvalid);
+        if (!invalid) throw e;
+        const refreshed = await getBetfairSessionToken({ force: true });
+        result = await betfairJsonRpcTrading({
+          method: "SportsAPING/v1.0/listCurrentOrders",
+          params: {
+            ...(betIds && betIds.length > 0 ? { betIds } : {}),
+            ...(marketIds && marketIds.length > 0 ? { marketIds } : {}),
+            orderProjection,
+          },
+          sessionToken: refreshed,
+        });
+      }
       return json({ ok: true, result });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

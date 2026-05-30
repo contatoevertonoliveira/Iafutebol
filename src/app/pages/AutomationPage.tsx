@@ -122,6 +122,9 @@ type DailyOperationRow = {
   returnPct: number | null;
 };
 
+type DailyOpsStoreV1 = { version: 1; ymd: string; items: Record<string, DailyOperationRow> };
+type DailyOpsStoreV2 = { version: 2; days: Record<string, { items: Record<string, DailyOperationRow> }> };
+
 type MatchStatus = 'scheduled' | 'live' | 'finished';
 
 const TIME_ZONE = 'America/Sao_Paulo';
@@ -485,30 +488,55 @@ export default function AutomationPage() {
     return new Intl.DateTimeFormat('en-CA', { timeZone: TIME_ZONE, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
   };
 
-  const readDailyOpsStore = () => {
-    const ymd = todayYmd();
+  const ensureDailyOpsStoreV2 = (parsed: any): DailyOpsStoreV2 => {
+    if (parsed && typeof parsed === 'object') {
+      if (parsed.version === 2 && parsed.days && typeof parsed.days === 'object') {
+        return parsed as DailyOpsStoreV2;
+      }
+      if (parsed.version === 1 && typeof parsed.ymd === 'string' && parsed.items && typeof parsed.items === 'object') {
+        const ymd = String(parsed.ymd);
+        const items = parsed.items as Record<string, DailyOperationRow>;
+        return { version: 2, days: { [ymd]: { items } } };
+      }
+    }
+    return { version: 2, days: {} };
+  };
+
+  const readDailyOpsStore = (): DailyOpsStoreV2 => {
     try {
       const raw = localStorage.getItem(dailyOpsKey);
       const parsed = raw ? (JSON.parse(raw) as any) : null;
-      if (!parsed || parsed.version !== 1 || parsed.ymd !== ymd || !parsed.items || typeof parsed.items !== 'object') {
-        return { version: 1 as const, ymd, items: {} as Record<string, DailyOperationRow> };
-      }
-      return parsed as { version: 1; ymd: string; items: Record<string, DailyOperationRow> };
+      return ensureDailyOpsStoreV2(parsed);
     } catch {
-      return { version: 1 as const, ymd, items: {} as Record<string, DailyOperationRow> };
+      return { version: 2, days: {} };
     }
   };
 
-  const writeDailyOpsStore = (next: { version: 1; ymd: string; items: Record<string, DailyOperationRow> }) => {
+  const writeDailyOpsStore = (next: DailyOpsStoreV2) => {
     try {
       localStorage.setItem(dailyOpsKey, JSON.stringify(next));
     } catch {}
   };
 
+  const [historyYmd, setHistoryYmd] = useState<string>(() => todayYmd());
+
   const [dailyOps, setDailyOps] = useState<DailyOperationRow[]>(() => {
+    const ymd = todayYmd();
     const store = readDailyOpsStore();
-    return Object.values(store.items).sort((a, b) => String(b.at).localeCompare(String(a.at)));
+    const items = store.days?.[ymd]?.items ?? {};
+    return Object.values(items).sort((a, b) => String(b.at).localeCompare(String(a.at)));
   });
+
+  useEffect(() => {
+    const ymd = String(historyYmd ?? '').trim() || todayYmd();
+    if (ymd !== historyYmd) {
+      setHistoryYmd(ymd);
+      return;
+    }
+    const store = readDailyOpsStore();
+    const items = store.days?.[ymd]?.items ?? {};
+    setDailyOps(Object.values(items).sort((a, b) => String(b.at).localeCompare(String(a.at))));
+  }, [historyYmd]);
 
   const [centralDb, setCentralDb] = useState<{ version: 1; updatedAt: string; items: Record<string, any> }>(() => ({
     version: 1,
@@ -1198,6 +1226,7 @@ export default function AutomationPage() {
       if (agent === 'favoriteRescue') return 'Agente Independente';
       if (agent === 'scalpingTicks') return 'Scalping Ticks';
       if (agent === 'overGoalsLimit') return 'Over Limite';
+      if (agent === 'overGoalsHT') return 'Over Gol HT';
       if (agent === 'asianHandicap') return 'Handicap';
       if (agent === 'correctScore') return 'Correct Score';
       return agent || '—';
@@ -1216,15 +1245,10 @@ export default function AutomationPage() {
       return raw;
     };
 
-    const nowStore = readDailyOpsStore();
     const ymd = todayYmd();
-    if (nowStore.ymd !== ymd) {
-      const reset = { version: 1 as const, ymd, items: {} as Record<string, DailyOperationRow> };
-      writeDailyOpsStore(reset);
-    }
-
     const store = readDailyOpsStore();
-    const nextItems: Record<string, DailyOperationRow> = { ...(store.items ?? {}) };
+    const dayBucket = store.days?.[ymd]?.items && typeof store.days[ymd]?.items === 'object' ? store.days[ymd] : { items: {} as Record<string, DailyOperationRow> };
+    const nextItems: Record<string, DailyOperationRow> = { ...(dayBucket.items ?? {}) };
 
     const matchMetaById = new Map<string, { homeTeam: string | null; awayTeam: string | null }>();
     for (const it of items) {
@@ -1391,6 +1415,33 @@ export default function AutomationPage() {
           });
         }
       }
+
+      const oht = (x as any)?.strategy?.overGoalsHT && typeof (x as any).strategy.overGoalsHT === 'object' ? (x as any).strategy.overGoalsHT : null;
+      if (oht) {
+        const closedAt = String(oht?.closedAt ?? oht?.lastClosedAt ?? '').trim();
+        if (closedAt) {
+          const stakeAbs = Number(oht?.stakeAbs);
+          const entryPrice = Number(oht?.entryPrice);
+          const marketId = String(oht?.entryMarketId ?? oht?.marketId ?? '').trim() || null;
+          const ref = String(oht?.entryBetId ?? `oht_${x.matchId}_${closedAt}`).trim();
+          upsert({
+            key: `overGoalsHT:${x.matchId}:${closedAt}`,
+            matchId: String(x.matchId ?? '').trim() || '—',
+            homeTeam: x.homeTeam ?? null,
+            awayTeam: x.awayTeam ?? null,
+            at: closedAt,
+            ref,
+            robot: agentLabel('overGoalsHT'),
+            market: humanizeMarket(marketId) || 'Mais/Menos 0.5 (HT)',
+            marketId,
+            price: Number.isFinite(entryPrice) ? entryPrice : null,
+            stake: Number.isFinite(stakeAbs) && stakeAbs > 0 ? round2(stakeAbs) : null,
+            pnl: null,
+            status: 'ENCERRADA',
+            returnPct: null,
+          });
+        }
+      }
     }
 
     try {
@@ -1469,9 +1520,17 @@ export default function AutomationPage() {
       if ((v as any).awayTeam == null) (v as any).awayTeam = meta?.awayTeam ?? null;
     }
 
-    const nextStore = { version: 1 as const, ymd: todayYmd(), items: nextItems };
+    const nextStore: DailyOpsStoreV2 = {
+      version: 2,
+      days: {
+        ...(store.days ?? {}),
+        [ymd]: { items: nextItems },
+      },
+    };
     writeDailyOpsStore(nextStore);
-    setDailyOps(Object.values(nextItems).sort((a, b) => String(b.at).localeCompare(String(a.at))));
+    if (historyYmd === ymd) {
+      setDailyOps(Object.values(nextItems).sort((a, b) => String(b.at).localeCompare(String(a.at))));
+    }
   }, [botOrders, items]);
 
   const apiFootballLiveFixtureIds = useMemo(() => {
@@ -1894,7 +1953,13 @@ export default function AutomationPage() {
       if (!res.ok || !data?.ok) {
         throw new Error(String(data?.error ?? `HTTP ${res.status} ${res.statusText}`));
       }
-      const next = Array.isArray(data?.items) ? (data.items as QueueItem[]) : [];
+      const nextRaw = Array.isArray(data?.items) ? (data.items as QueueItem[]) : [];
+      const next = nextRaw.filter((x) => {
+        const matchId = String((x as any)?.matchId ?? '').trim();
+        const homeTeam = String((x as any)?.homeTeam ?? '').trim();
+        const awayTeam = String((x as any)?.awayTeam ?? '').trim();
+        return Boolean(matchId && homeTeam && awayTeam);
+      });
       itemsRef.current = next;
       setItems(next);
       if (!opts?.silent) setStatus('idle');
@@ -2016,7 +2081,6 @@ export default function AutomationPage() {
             const agent = normalizeAgent(x.strategy?.agent);
             return agent === 'correctScore';
           })
-          .filter((x) => Boolean(x.betfair?.correctScore?.marketId))
           .filter((x) => !String(x.strategy?.correctScore?.adoptedExistingAt ?? '').trim())
           .filter((x) => {
             const ms = Array.isArray(x.markets) ? x.markets : deriveMarketsFromPrediction(x);
@@ -2381,6 +2445,61 @@ export default function AutomationPage() {
 
       if (adminToken) {
         const snapshot = itemsRef.current;
+        const overGoalsHtTargets = snapshot
+          .filter((x) => x.status === 'running')
+          .filter((x) => normalizeAgent(x.strategy?.agent) === 'overGoalsHT')
+          .slice(0, 8);
+
+        for (const x of overGoalsHtTargets) {
+          const lastTick = String((x as any).strategy?.overGoalsHT?.lastTickAt ?? '').trim();
+          const lastTickTs = lastTick ? new Date(lastTick).getTime() : 0;
+          if (lastTickTs && Number.isFinite(lastTickTs) && Date.now() - lastTickTs < 9_000) continue;
+
+          const live = getCentralLive(String(x.matchId));
+          const lim = (robotLimits as any)?.overGoalsHT && typeof (robotLimits as any).overGoalsHT === 'object' ? (robotLimits as any).overGoalsHT : {};
+
+          const tickRes = await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/strategy/overGoalsHT/tick`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({
+              matchId: x.matchId,
+              adminToken,
+              live: live
+                ? {
+                    fetchedAt: live.fetchedAt,
+                    elapsed: live.elapsed,
+                    statusShort: live.statusShort ?? null,
+                    scoreHome: live.goalsHome,
+                    scoreAway: live.goalsAway,
+                  }
+                : null,
+              config: { bankroll: bankrollForOverUnder, bankrollTotal, ...(lim as any) },
+            }),
+          }).catch(() => null);
+          if (tickRes) {
+            const t = await tickRes.text().catch(() => '');
+            let j: any = null;
+            try {
+              j = t ? JSON.parse(t) : null;
+            } catch {}
+            dbg('D', 'overGoalsHT tick response', {
+              matchId: x.matchId,
+              status: tickRes.status,
+              ok: Boolean(tickRes.ok && j?.ok),
+              skipped: Boolean(j?.skipped),
+              reason: j?.reason ?? null,
+              entered: Boolean(j?.entered),
+              closed: Boolean(j?.closed),
+              error: j?.error ?? null,
+            });
+          }
+        }
+
+        await loadQueue({ silent: true });
+      }
+
+      if (adminToken) {
+        const snapshot = itemsRef.current;
         const asianHandicapTargets = snapshot
           .filter((x) => x.status === 'running')
           .filter((x) => normalizeAgent(x.strategy?.agent) === 'asianHandicap')
@@ -2501,39 +2620,53 @@ export default function AutomationPage() {
     try {
       const { projectId } = await import('/utils/supabase/info');
       const headers = await getEdgeHeaders();
-      const res = await fetch(`https://${projectId}.supabase.co/functions/v1/betfair-core-server-1119702f/betfair/rpc`, {
+      const url = `https://${projectId}.supabase.co/functions/v1/betfair-server-1119702f/betfair/match/resolve`;
+      const res = await fetch(url, {
         method: 'POST',
         headers,
         body: JSON.stringify({
-          method: 'SportsAPING/v1.0/listMarketCatalogue',
-          params: {
-            filter: { eventIds: [eventId] },
-            marketProjection: ['RUNNER_DESCRIPTION', 'MARKET_START_TIME'],
-            sort: 'MAXIMUM_TRADED',
-            maxResults: 25,
-          },
+          homeTeam: x.homeTeam ?? '',
+          awayTeam: x.awayTeam ?? '',
+          utcDate: x.utcDate ?? null,
+          minFreshSeconds: 0,
+          includeCorrectScore: true,
+          force: false,
         }),
       });
       const raw = await res.text().catch(() => '');
       const data = raw ? JSON.parse(raw) : null;
-      if (!res.ok || !data?.ok) throw new Error(String(data?.error ?? `HTTP ${res.status} ${res.statusText}`));
+      if (!res.ok || !data?.ok || !data?.betfair) throw new Error(String(data?.error ?? `HTTP ${res.status} ${res.statusText}`));
 
-      const arr = Array.isArray(data.result) ? data.result : [];
-      const items = arr
-        .map((m: any) => ({
-          marketId: String(m?.marketId ?? '').trim(),
-          marketName: String(m?.marketName ?? '').trim() || 'Mercado',
-          totalMatched: typeof m?.totalMatched === 'number' ? m.totalMatched : null,
-          runners: Array.isArray(m?.runners)
-            ? m.runners
-                .map((r: any) => ({
-                  selectionId: Number(r?.selectionId),
-                  runnerName: String(r?.runnerName ?? '').trim() || `#${String(r?.selectionId ?? '')}`,
-                }))
-                .filter((r: any) => Number.isFinite(r.selectionId))
-            : [],
-        }))
-        .filter((m: any) => m.marketId);
+      // Build market options from resolved betfair payload
+      const bf = data.betfair;
+      const items: Array<any> = [];
+      // primary market
+      if (bf?.marketId) {
+        const runners: Array<any> = [];
+        const homeSel = Number(bf?.runners?.homeSelectionId ?? bf?.runners?.home ?? null) || null;
+        const drawSel = Number(bf?.runners?.drawSelectionId ?? bf?.runners?.draw ?? null) || null;
+        const awaySel = Number(bf?.runners?.awaySelectionId ?? bf?.runners?.away ?? null) || null;
+        if (homeSel) runners.push({ selectionId: homeSel, runnerName: x.homeTeam ?? 'Home' });
+        if (drawSel) runners.push({ selectionId: drawSel, runnerName: 'Draw' });
+        if (awaySel) runners.push({ selectionId: awaySel, runnerName: x.awayTeam ?? 'Away' });
+
+        items.push({
+          marketId: String(bf.marketId),
+          marketName: String(bf.marketName ?? bf.eventName ?? 'Mercado'),
+          totalMatched: typeof bf.matchedVolume === 'number' ? bf.matchedVolume : null,
+          runners,
+        });
+      }
+
+      // correct score market if present
+      if (bf?.correctScore?.marketId) {
+        items.push({
+          marketId: String(bf.correctScore.marketId),
+          marketName: 'Correct Score',
+          totalMatched: null,
+          runners: [],
+        });
+      }
 
       setMarketOptionsByMatchId((prev) => ({ ...prev, [matchId]: { fetchedAt: new Date().toISOString(), items } }));
 
@@ -2557,22 +2690,38 @@ export default function AutomationPage() {
     try {
       const { projectId } = await import('/utils/supabase/info');
       const headers = await getEdgeHeaders();
-      const res = await fetch(`https://${projectId}.supabase.co/functions/v1/betfair-core-server-1119702f/betfair/rpc`, {
+      const item = itemsRef.current.find((it) => it.matchId === matchId) ?? null;
+      const homeTeam = String(item?.homeTeam ?? '').trim();
+      const awayTeam = String(item?.awayTeam ?? '').trim();
+      const utcDate = item?.utcDate ?? null;
+      const url = `https://${projectId}.supabase.co/functions/v1/betfair-server-1119702f/betfair/match/resolve`;
+      const res = await fetch(url, {
         method: 'POST',
         headers,
         body: JSON.stringify({
-          method: 'SportsAPING/v1.0/listMarketBook',
-          params: {
-            marketIds: [mid],
-            priceProjection: { priceData: ['EX_BEST_OFFERS'], virtualise: true },
-          },
+          homeTeam,
+          awayTeam,
+          utcDate,
+          minFreshSeconds: 0,
+          includeCorrectScore: true,
+          force: false,
         }),
       });
       const raw = await res.text().catch(() => '');
       const data = raw ? JSON.parse(raw) : null;
-      if (!res.ok || !data?.ok) throw new Error(String(data?.error ?? `HTTP ${res.status} ${res.statusText}`));
-      const book = Array.isArray(data.result) ? data.result[0] : null;
-      const runners = Array.isArray(book?.runners) ? book.runners : [];
+      if (!res.ok || !data?.ok || !data?.betfair) throw new Error(String(data?.error ?? `HTTP ${res.status} ${res.statusText}`));
+      const bookSource = String(selectedMarketByMatchId[matchId] ?? '').trim() === mid
+        ? data.betfair
+        : data.betfair?.correctScore ?? data.betfair;
+      
+      // Handle runners as either array (from listMarketBook) or Record (from correctScore)
+      let runnersArray: any[] = [];
+      if (Array.isArray(bookSource?.runners)) {
+        runnersArray = bookSource.runners;
+      } else if (bookSource?.runners && typeof bookSource.runners === 'object') {
+        runnersArray = Object.values(bookSource.runners);
+      }
+      
       const quotes: Record<
         string,
         {
@@ -2590,7 +2739,7 @@ export default function AutomationPage() {
       const nameBySelectionId = new Map<number, string>();
       for (const r of opt?.runners ?? []) nameBySelectionId.set(r.selectionId, r.runnerName);
 
-      for (const r of runners) {
+      for (const r of runnersArray) {
         const selectionId = Number(r?.selectionId);
         if (!Number.isFinite(selectionId)) continue;
         const atb = Array.isArray(r?.ex?.availableToBack) ? r.ex.availableToBack : [];
@@ -2601,7 +2750,7 @@ export default function AutomationPage() {
         const laySize = typeof atl?.[0]?.size === 'number' ? atl[0].size : null;
         quotes[String(selectionId)] = {
           selectionId,
-          runnerName: nameBySelectionId.get(selectionId) ?? `#${selectionId}`,
+          runnerName: nameBySelectionId.get(selectionId) ?? r?.runnerName ?? `#${selectionId}`,
           back,
           backSize,
           lay,
@@ -2632,22 +2781,38 @@ export default function AutomationPage() {
     try {
       const { projectId } = await import('/utils/supabase/info');
       const headers = await getEdgeHeaders();
-      const res = await fetch(`https://${projectId}.supabase.co/functions/v1/betfair-core-server-1119702f/betfair/rpc`, {
+      const item = itemsRef.current.find((it) => it.matchId === matchId) ?? null;
+      const homeTeam = String(item?.homeTeam ?? '').trim();
+      const awayTeam = String(item?.awayTeam ?? '').trim();
+      const utcDate = item?.utcDate ?? null;
+      const url = `https://${projectId}.supabase.co/functions/v1/betfair-server-1119702f/betfair/match/resolve`;
+      const res = await fetch(url, {
         method: 'POST',
         headers,
         body: JSON.stringify({
-          method: 'SportsAPING/v1.0/listMarketBook',
-          params: {
-            marketIds: [mid],
-            priceProjection: { priceData: ['EX_BEST_OFFERS'], virtualise: true },
-          },
+          homeTeam,
+          awayTeam,
+          utcDate,
+          minFreshSeconds: 0,
+          includeCorrectScore: true,
+          force: false,
         }),
       });
       const raw = await res.text().catch(() => '');
       const data = raw ? JSON.parse(raw) : null;
-      if (!res.ok || !data?.ok) throw new Error(String(data?.error ?? `HTTP ${res.status} ${res.statusText}`));
-      const book = Array.isArray(data.result) ? data.result[0] : null;
-      const runners = Array.isArray(book?.runners) ? book.runners : [];
+      if (!res.ok || !data?.ok || !data?.betfair) throw new Error(String(data?.error ?? `HTTP ${res.status} ${res.statusText}`));
+      const book = String(selectedMarketByMatchId[matchId] ?? '').trim() === mid
+        ? data.betfair
+        : data.betfair?.correctScore ?? data.betfair;
+      
+      // Handle runners as either array (from listMarketBook) or Record (from correctScore)
+      let runnersArray: any[] = [];
+      if (Array.isArray(book?.runners)) {
+        runnersArray = book.runners;
+      } else if (book?.runners && typeof book.runners === 'object') {
+        runnersArray = Object.values(book.runners);
+      }
+      
       const quotes: Record<
         string,
         {
@@ -2665,7 +2830,7 @@ export default function AutomationPage() {
       const nameBySelectionId = new Map<number, string>();
       for (const r of opt?.runners ?? []) nameBySelectionId.set(r.selectionId, r.runnerName);
 
-      for (const r of runners) {
+      for (const r of runnersArray) {
         const selectionId = Number(r?.selectionId);
         if (!Number.isFinite(selectionId)) continue;
         const atb = Array.isArray(r?.ex?.availableToBack) ? r.ex.availableToBack : [];
@@ -2676,7 +2841,7 @@ export default function AutomationPage() {
         const laySize = typeof atl?.[0]?.size === 'number' ? atl[0].size : null;
         quotes[String(selectionId)] = {
           selectionId,
-          runnerName: nameBySelectionId.get(selectionId) ?? `#${selectionId}`,
+          runnerName: nameBySelectionId.get(selectionId) ?? r?.runnerName ?? `#${selectionId}`,
           back,
           backSize,
           lay,
@@ -2807,9 +2972,10 @@ export default function AutomationPage() {
 
   const normalizeAgent = (
     raw: unknown,
-  ): 'correctScore' | 'overGoalsLimit' | 'scalpingTicks' | 'asianHandicap' | 'favoriteRescue' => {
+  ): 'correctScore' | 'overGoalsLimit' | 'overGoalsHT' | 'scalpingTicks' | 'asianHandicap' | 'favoriteRescue' => {
     const agentRaw = String(raw ?? '').trim().toLowerCase();
     if (agentRaw === 'overgoalslimit' || agentRaw === 'over_goals_limit') return 'overGoalsLimit';
+    if (agentRaw === 'overgoalsht' || agentRaw === 'over_goals_ht' || agentRaw === 'overgolht' || agentRaw === 'over_ht') return 'overGoalsHT';
     if (agentRaw === 'scalpingticks' || agentRaw === 'scalping_ticks') return 'scalpingTicks';
     if (agentRaw === 'scalpinggoals' || agentRaw === 'scalping_goals' || agentRaw === 'scalping_goals_above') return 'scalpingTicks';
     if (agentRaw === 'asianhandicap' || agentRaw === 'asian_handicap' || agentRaw === 'handicap_asiatico' || agentRaw === 'handicapasiatico')
@@ -2826,6 +2992,8 @@ export default function AutomationPage() {
       const agent =
       agentRaw === 'overgoalslimit' || agentRaw === 'over_goals_limit'
         ? 'overGoalsLimit'
+        : agentRaw === 'overgoalsht' || agentRaw === 'over_goals_ht' || agentRaw === 'overgolht' || agentRaw === 'over_ht'
+          ? 'overGoalsHT'
         : agentRaw === 'scalpingticks' || agentRaw === 'scalping_ticks' || agentRaw === 'scalpinggoals' || agentRaw === 'scalping_goals' || agentRaw === 'scalping_goals_above'
           ? 'scalpingTicks'
           : agentRaw === 'asianhandicap' || agentRaw === 'asian_handicap' || agentRaw === 'handicap_asiatico' || agentRaw === 'handicapasiatico'
@@ -4109,7 +4277,7 @@ export default function AutomationPage() {
             Automações
           </Button>
           <Button variant={activeTab === 'dailyHistory' ? 'default' : 'outline'} onClick={() => setActiveTab('dailyHistory')}>
-            Histórico do dia
+            Histórico de Operações
           </Button>
         </div>
 
@@ -5160,18 +5328,117 @@ export default function AutomationPage() {
           <Card className="p-4">
             <div className="flex items-start justify-between gap-4">
               <div>
-                <div className="font-semibold text-gray-900">Histórico do dia</div>
+                <div className="font-semibold text-gray-900">Histórico de Operações</div>
                 <div className="text-sm text-gray-600 mt-1">
-                  Operações registradas hoje ({todayYmd()}). Verde: lucro, cinza: não correspondida, vermelho: prejuízo.
+                  Operações registradas em {historyYmd}. Verde: lucro, cinza: não correspondida, vermelho: prejuízo.
                 </div>
               </div>
-              <Badge variant="outline" className="tabular-nums">
-                {dailyOps.length}
-              </Badge>
+              <div className="flex items-center gap-2">
+                <div className="w-[148px]">
+                  <Input
+                    id="ops_day"
+                    type="date"
+                    value={historyYmd}
+                    onChange={(e) => setHistoryYmd(String(e.target.value ?? '').trim() || todayYmd())}
+                  />
+                </div>
+                <Badge variant="outline" className="tabular-nums">
+                  {dailyOps.length}
+                </Badge>
+              </div>
             </div>
 
+            {(() => {
+              const cfg = loadApiConfig();
+              const bankrollTotal = Number(cfg?.betfairBankroll ?? 0);
+              const bankrollOk = Number.isFinite(bankrollTotal) && bankrollTotal > 0;
+              const store = readDailyOpsStore();
+              const sumPnl = (rows: DailyOperationRow[]) => {
+                let pnl = 0;
+                let stake = 0;
+                let wins = 0;
+                let losses = 0;
+                for (const r of rows) {
+                  const p = typeof r.pnl === 'number' && Number.isFinite(r.pnl) ? r.pnl : 0;
+                  pnl += p;
+                  const s = typeof r.stake === 'number' && Number.isFinite(r.stake) ? r.stake : 0;
+                  stake += s;
+                  if (p > 0) wins += 1;
+                  else if (p < 0) losses += 1;
+                }
+                const roiWallet = bankrollOk ? (pnl / bankrollTotal) * 100 : null;
+                return { pnl: Math.round(pnl * 100) / 100, stake: Math.round(stake * 100) / 100, wins, losses, roiWallet };
+              };
+
+              const rowsForDay = (ymd: string) => Object.values(store.days?.[ymd]?.items ?? {});
+              const anchorYmd = String(historyYmd ?? '').trim() || todayYmd();
+              const anchorSum = sumPnl(rowsForDay(anchorYmd));
+
+              const buildRecentKeys = (anchor: string, daysBack: number) => {
+                const parseAnchorUtc = (ymd: string) => {
+                  const parts = String(ymd ?? '').trim().split('-').map((p) => Number(p));
+                  const yy = parts[0];
+                  const mm = parts[1];
+                  const dd = parts[2];
+                  if (!Number.isFinite(yy) || !Number.isFinite(mm) || !Number.isFinite(dd)) return new Date();
+                  return new Date(Date.UTC(yy, Math.max(0, Math.floor(mm) - 1), Math.max(1, Math.floor(dd)), 12, 0, 0));
+                };
+                const base = parseAnchorUtc(anchor);
+                const out: string[] = [];
+                for (let i = 0; i < daysBack; i++) {
+                  const d = new Date(base.getTime() - i * 86_400_000);
+                  const k = new Intl.DateTimeFormat('en-CA', { timeZone: TIME_ZONE, year: 'numeric', month: '2-digit', day: '2-digit' }).format(d);
+                  out.push(k);
+                }
+                return out;
+              };
+
+              const weekKeys = buildRecentKeys(anchorYmd, 7);
+              const monthKeys = buildRecentKeys(anchorYmd, 30);
+              const weekRows = weekKeys.flatMap((k) => rowsForDay(k));
+              const monthRows = monthKeys.flatMap((k) => rowsForDay(k));
+              const weekSum = sumPnl(weekRows);
+              const monthSum = sumPnl(monthRows);
+
+              const fmtSigned = (v: number) => {
+                const sign = v > 0 ? '+' : v < 0 ? '-' : '';
+                return `${sign}${formatMoneyBR(Math.abs(v))}`;
+              };
+              const fmtSignedPct = (v: number | null) => {
+                if (typeof v !== 'number' || !Number.isFinite(v)) return '—';
+                const sign = v > 0 ? '+' : v < 0 ? '-' : '';
+                return `${sign}${Math.abs(v).toFixed(2)}%`;
+              };
+
+              const cardTone = (pnl: number) =>
+                pnl > 0 ? 'text-emerald-700' : pnl < 0 ? 'text-red-700' : 'text-gray-900';
+
+              const card = (title: string, sum: { pnl: number; roiWallet: number | null; wins: number; losses: number }, badge: string) => (
+                <div className="rounded-lg border border-gray-200 bg-white p-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="text-sm font-semibold text-gray-900">{title}</div>
+                    <Badge variant="outline" className="tabular-nums">
+                      {badge}
+                    </Badge>
+                  </div>
+                  <div className={cn('mt-2 text-2xl font-bold tabular-nums', cardTone(sum.pnl))}>{fmtSigned(sum.pnl)}</div>
+                  <div className="mt-1 text-xs text-gray-600 tabular-nums">
+                    ROI banca: {fmtSignedPct(sum.roiWallet)} • W/L: {sum.wins}/{sum.losses}
+                  </div>
+                </div>
+              );
+
+              return (
+                <div className="mt-4 grid md:grid-cols-3 gap-3">
+                  {card('Lucro/Perda (dia)', anchorSum, anchorYmd)}
+                  {card('Lucro/Perda (semana)', weekSum, `${weekKeys[weekKeys.length - 1]}→${weekKeys[0]}`)}
+                  {card('Lucro/Perda (mês)', monthSum, `${monthKeys[monthKeys.length - 1]}→${monthKeys[0]}`)}
+                </div>
+              );
+            })()}
+
             {dailyOps.length === 0 ? (
-              <div className="mt-3 text-sm text-gray-600">Nenhuma operação registrada hoje.</div>
+              <div className="mt-3 text-sm text-gray-600">Nenhuma operação registrada nessa data.</div>
             ) : (
               <div className="mt-4">
                 {(() => {
@@ -5229,6 +5496,16 @@ export default function AutomationPage() {
                     const sign = v > 0 ? '+' : v < 0 ? '-' : '';
                     return `${sign}${Math.abs(v).toFixed(2)}%`;
                   };
+
+                  const totals = (() => {
+                    let pnl = 0;
+                    for (const r of dailyOps) {
+                      const p = typeof (r as any)?.pnl === 'number' && Number.isFinite((r as any).pnl) ? Number((r as any).pnl) : 0;
+                      pnl += p;
+                    }
+                    const roiWallet = bankrollOk ? (pnl / bankrollTotal) * 100 : null;
+                    return { pnl: Math.round(pnl * 100) / 100, roiWallet };
+                  })();
 
                   return (
                     <div className="border border-gray-200 rounded-lg bg-white">
@@ -5465,6 +5742,18 @@ export default function AutomationPage() {
                             );
                           })}
                         </Accordion>
+                        <div className="border-t border-gray-200 bg-gray-50 px-3 py-3">
+                          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2">
+                            <div className="text-sm font-semibold text-gray-900">Total do dia</div>
+                            <div className="text-sm tabular-nums">
+                              <span className={cn('font-semibold', totals.pnl >= 0 ? 'text-emerald-700' : 'text-red-700')}>
+                                {fmtSignedMoney(totals.pnl)}
+                              </span>
+                              <span className="mx-2 text-gray-500">•</span>
+                              <span className="text-gray-700">Média sobre banca/carteira: {fmtSignedPct(totals.roiWallet)}</span>
+                            </div>
+                          </div>
+                        </div>
                     </div>
                   );
                 })()}

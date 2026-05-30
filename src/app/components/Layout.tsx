@@ -681,6 +681,7 @@ export function Layout() {
           scoreHome: args.scoreHome,
           scoreAway: args.scoreAway,
           prediction: args.prediction ?? null,
+          includeCorrectScore: true,
         }),
       });
       const raw = await res.text().catch(() => '');
@@ -1173,6 +1174,7 @@ export function Layout() {
       if (s === 'scalpingticks' || s === 'scalping_ticks') return 'scalpingTicks';
       if (s === 'scalpinggoals' || s === 'scalping_goals' || s === 'scalping_goals_above') return 'scalpingTicks';
       if (s === 'overgoalslimit' || s === 'over_goals_limit') return 'overGoalsLimit';
+      if (s === 'overgoalsht' || s === 'over_goals_ht' || s === 'overgolht' || s === 'over_ht') return 'overGoalsHT';
       if (s === 'asianhandicap' || s === 'asian_handicap' || s === 'handicap_asiatico' || s === 'handicapasiatico') return 'asianHandicap';
       if (s === 'favoriterescue' || s === 'favorite_rescue' || s === 'lay_favorito_perdendo') return 'favoriteRescue';
       if (s === 'correctscore' || s === 'correct_score') return 'correctScore';
@@ -1342,6 +1344,7 @@ export function Layout() {
               scoreHome: args.scoreHome,
               scoreAway: args.scoreAway,
               prediction: null,
+              includeCorrectScore: true,
             }),
           }).catch(() => null);
           existingQueueIds.add(args.matchId);
@@ -1479,6 +1482,154 @@ export function Layout() {
         }
       }
 
+      const ohtLim =
+        (robotLimits && typeof robotLimits === 'object' ? (robotLimits as any).overGoalsHT : null) ?? null;
+      const ohtEnabled = Boolean((ohtLim as any)?.enabled ?? false);
+      const ohtAutoEnabled = Boolean((ohtLim as any)?.autoEnabled ?? false);
+      const ohtAutoMinConfidenceRaw = Number((ohtLim as any)?.autoMinConfidence ?? 70);
+      const ohtAutoMinConfidence = Number.isFinite(ohtAutoMinConfidenceRaw) ? Math.max(40, Math.min(95, Math.floor(ohtAutoMinConfidenceRaw))) : 70;
+      const ohtObserveMaxMinuteRaw = Number((ohtLim as any)?.observeMaxMinute ?? 15);
+      const ohtObserveMaxMinute = Number.isFinite(ohtObserveMaxMinuteRaw) ? Math.max(0, Math.min(45, Math.floor(ohtObserveMaxMinuteRaw))) : 15;
+      if (ohtEnabled && ohtAutoEnabled) {
+        const readDashboardFeed = () => {
+          try {
+            const raw = localStorage.getItem('favorite_rescue_feed_v1');
+            const parsed = raw ? (JSON.parse(raw) as any) : null;
+            if (!parsed || parsed.version !== 1 || !parsed.items || typeof parsed.items !== 'object') {
+              return { version: 1 as const, updatedAt: new Date(0).toISOString(), items: {} as Record<string, any> };
+            }
+            return parsed as { version: 1; updatedAt: string; items: Record<string, any> };
+          } catch {
+            return { version: 1 as const, updatedAt: new Date(0).toISOString(), items: {} as Record<string, any> };
+          }
+        };
+
+        const feed = readDashboardFeed();
+        const feedUpdatedAtMs = new Date(feed.updatedAt).getTime();
+        const feedAgeMs = Number.isFinite(feedUpdatedAtMs) ? Date.now() - feedUpdatedAtMs : Number.POSITIVE_INFINITY;
+        const feedOk = feedAgeMs >= 0 && feedAgeMs <= 65_000;
+
+        const dayKeySp = () =>
+          new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+        const ohtAutoKey = 'over_goals_ht_auto_state_v1';
+        const readOhtAuto = () => {
+          try {
+            const raw = localStorage.getItem(ohtAutoKey);
+            const parsed = raw ? (JSON.parse(raw) as any) : null;
+            const dayKey = dayKeySp();
+            if (!parsed || parsed.version !== 1 || parsed.dayKey !== dayKey || !parsed.items || typeof parsed.items !== 'object') {
+              return { version: 1 as const, dayKey, items: {} as Record<string, { enqueuedAt: string; confidence: number }> };
+            }
+            return parsed as { version: 1; dayKey: string; items: Record<string, { enqueuedAt: string; confidence: number }> };
+          } catch {
+            return { version: 1 as const, dayKey: dayKeySp(), items: {} as Record<string, { enqueuedAt: string; confidence: number }> };
+          }
+        };
+        const writeOhtAuto = (next: any) => {
+          try {
+            localStorage.setItem(ohtAutoKey, JSON.stringify(next));
+          } catch {}
+        };
+
+        if (feedOk) {
+          const existingQueueIds = new Set<string>(snapshot.map((x) => String((x as any)?.matchId ?? '').trim()).filter(Boolean));
+          const auto = readOhtAuto();
+
+          const candidates = Object.entries(feed.items)
+            .map(([matchId, v]) => {
+              const status = String((v as any)?.status ?? '').trim();
+              if (status !== 'live') return null;
+              const minuteRaw = typeof (v as any)?.liveElapsed === 'number' ? (v as any).liveElapsed : null;
+              const minute = minuteRaw != null && Number.isFinite(minuteRaw) ? Math.max(0, Math.floor(minuteRaw)) : null;
+              if (minute == null || minute > ohtObserveMaxMinute) return null;
+              const statusShort = String((v as any)?.liveStatusShort ?? '').trim().toUpperCase();
+              const isFirstHalf = statusShort === '1H' || (minute >= 0 && minute <= 45);
+              if (!isFirstHalf) return null;
+              const scoreHome = typeof (v as any)?.scoreHome === 'number' ? (v as any).scoreHome : null;
+              const scoreAway = typeof (v as any)?.scoreAway === 'number' ? (v as any).scoreAway : null;
+              if (scoreHome == null || scoreAway == null) return null;
+              if (Math.max(0, scoreHome) + Math.max(0, scoreAway) !== 0) return null;
+              const p = (v as any)?.prediction?.overHT ?? null;
+              const pred = String(p?.prediction ?? '').trim().toLowerCase();
+              const conf = Number(p?.confidence);
+              if (pred !== 'over' || !(Number.isFinite(conf) && conf >= ohtAutoMinConfidence)) return null;
+              return { matchId, v, minute, confidence: Math.floor(conf) };
+            })
+            .filter((x): x is { matchId: string; v: any; minute: number; confidence: number } => Boolean(x))
+            .sort((a, b) => a.minute - b.minute)
+            .slice(0, 20);
+
+          for (const c of candidates) {
+            const matchId = c.matchId;
+            const v = c.v;
+            if (auto.items[matchId]) continue;
+
+            const utcDate = (v as any)?.utcDate ?? null;
+            const homeTeam = (v as any)?.homeTeam ?? null;
+            const awayTeam = (v as any)?.awayTeam ?? null;
+            const scoreHome = typeof (v as any)?.scoreHome === 'number' ? (v as any).scoreHome : null;
+            const scoreAway = typeof (v as any)?.scoreAway === 'number' ? (v as any).scoreAway : null;
+            const prediction = (v as any)?.prediction ?? null;
+
+            if (!existingQueueIds.has(matchId)) {
+              await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/queue/add`, {
+                method: 'POST',
+                headers,
+                body: JSON.stringify({
+                  matchId,
+                  source: 'api-football',
+                  utcDate,
+                  homeTeam,
+                  awayTeam,
+                  homeCrest: null,
+                  awayCrest: null,
+                  scoreHome,
+                  scoreAway,
+                  prediction,
+                  includeCorrectScore: true,
+                }),
+              }).catch(() => null);
+              existingQueueIds.add(matchId);
+            }
+
+            await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/queue/update`, {
+              method: 'POST',
+              headers,
+              body: JSON.stringify({
+                matchId,
+                patch: {
+                  status: 'running',
+                  strategy: { agent: 'overGoalsHT', overGoalsHT: { phase: 'monitoring', startedAt: new Date().toISOString(), startedBy: 'independent' } },
+                  markets: [{ key: 'overGoalsHT', label: 'Over Gol HT', enabled: true, details: null }],
+                },
+              }),
+            }).catch(() => null);
+
+            const live = {
+              fetchedAt: feed.updatedAt,
+              elapsed: typeof (v as any)?.liveElapsed === 'number' ? (v as any).liveElapsed : null,
+              statusShort: (v as any)?.liveStatusShort ?? null,
+              scoreHome,
+              scoreAway,
+            };
+            await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/strategy/overGoalsHT/tick`, {
+              method: 'POST',
+              headers,
+              body: JSON.stringify({
+                matchId,
+                adminToken,
+                live,
+                config: { bankroll: bankrollForOverUnder, bankrollTotal, ...(ohtLim as any) },
+              }),
+            }).catch(() => null);
+
+            auto.items[matchId] = { enqueuedAt: new Date().toISOString(), confidence: c.confidence };
+            writeOhtAuto(auto);
+            break;
+          }
+        }
+      }
+
       const csLim = (robotLimits as any)?.correctScore && typeof (robotLimits as any).correctScore === 'object' ? (robotLimits as any).correctScore : {};
       const csProfitTargetPct = Number((csLim as any)?.minProfitPct);
       const csMaxSelections = Number(csLim?.maxSelections);
@@ -1528,7 +1679,6 @@ export function Layout() {
       const csExecTargets = snapshot
         .filter((x) => String((x as any)?.status ?? '').trim() === 'running')
         .filter((x) => normalizeAgent((x as any)?.strategy?.agent) === 'correctScore')
-        .filter((x) => Boolean((x as any)?.betfair?.correctScore?.marketId))
         .filter((x) => !String((x as any)?.strategy?.correctScore?.adoptedExistingAt ?? '').trim())
         .filter((x) => {
           const ms = Array.isArray((x as any)?.markets) ? ((x as any).markets as any[]) : [];
@@ -1667,6 +1817,37 @@ export function Layout() {
               ...(Number.isFinite(entryOffsetTicks) ? { entryOffsetTicks } : {}),
               ...(Number.isFinite(secondsToWaitMatch) ? { secondsToWaitMatch } : {}),
             },
+          }),
+        }).catch(() => null);
+        return null;
+      });
+
+      const ohtTargets = snapshot
+        .filter((x) => String((x as any)?.status ?? '').trim() === 'running')
+        .filter((x) => normalizeAgent((x as any)?.strategy?.agent) === 'overGoalsHT')
+        .slice(0, 8);
+      await mapWithConcurrency(ohtTargets, 2, async (x) => {
+        const lastTick = String((x as any)?.strategy?.overGoalsHT?.lastTickAt ?? '').trim();
+        const lastTickTs = lastTick ? new Date(lastTick).getTime() : 0;
+        if (lastTickTs && Number.isFinite(lastTickTs) && Date.now() - lastTickTs < 9_000) return null;
+        const live = apiFootballLiveRef.current[String((x as any)?.matchId ?? '')] ?? null;
+        const lim = (robotLimits as any)?.overGoalsHT && typeof (robotLimits as any).overGoalsHT === 'object' ? (robotLimits as any).overGoalsHT : {};
+        await fetch(`https://${projectId}.supabase.co/functions/v1/automation-server-1119702f/automation/betfair/strategy/overGoalsHT/tick`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            matchId: (x as any).matchId,
+            adminToken,
+            live: live
+              ? {
+                  fetchedAt: live.fetchedAt,
+                  elapsed: live.elapsed,
+                  statusShort: live.statusShort ?? null,
+                  scoreHome: live.goalsHome,
+                  scoreAway: live.goalsAway,
+                }
+              : null,
+            config: { bankroll: bankrollForOverUnder, bankrollTotal, ...(lim as any) },
           }),
         }).catch(() => null);
         return null;

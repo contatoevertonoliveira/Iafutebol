@@ -42,17 +42,21 @@ const parseJson = async (req: Request) => {
 
 const getSupabaseUrl = () => String(Deno.env.get("SUPABASE_URL") ?? "").trim();
 const getSupabaseAnonKey = () => String(Deno.env.get("SUPABASE_ANON_KEY") ?? "").trim();
+const getSupabaseServiceRoleKey = () => String(Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "").trim();
+const getSupabaseInternalKey = () => getSupabaseAnonKey() || getSupabaseServiceRoleKey();
 
 const resolveBetfairMatchOdds = async (params: { homeTeam: string; awayTeam: string; utcDate: string | null; includeCorrectScore?: boolean }) => {
   const supabaseUrl = getSupabaseUrl();
   if (!supabaseUrl) throw new Error("SUPABASE_URL ausente");
-  const anonKey = getSupabaseAnonKey();
+  const key = getSupabaseInternalKey();
+  if (!key) throw new Error("SUPABASE_ANON_KEY/SUPABASE_SERVICE_ROLE_KEY ausente");
 
   const res = await fetch(`${supabaseUrl}/functions/v1/betfair-server-1119702f/betfair/match/resolve`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      ...(anonKey ? { apikey: anonKey, Authorization: `Bearer ${anonKey}` } : {}),
+      apikey: key,
+      Authorization: `Bearer ${key}`,
     },
     body: JSON.stringify({
       homeTeam: params.homeTeam,
@@ -245,17 +249,20 @@ const guessOuRunnerRole = (runnerName: string) => {
   return null;
 };
 
-const betfairRpc = async (params: { method: string; params: any }) => {
+const betfairRpc = async (params: { method: string; params: any; adminToken: string }) => {
   const supabaseUrl = getSupabaseUrl();
   if (!supabaseUrl) throw new Error("SUPABASE_URL ausente");
-  const anonKey = getSupabaseAnonKey();
+  const key = getSupabaseInternalKey();
+  if (!key) throw new Error("SUPABASE_ANON_KEY/SUPABASE_SERVICE_ROLE_KEY ausente");
   const res = await fetch(`${supabaseUrl}/functions/v1/betfair-core-server-1119702f/betfair/rpc`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      ...(anonKey ? { apikey: anonKey, Authorization: `Bearer ${anonKey}` } : {}),
+      apikey: key,
+      Authorization: `Bearer ${key}`,
     },
     body: JSON.stringify({
+      adminToken: params.adminToken,
       method: params.method,
       params: params.params ?? {},
     }),
@@ -266,7 +273,7 @@ const betfairRpc = async (params: { method: string; params: any }) => {
   return data?.result ?? null;
 };
 
-const resolveBetfairOverUnderMarket = async (params: { eventId: string; lineCode: number }) => {
+const resolveBetfairOverUnderMarket = async (params: { eventId: string; lineCode: number; adminToken: string }) => {
   const eventId = String(params.eventId ?? "").trim();
   const marketType = ouMarketTypeCode(params.lineCode);
   if (!eventId) throw new Error("Betfair: eventId ausente (Over/Under)");
@@ -274,6 +281,7 @@ const resolveBetfairOverUnderMarket = async (params: { eventId: string; lineCode
 
   const cats = await betfairRpc({
     method: "SportsAPING/v1.0/listMarketCatalogue",
+    adminToken: params.adminToken,
     params: {
       filter: { eventIds: [eventId], marketTypeCodes: [marketType] },
       maxResults: 10,
@@ -298,6 +306,7 @@ const resolveBetfairOverUnderMarket = async (params: { eventId: string; lineCode
 
   const books = await betfairRpc({
     method: "SportsAPING/v1.0/listMarketBook",
+    adminToken: params.adminToken,
     params: {
       marketIds: [marketId],
       priceProjection: { priceData: ["EX_BEST_OFFERS", "EX_TRADED"], virtualise: true },
@@ -366,7 +375,7 @@ const guessAhRunnerTeam = (runnerName: string, homeTeam: string, awayTeam: strin
   return null;
 };
 
-const resolveBetfairAsianHandicapMarket = async (params: { eventId: string; homeTeam: string; awayTeam: string }) => {
+const resolveBetfairAsianHandicapMarket = async (params: { eventId: string; homeTeam: string; awayTeam: string; adminToken: string }) => {
   const eventId = String(params.eventId ?? "").trim();
   const homeTeam = String(params.homeTeam ?? "").trim();
   const awayTeam = String(params.awayTeam ?? "").trim();
@@ -375,6 +384,7 @@ const resolveBetfairAsianHandicapMarket = async (params: { eventId: string; home
 
   const cats = await betfairRpc({
     method: "SportsAPING/v1.0/listMarketCatalogue",
+    adminToken: params.adminToken,
     params: {
       filter: { eventIds: [eventId], marketTypeCodes: ["ASIAN_HANDICAP"] },
       maxResults: 10,
@@ -402,6 +412,7 @@ const resolveBetfairAsianHandicapMarket = async (params: { eventId: string; home
 
   const books = await betfairRpc({
     method: "SportsAPING/v1.0/listMarketBook",
+    adminToken: params.adminToken,
     params: {
       marketIds: [marketId],
       priceProjection: { priceData: ["EX_BEST_OFFERS", "EX_TRADED"], virtualise: true },
@@ -468,12 +479,14 @@ const resolveBetfairAsianHandicapMarket = async (params: { eventId: string; home
 const placeOrders = async (params: { adminToken: string; marketId: string; instructions: any[]; customerRef?: string }) => {
   const supabaseUrl = getSupabaseUrl();
   if (!supabaseUrl) throw new Error("SUPABASE_URL ausente");
-  const anonKey = getSupabaseAnonKey();
+  const key = getSupabaseInternalKey();
+  if (!key) throw new Error("SUPABASE_ANON_KEY/SUPABASE_SERVICE_ROLE_KEY ausente");
   const res = await fetch(`${supabaseUrl}/functions/v1/betfair-core-server-1119702f/betfair/placeOrders`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      ...(anonKey ? { apikey: anonKey, Authorization: `Bearer ${anonKey}` } : {}),
+      apikey: key,
+      Authorization: `Bearer ${key}`,
     },
     body: JSON.stringify({
       adminToken: params.adminToken,
@@ -491,12 +504,14 @@ const placeOrders = async (params: { adminToken: string; marketId: string; instr
 const listCurrentOrders = async (params: { adminToken: string; betIds?: string[]; marketIds?: string[] }) => {
   const supabaseUrl = getSupabaseUrl();
   if (!supabaseUrl) throw new Error("SUPABASE_URL ausente");
-  const anonKey = getSupabaseAnonKey();
+  const key = getSupabaseInternalKey();
+  if (!key) throw new Error("SUPABASE_ANON_KEY/SUPABASE_SERVICE_ROLE_KEY ausente");
   const res = await fetch(`${supabaseUrl}/functions/v1/betfair-core-server-1119702f/betfair/listCurrentOrders`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      ...(anonKey ? { apikey: anonKey, Authorization: `Bearer ${anonKey}` } : {}),
+      apikey: key,
+      Authorization: `Bearer ${key}`,
     },
     body: JSON.stringify({
       adminToken: params.adminToken,
@@ -513,12 +528,14 @@ const listCurrentOrders = async (params: { adminToken: string; betIds?: string[]
 const cancelOrders = async (params: { adminToken: string; marketId?: string; betIds: string[] }) => {
   const supabaseUrl = getSupabaseUrl();
   if (!supabaseUrl) throw new Error("SUPABASE_URL ausente");
-  const anonKey = getSupabaseAnonKey();
+  const key = getSupabaseInternalKey();
+  if (!key) throw new Error("SUPABASE_ANON_KEY/SUPABASE_SERVICE_ROLE_KEY ausente");
   const res = await fetch(`${supabaseUrl}/functions/v1/betfair-core-server-1119702f/betfair/cancelOrders`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      ...(anonKey ? { apikey: anonKey, Authorization: `Bearer ${anonKey}` } : {}),
+      apikey: key,
+      Authorization: `Bearer ${key}`,
     },
     body: JSON.stringify({
       adminToken: params.adminToken,
@@ -613,25 +630,70 @@ Deno.serve(async (req) => {
     if (method === "GET" && matchPath(path, "/health")) return json({ status: "ok" });
 
     if (method === "POST" && matchPath(path, "/automation/betfair/queue/list")) {
-      const items = await kv.getByPrefix(BETFAIR_QUEUE_PREFIX);
-      const arr = Array.isArray(items) ? items : [];
+      const rows = await kv.listByPrefix(BETFAIR_QUEUE_PREFIX, { offset: 0, limit: 500 });
+      const arr = Array.isArray(rows) ? rows : [];
       const today = dayKeySp(new Date());
+      const nowMs = Date.now();
 
       let cleaned = 0;
       const filtered: any[] = [];
-      for (const it of arr) {
+      const keysToDelete: string[] = [];
+      for (const row of arr) {
+        const keyRow = row && typeof row === "object" ? String((row as any)?.key ?? "").trim() : "";
+        const it = row && typeof row === "object" ? (row as any)?.value : null;
+        if (!it || typeof it !== "object") continue;
+
         const matchId = String((it as any)?.matchId ?? "").trim();
-        const utcDate = parseUtcDate((it as any)?.utcDate);
-        const key = utcDate ? dayKeySp(utcDate) : null;
-        const isStale = Boolean(key && key < today);
-        if (isStale && matchId) {
-          try {
-            await kv.del(`${BETFAIR_QUEUE_PREFIX}${matchId}`);
-            cleaned += 1;
-          } catch {}
+        const matchIdOk = Boolean(matchId && /^\d+$/.test(matchId));
+        const homeTeam = String((it as any)?.homeTeam ?? "").trim();
+        const awayTeam = String((it as any)?.awayTeam ?? "").trim();
+        const isEmptyCard = !homeTeam || !awayTeam;
+
+        const utcDate =
+          parseUtcDate((it as any)?.utcDate) ||
+          parseUtcDate((it as any)?.betfair?.marketStartTime) ||
+          parseUtcDate((it as any)?.updatedAt) ||
+          parseUtcDate((it as any)?.createdAt) ||
+          null;
+        const dayKey = utcDate ? dayKeySp(utcDate) : null;
+        const isStale = Boolean(dayKey && dayKey < today);
+
+        const ageBase = parseUtcDate((it as any)?.updatedAt) || parseUtcDate((it as any)?.createdAt) || utcDate;
+        const ageMs = ageBase ? nowMs - ageBase.getTime() : null;
+        const status = String((it as any)?.status ?? "").trim().toLowerCase();
+        const mappingStatus = String((it as any)?.mappingStatus ?? "").trim().toLowerCase();
+        const isOldUnmapped =
+          (mappingStatus === "pending" || mappingStatus === "unmapped") &&
+          typeof ageMs === "number" &&
+          Number.isFinite(ageMs) &&
+          ageMs > 36 * 60 * 60 * 1000;
+        const isOldStopped =
+          (status === "stopped" || status === "paused") &&
+          typeof ageMs === "number" &&
+          Number.isFinite(ageMs) &&
+          ageMs > 24 * 60 * 60 * 1000;
+
+        const shouldDelete = !matchIdOk || isEmptyCard || isStale || isOldUnmapped || isOldStopped;
+        if (shouldDelete) {
+          if (keyRow) keysToDelete.push(keyRow);
           continue;
         }
+
         filtered.push(it);
+      }
+
+      if (keysToDelete.length > 0) {
+        try {
+          await kv.mdel(keysToDelete);
+          cleaned += keysToDelete.length;
+        } catch {
+          for (const k of keysToDelete) {
+            try {
+              await kv.del(k);
+              cleaned += 1;
+            } catch {}
+          }
+        }
       }
 
       return json({ ok: true, items: filtered, cleaned });
@@ -672,7 +734,7 @@ Deno.serve(async (req) => {
         const hasMarket = Boolean(String(payload?.betfair?.marketId ?? "").trim());
         if (!hasMarket && payload.homeTeam && payload.awayTeam) {
           try {
-            const includeCorrectScore = Boolean((body as any)?.includeCorrectScore ?? false);
+            const includeCorrectScore = Boolean((body as any)?.includeCorrectScore ?? true);
             const betfair = await resolveBetfairMatchOdds({
               homeTeam: String(payload.homeTeam),
               awayTeam: String(payload.awayTeam),
@@ -996,7 +1058,7 @@ Deno.serve(async (req) => {
         let layPrice: number | null = null;
         if (eventId && Number.isFinite(entryLineCode) && entryLineCode > 0) {
           try {
-            const ou = await resolveBetfairOverUnderMarket({ eventId, lineCode: entryLineCode });
+            const ou = await resolveBetfairOverUnderMarket({ eventId, lineCode: entryLineCode, adminToken: admin.adminToken });
             layPrice = getLayPriceForSelectionFromOuMarket(ou, selectionId);
           } catch {}
         }
@@ -1353,7 +1415,7 @@ Deno.serve(async (req) => {
       let ouUnderErr: string | null = null;
       const ouOverBetfair = await (async () => {
         try {
-          const raw = await resolveBetfairOverUnderMarket({ eventId, lineCode: overLineCode });
+          const raw = await resolveBetfairOverUnderMarket({ eventId, lineCode: overLineCode, adminToken: admin.adminToken });
           return slimOuMarket(raw);
         } catch (e) {
           ouOverErr = e instanceof Error ? e.message : String(e);
@@ -1362,7 +1424,7 @@ Deno.serve(async (req) => {
       })();
       const ouUnderBetfair = await (async () => {
         try {
-          const raw = await resolveBetfairOverUnderMarket({ eventId, lineCode: underLineCode });
+          const raw = await resolveBetfairOverUnderMarket({ eventId, lineCode: underLineCode, adminToken: admin.adminToken });
           return slimOuMarket(raw);
         } catch (e) {
           ouUnderErr = e instanceof Error ? e.message : String(e);
@@ -2088,6 +2150,499 @@ Deno.serve(async (req) => {
       return json({ ok: true, skipped: true, reason: "noop", item: next });
     }
 
+    if (matchPath(path, "/automation/betfair/strategy/overGoalsHT/tick")) {
+      const admin = requireAdminToken(body);
+      if (!admin.ok) return json(admin, 401);
+      const current = await getQueueItem(matchId);
+      if (!current) return json({ ok: false, error: "Item não encontrado" }, 404);
+
+      const baseBetfair = await resolveBetfairMatchOdds({
+        homeTeam: String(current?.homeTeam ?? ""),
+        awayTeam: String(current?.awayTeam ?? ""),
+        utcDate: current?.utcDate == null ? null : String(current.utcDate),
+        includeCorrectScore: false,
+      });
+
+      const strategy = (current as any)?.strategy && typeof (current as any).strategy === "object" ? (current as any).strategy : {};
+      const existing = (strategy as any)?.overGoalsHT && typeof (strategy as any).overGoalsHT === "object" ? (strategy as any).overGoalsHT : {};
+
+      const cfg = (body as any)?.config && typeof (body as any).config === "object" ? (body as any).config : {};
+      const enabled = Boolean((cfg as any)?.enabled ?? true);
+      const bankroll = Number((cfg as any)?.bankroll ?? 50);
+      const stakePctRaw = Number((cfg as any)?.stakePct ?? 1);
+      const stakePct = Number.isFinite(stakePctRaw) ? Math.max(0, Math.min(100, stakePctRaw)) : 1;
+      const stakeAbsCfgRaw = Number((cfg as any)?.stakeAbs);
+      const stakeAbsCfg = Number.isFinite(stakeAbsCfgRaw) ? round2(stakeAbsCfgRaw) : NaN;
+      const stakeAbs =
+        Number.isFinite(stakeAbsCfg) && stakeAbsCfg > 0
+          ? Math.max(2, stakeAbsCfg)
+          : Number.isFinite(bankroll) && bankroll > 0 && Number.isFinite(stakePct) && stakePct > 0
+            ? Math.max(2, round2((bankroll * stakePct) / 100))
+            : 2;
+      const minOddsRaw = Number((cfg as any)?.minOdds ?? 1.25);
+      const minOdds = Number.isFinite(minOddsRaw) ? Math.max(1.01, Math.min(1000, minOddsRaw)) : 1.25;
+      const maxEntriesRaw = Number((cfg as any)?.maxEntries ?? 1);
+      const maxEntries = Number.isFinite(maxEntriesRaw) ? Math.max(1, Math.min(10, Math.floor(maxEntriesRaw))) : 1;
+      const entryOffsetTicksRaw = Number((cfg as any)?.entryOffsetTicks ?? 0);
+      const entryOffsetTicks = Number.isFinite(entryOffsetTicksRaw) ? Math.max(-10, Math.min(10, Math.trunc(entryOffsetTicksRaw))) : 0;
+      const secondsToWaitMatchRaw = Number((cfg as any)?.secondsToWaitMatch ?? 10);
+      const secondsToWaitMatch = Number.isFinite(secondsToWaitMatchRaw) ? Math.max(1, Math.min(120, Math.floor(secondsToWaitMatchRaw))) : 10;
+      const maxMinuteRaw = Number((cfg as any)?.maxMinute ?? 46);
+      const maxMinute = Number.isFinite(maxMinuteRaw) ? Math.max(1, Math.min(60, Math.floor(maxMinuteRaw))) : 46;
+      const observeMinMinuteRaw = Number((cfg as any)?.observeMinMinute ?? 10);
+      const observeMinMinute = Number.isFinite(observeMinMinuteRaw) ? Math.max(0, Math.min(45, Math.floor(observeMinMinuteRaw))) : 10;
+      const observeMaxMinuteRaw = Number((cfg as any)?.observeMaxMinute ?? 15);
+      const observeMaxMinute = Number.isFinite(observeMaxMinuteRaw) ? Math.max(0, Math.min(45, Math.floor(observeMaxMinuteRaw))) : 15;
+      const preMinConfidenceRaw = Number((cfg as any)?.preMinConfidence ?? 75);
+      const preMinConfidence = Number.isFinite(preMinConfidenceRaw) ? Math.max(0, Math.min(95, Math.floor(preMinConfidenceRaw))) : 75;
+
+      const momentOverThresholdRaw = Number((cfg as any)?.momentOverThreshold ?? 0.75);
+      const momentOverThreshold = Number.isFinite(momentOverThresholdRaw) ? Math.max(0.1, Math.min(2, momentOverThresholdRaw)) : 0.75;
+      const momentOverThresholdOffDeltaRaw = Number((cfg as any)?.momentOverThresholdOffDelta ?? 0.15);
+      const momentOverThresholdOffDelta = Number.isFinite(momentOverThresholdOffDeltaRaw) ? Math.max(0, Math.min(1, momentOverThresholdOffDeltaRaw)) : 0.15;
+      const momentWindowMinSecRaw = Number((cfg as any)?.momentWindowMinSec ?? 8);
+      const momentWindowMaxSecRaw = Number((cfg as any)?.momentWindowMaxSec ?? 180);
+      const momentWindowMinSec = Number.isFinite(momentWindowMinSecRaw) ? Math.max(1, Math.min(300, Math.floor(momentWindowMinSecRaw))) : 8;
+      const momentWindowMaxSecCandidate = Number.isFinite(momentWindowMaxSecRaw) ? Math.max(2, Math.min(600, Math.floor(momentWindowMaxSecRaw))) : 180;
+      const momentWindowMaxSec = Math.max(momentWindowMinSec + 1, momentWindowMaxSecCandidate);
+
+      const nowIso = new Date().toISOString();
+      const nowMs = Date.now();
+      const entryLockTtlSecondsRaw = Number((cfg as any)?.entryLockTtlSeconds ?? 180);
+      const entryLockTtlSeconds = Number.isFinite(entryLockTtlSecondsRaw) ? Math.max(5, Math.min(3600, Math.floor(entryLockTtlSecondsRaw))) : 180;
+      const entryLockPendingTtlSecondsRaw = Number((cfg as any)?.entryLockPendingTtlSeconds ?? 25);
+      const entryLockPendingTtlSeconds = Number.isFinite(entryLockPendingTtlSecondsRaw)
+        ? Math.max(4, Math.min(300, Math.floor(entryLockPendingTtlSecondsRaw)))
+        : 25;
+      const lockKeyFor = (marketId: string, selectionId: number) => {
+        const mid = String(marketId ?? "").trim();
+        const sid = Number.isFinite(selectionId) && selectionId > 0 ? Math.floor(selectionId) : 0;
+        return `${mid}:${sid}:BACK`;
+      };
+      const readEntryLocks = () => {
+        const merged: Record<string, any> = {};
+        const add = (raw: any) => {
+          if (!raw || typeof raw !== "object") return;
+          for (const [k, v] of Object.entries(raw)) {
+            const key = String(k ?? "").trim();
+            if (!key) continue;
+            if (!v || typeof v !== "object") continue;
+            merged[key] = v;
+          }
+        };
+        add((strategy as any)?.entryLocks);
+        add((existing as any)?.entryLocks);
+        for (const k of Object.keys(strategy)) {
+          const sub = (strategy as any)[k];
+          if (!sub || typeof sub !== "object") continue;
+          if (sub?.entryLocks && typeof sub.entryLocks === "object") add(sub.entryLocks);
+        }
+        return merged;
+      };
+      const pruneEntryLocks = (locks: any) => {
+        const out: Record<string, any> = {};
+        for (const [k, v] of Object.entries(locks ?? {})) {
+          if (!k) continue;
+          if (!v || typeof v !== "object") continue;
+          const exp = Number((v as any)?.expiresAtMs);
+          if (Number.isFinite(exp) && exp > nowMs) out[k] = v;
+        }
+        return out;
+      };
+      const entryLocksPruned = pruneEntryLocks(readEntryLocks());
+      const isEntryLocked = (locks: any, key: string) => {
+        const v = locks && typeof locks === "object" ? (locks as any)[key] : null;
+        const exp = Number(v?.expiresAtMs);
+        return Boolean(v && Number.isFinite(exp) && exp > nowMs);
+      };
+      const setEntryLock = (locks: any, key: string, value: any) => {
+        const base = locks && typeof locks === "object" ? locks : {};
+        return { ...base, [key]: value };
+      };
+      const clearEntryLock = (locks: any, key: string) => {
+        const base = locks && typeof locks === "object" ? locks : {};
+        const { [key]: _, ...rest } = base as any;
+        return rest;
+      };
+      const mkStableCustomerRef = (action: string, matchId: string, marketId: string, selectionId: number) => {
+        const a = String(action ?? "").replace(/[^a-zA-Z0-9]/g, "").slice(0, 4) || "x";
+        const id = String(matchId ?? "").replace(/[^a-zA-Z0-9]/g, "");
+        const tail = id.slice(-8) || "0";
+        const mid = String(marketId ?? "").replace(/[^a-zA-Z0-9]/g, "");
+        const midTail = mid.slice(-6) || "m";
+        const sid = Number.isFinite(selectionId) && selectionId > 0 ? String(Math.floor(selectionId)).slice(-4) : "0";
+        const bucket = Math.floor(Date.now() / 4000).toString(36);
+        let ref = `ht-${a}-${tail}-${midTail}${sid}-${bucket}`;
+        if (ref.length > 32) ref = ref.slice(0, 32);
+        return ref;
+      };
+
+      const eventId = String((current as any)?.betfair?.eventId ?? baseBetfair?.eventId ?? "").trim();
+      const bodyLive = (body as any)?.live && typeof (body as any).live === "object" ? (body as any).live : null;
+      const liveElapsedRaw = Number((bodyLive as any)?.elapsed);
+      const elapsedMin = Number.isFinite(liveElapsedRaw) ? Math.max(0, Math.floor(liveElapsedRaw)) : null;
+      const statusShort = String((bodyLive as any)?.statusShort ?? (baseBetfair as any)?.timeline?.statusShort ?? "").trim().toUpperCase() || null;
+
+      const baseTimeline = (baseBetfair as any)?.timeline ?? null;
+      const baseTimelineScoreHome = Number(baseTimeline?.scoreHome);
+      const baseTimelineScoreAway = Number(baseTimeline?.scoreAway);
+      const liveScoreHomeRaw =
+        typeof (bodyLive as any)?.scoreHome === "number" ? (bodyLive as any).scoreHome
+          : Number.isFinite(Number((bodyLive as any)?.scoreHome)) ? Number((bodyLive as any)?.scoreHome)
+          : NaN;
+      const liveScoreAwayRaw =
+        typeof (bodyLive as any)?.scoreAway === "number" ? (bodyLive as any).scoreAway
+          : Number.isFinite(Number((bodyLive as any)?.scoreAway)) ? Number((bodyLive as any)?.scoreAway)
+          : NaN;
+      const queueScoreHome = typeof (current as any)?.scoreHome === "number" ? (current as any).scoreHome : Number((current as any)?.scoreHome);
+      const queueScoreAway = typeof (current as any)?.scoreAway === "number" ? (current as any).scoreAway : Number((current as any)?.scoreAway);
+      const scoreHome =
+        Number.isFinite(liveScoreHomeRaw) ? Math.max(0, Math.floor(liveScoreHomeRaw))
+          : Number.isFinite(baseTimelineScoreHome) ? Math.max(0, Math.floor(baseTimelineScoreHome))
+            : Number.isFinite(queueScoreHome) ? Math.max(0, Math.floor(queueScoreHome))
+              : null;
+      const scoreAway =
+        Number.isFinite(liveScoreAwayRaw) ? Math.max(0, Math.floor(liveScoreAwayRaw))
+          : Number.isFinite(baseTimelineScoreAway) ? Math.max(0, Math.floor(baseTimelineScoreAway))
+            : Number.isFinite(queueScoreAway) ? Math.max(0, Math.floor(queueScoreAway))
+              : null;
+      const totalGoals =
+        typeof scoreHome === "number" && typeof scoreAway === "number" ? Math.max(0, scoreHome + scoreAway) : null;
+
+      const inPlay = Boolean(baseBetfair?.inPlay ?? false);
+      const inFirstHalf = statusShort === "1H" || statusShort === "1ST" || statusShort === "FIRST_HALF" || statusShort === "LIVE";
+
+      const phase = String(existing?.phase ?? "").trim() || "monitoring";
+      const entriesCount = Math.max(0, Math.floor(Number((existing as any)?.entriesCount ?? 0) || 0));
+
+      const preConfRaw = Number(((current as any)?.prediction as any)?.overHT?.confidence);
+      const preConfidence = Number.isFinite(preConfRaw) ? Math.max(0, Math.min(100, Math.floor(preConfRaw))) : null;
+
+      const baseState: any = {
+        ...existing,
+        phase,
+        entriesCount,
+        lastTickAt: nowIso,
+        entryLocks: entryLocksPruned,
+        goalAlertActive: Boolean((existing as any)?.goalAlertActive ?? false),
+        momentSnapAtMs: Number.isFinite(Number((existing as any)?.momentSnapAtMs)) ? Number((existing as any)?.momentSnapAtMs) : null,
+        momentOverMatched: Number.isFinite(Number((existing as any)?.momentOverMatched)) ? Number((existing as any)?.momentOverMatched) : null,
+        momentOverBack: Number.isFinite(Number((existing as any)?.momentOverBack)) ? Number((existing as any)?.momentOverBack) : null,
+        momentScore: Number.isFinite(Number((existing as any)?.momentScore)) ? Number((existing as any)?.momentScore) : null,
+        momentUpdatedAtMs: Number.isFinite(Number((existing as any)?.momentUpdatedAtMs)) ? Number((existing as any)?.momentUpdatedAtMs) : null,
+        preConfidence,
+      };
+
+      if (!enabled) {
+        const next = { ...current, betfair: baseBetfair, strategy: { ...strategy, agent: "overGoalsHT", overGoalsHT: { ...baseState, phase: "monitoring" } }, updatedAt: nowIso };
+        await setQueueItem(matchId, next);
+        return json({ ok: true, skipped: true, reason: "disabled", item: next });
+      }
+
+      if (!eventId || !inPlay || !inFirstHalf || elapsedMin == null || elapsedMin > maxMinute) {
+        const next = { ...current, betfair: baseBetfair, strategy: { ...strategy, agent: "overGoalsHT", overGoalsHT: { ...baseState, phase: "monitoring" } }, updatedAt: nowIso };
+        await setQueueItem(matchId, next);
+        return json({ ok: true, skipped: true, reason: "not_applicable", item: next });
+      }
+
+      if (!(totalGoals != null && totalGoals === 0)) {
+        const next = { ...current, betfair: baseBetfair, strategy: { ...strategy, agent: "overGoalsHT", overGoalsHT: { ...baseState, phase: "cooldown", closedAt: nowIso, lastClosedAt: nowIso, cooldownUntilMs: nowMs + 30_000, lastExitReason: "goal_or_not_0x0" } }, updatedAt: nowIso };
+        await setQueueItem(matchId, next);
+        return json({ ok: true, skipped: true, reason: "goal_or_not_0x0", item: next });
+      }
+
+      let ou: any = null;
+      try {
+        ou = await resolveBetfairOverUnderMarket({ eventId, lineCode: 5, adminToken: admin.adminToken });
+      } catch {
+        ou = null;
+      }
+      const marketId = String(ou?.marketId ?? "").trim();
+      const selectionId = Number(ou?.runners?.overSelectionId);
+      const overBack = Number(ou?.odds?.over?.back);
+      const overLay = Number(ou?.odds?.over?.lay);
+      const overMatched = Number(ou?.odds?.over?.runnerMatched);
+      const underMatched = Number(ou?.odds?.under?.runnerMatched);
+      const marketMatched = Number(ou?.matchedVolume);
+
+      if (!marketId || !(Number.isFinite(selectionId) && selectionId > 0)) {
+        const next = { ...current, betfair: baseBetfair, strategy: { ...strategy, agent: "overGoalsHT", overGoalsHT: { ...baseState, phase: "monitoring" } }, updatedAt: nowIso };
+        await setQueueItem(matchId, next);
+        return json({ ok: true, skipped: true, reason: "market_not_ready", item: next });
+      }
+
+      const bestBack = Number.isFinite(overBack) ? overBack : NaN;
+      const bestLay = Number.isFinite(overLay) ? overLay : NaN;
+      const bestPrice = Number.isFinite(bestLay) && bestLay > 1 ? bestLay : bestBack;
+
+      if (!(Number.isFinite(bestPrice) && bestPrice > 1)) {
+        const next = { ...current, betfair: baseBetfair, strategy: { ...strategy, agent: "overGoalsHT", overGoalsHT: { ...baseState, phase: "monitoring" } }, updatedAt: nowIso };
+        await setQueueItem(matchId, next);
+        return json({ ok: true, skipped: true, reason: "no_price", item: next });
+      }
+
+      if (bestPrice < minOdds) {
+        const next = { ...current, betfair: baseBetfair, strategy: { ...strategy, agent: "overGoalsHT", overGoalsHT: { ...baseState, phase: "monitoring" } }, updatedAt: nowIso };
+        await setQueueItem(matchId, next);
+        return json({ ok: true, skipped: true, reason: "min_odds", item: next });
+      }
+
+      const computeMoment = () => {
+        const prevActive = Boolean((baseState as any)?.goalAlertActive ?? false);
+        const snapAtMs = Number((baseState as any)?.momentSnapAtMs);
+        const snapOverMatched = Number((baseState as any)?.momentOverMatched);
+        const snapOverBack = Number((baseState as any)?.momentOverBack);
+        const nowOverMatched = Number.isFinite(overMatched) ? Math.max(0, overMatched) : NaN;
+        const nowUnderMatched = Number.isFinite(underMatched) ? Math.max(0, underMatched) : NaN;
+        const nowOverBack = Number.isFinite(bestBack) ? bestBack : NaN;
+        const hasSnap = Number.isFinite(snapAtMs) && Number.isFinite(snapOverMatched) && Number.isFinite(snapOverBack);
+        if (!hasSnap) {
+          return {
+            goalAlertActive: prevActive,
+            momentScore: null,
+            momentSnapAtMs: nowMs,
+            momentOverMatched: Number.isFinite(nowOverMatched) ? nowOverMatched : null,
+            momentOverBack: Number.isFinite(nowOverBack) ? nowOverBack : null,
+            momentUpdatedAtMs: nowMs,
+          };
+        }
+        const dtMs = nowMs - snapAtMs;
+        if (!(Number.isFinite(dtMs) && dtMs >= 0)) {
+          return {
+            goalAlertActive: prevActive,
+            momentScore: null,
+            momentSnapAtMs: nowMs,
+            momentOverMatched: Number.isFinite(nowOverMatched) ? nowOverMatched : null,
+            momentOverBack: Number.isFinite(nowOverBack) ? nowOverBack : null,
+            momentUpdatedAtMs: nowMs,
+          };
+        }
+        const dtSec = dtMs / 1000;
+        if (dtSec < momentWindowMinSec) {
+          return {
+            goalAlertActive: prevActive,
+            momentScore: Number.isFinite(Number((baseState as any)?.momentScore)) ? Number((baseState as any)?.momentScore) : null,
+            momentSnapAtMs: snapAtMs,
+            momentOverMatched: Number.isFinite(snapOverMatched) ? snapOverMatched : null,
+            momentOverBack: Number.isFinite(snapOverBack) ? snapOverBack : null,
+            momentUpdatedAtMs: Number.isFinite(Number((baseState as any)?.momentUpdatedAtMs)) ? Number((baseState as any)?.momentUpdatedAtMs) : null,
+          };
+        }
+        if (dtSec > momentWindowMaxSec) {
+          return {
+            goalAlertActive: prevActive,
+            momentScore: null,
+            momentSnapAtMs: nowMs,
+            momentOverMatched: Number.isFinite(nowOverMatched) ? nowOverMatched : null,
+            momentOverBack: Number.isFinite(nowOverBack) ? nowOverBack : null,
+            momentUpdatedAtMs: nowMs,
+          };
+        }
+        const deltaOverMatched = Number.isFinite(nowOverMatched) && Number.isFinite(snapOverMatched) ? Math.max(0, nowOverMatched - snapOverMatched) : 0;
+        const deltaUnderMatched = Number.isFinite(nowUnderMatched) ? Math.max(0, nowUnderMatched) : 0;
+        const deltaOverBack = Number.isFinite(nowOverBack) && Number.isFinite(snapOverBack) ? Math.max(0, snapOverBack - nowOverBack) : 0;
+        const s1 = Math.min(1, deltaOverMatched / 500);
+        const s2 = Math.min(1, deltaOverBack / 0.1);
+        const dominance = deltaOverMatched > 0 ? Math.min(0.5, Math.max(0, (deltaOverMatched / Math.max(1, deltaUnderMatched)) - 1) * 0.25) : 0;
+        const score = Math.max(0, Math.min(2, s1 + s2 + dominance));
+        const thresholdOff = Math.max(0.05, momentOverThreshold - momentOverThresholdOffDelta);
+        const nextActive = prevActive ? score >= thresholdOff : score >= momentOverThreshold;
+        return {
+          goalAlertActive: Boolean(nextActive),
+          momentScore: score,
+          momentSnapAtMs: snapAtMs,
+          momentOverMatched: snapOverMatched,
+          momentOverBack: snapOverBack,
+          momentUpdatedAtMs: nowMs,
+        };
+      };
+
+      const moment = computeMoment();
+      const nextBase = {
+        ...baseState,
+        goalAlertActive: moment.goalAlertActive,
+        momentScore: moment.momentScore,
+        momentSnapAtMs: moment.momentSnapAtMs,
+        momentOverMatched: moment.momentOverMatched,
+        momentOverBack: moment.momentOverBack,
+        momentUpdatedAtMs: moment.momentUpdatedAtMs,
+        marketId,
+        selectionId,
+        marketMatched: Number.isFinite(marketMatched) ? marketMatched : null,
+      };
+
+      const entryBetId = String((existing as any)?.entryBetId ?? "").trim() || null;
+      const enteredAtIso = String((existing as any)?.enteredAt ?? "").trim() || null;
+      const enteredAtMs = enteredAtIso ? new Date(enteredAtIso).getTime() : 0;
+      const lockKey = lockKeyFor(marketId, selectionId);
+
+      if (phase === "entering" && entryBetId) {
+        let matchedSize = 0;
+        let remainingSize = 0;
+        let avgPriceMatched = NaN;
+        let status = "";
+        try {
+          const res = await listCurrentOrders({ adminToken: admin.adminToken, betIds: [entryBetId] });
+          const currentOrders = Array.isArray((res as any)?.currentOrders) ? (res as any).currentOrders : [];
+          const row = currentOrders.find((o: any) => String(o?.betId ?? "").trim() === entryBetId) ?? null;
+          matchedSize = Number(row?.sizeMatched);
+          remainingSize = Number(row?.sizeRemaining);
+          avgPriceMatched = Number(row?.averagePriceMatched);
+          status = String(row?.status ?? "").trim().toUpperCase();
+        } catch {}
+
+        const hasMatched = Number.isFinite(matchedSize) && matchedSize > 0;
+        if (hasMatched) {
+          const next = {
+            ...current,
+            betfair: baseBetfair,
+            strategy: { ...strategy, agent: "overGoalsHT", overGoalsHT: { ...nextBase, phase: "entered", entryBetId, entryMatchedSize: matchedSize, entryRemainingSize: remainingSize, entryMatchedAt: nowIso, entryPrice: Number.isFinite(avgPriceMatched) && avgPriceMatched > 1 ? avgPriceMatched : bestPrice } },
+            updatedAt: nowIso,
+          };
+          await setQueueItem(matchId, next);
+          return json({ ok: true, item: next, entered: true, reason: "matched" });
+        }
+
+        const waitedSec = enteredAtMs && Number.isFinite(enteredAtMs) ? (nowMs - enteredAtMs) / 1000 : 0;
+        if (waitedSec > secondsToWaitMatch) {
+          try {
+            await cancelOrders({ adminToken: admin.adminToken, marketId, betIds: [entryBetId] });
+          } catch {}
+          const locksCleared = clearEntryLock(entryLocksPruned, lockKey);
+          const next = {
+            ...current,
+            betfair: baseBetfair,
+            strategy: { ...strategy, agent: "overGoalsHT", overGoalsHT: { ...nextBase, entryLocks: locksCleared, phase: "monitoring", entryBetId: null, lastExitReason: "entry_timeout", lastClosedAt: nowIso, closedAt: nowIso } },
+            updatedAt: nowIso,
+          };
+          await setQueueItem(matchId, next);
+          return json({ ok: true, skipped: true, reason: "entry_timeout", item: next });
+        }
+
+        const next = { ...current, betfair: baseBetfair, strategy: { ...strategy, agent: "overGoalsHT", overGoalsHT: { ...nextBase, phase: "entering", entryBetId, enteredAt: enteredAtIso || nowIso, entryStatus: status || null } }, updatedAt: nowIso };
+        await setQueueItem(matchId, next);
+        return json({ ok: true, skipped: true, reason: "waiting_match", item: next });
+      }
+
+      if (phase === "entered" && entryBetId) {
+        const shouldExit = !moment.goalAlertActive || elapsedMin >= maxMinute;
+        if (shouldExit) {
+          const layPrice = Number.isFinite(bestLay) && bestLay > 1 ? bestLay : bestPrice;
+          const sizeToLay = stakeAbs;
+          let didHedge = false;
+          try {
+            await placeOrders({
+              adminToken: admin.adminToken,
+              marketId,
+              customerRef: mkStableCustomerRef("x", matchId, marketId, selectionId),
+              instructions: [
+                { selectionId, side: "LAY", orderType: "LIMIT", limitOrder: { size: Math.max(2, round2(sizeToLay)), price: layPrice, persistenceType: "LAPSE" } },
+              ],
+            });
+            didHedge = true;
+          } catch {}
+          const locksCleared = clearEntryLock(entryLocksPruned, lockKey);
+          const next = {
+            ...current,
+            betfair: baseBetfair,
+            strategy: { ...strategy, agent: "overGoalsHT", overGoalsHT: { ...nextBase, entryLocks: locksCleared, phase: "cooldown", closedAt: nowIso, lastClosedAt: nowIso, cooldownUntilMs: nowMs + 25_000, lastExitReason: !moment.goalAlertActive ? "alert_off_exit" : "max_minute_exit", lastCashoutAt: didHedge ? nowIso : null } },
+            updatedAt: nowIso,
+          };
+          await setQueueItem(matchId, next);
+          return json({ ok: true, item: next, closed: true, reason: !moment.goalAlertActive ? "alert_off_exit" : "max_minute_exit" });
+        }
+        const next = { ...current, betfair: baseBetfair, strategy: { ...strategy, agent: "overGoalsHT", overGoalsHT: { ...nextBase, phase: "entered" } }, updatedAt: nowIso };
+        await setQueueItem(matchId, next);
+        return json({ ok: true, skipped: true, reason: "holding", item: next });
+      }
+
+      const cooldownUntilMs = Number((existing as any)?.cooldownUntilMs);
+      if (phase === "cooldown" && Number.isFinite(cooldownUntilMs) && cooldownUntilMs > nowMs) {
+        const next = { ...current, betfair: baseBetfair, strategy: { ...strategy, agent: "overGoalsHT", overGoalsHT: { ...nextBase, phase: "cooldown" } }, updatedAt: nowIso };
+        await setQueueItem(matchId, next);
+        return json({ ok: true, skipped: true, reason: "cooldown", item: next });
+      }
+
+      const allowByPre = preConfidence != null && preConfidence >= preMinConfidence && elapsedMin <= Math.min(5, observeMinMinute);
+      const allowByObserve = elapsedMin >= observeMinMinute && elapsedMin <= observeMaxMinute && moment.goalAlertActive;
+      const allowEntry = allowByPre || allowByObserve;
+
+      if (!allowEntry) {
+        const next = { ...current, betfair: baseBetfair, strategy: { ...strategy, agent: "overGoalsHT", overGoalsHT: { ...nextBase, phase: "monitoring" } }, updatedAt: nowIso };
+        await setQueueItem(matchId, next);
+        return json({ ok: true, skipped: true, reason: "waiting_signal", item: next });
+      }
+
+      if (entriesCount >= maxEntries) {
+        const next = { ...current, betfair: baseBetfair, strategy: { ...strategy, agent: "overGoalsHT", overGoalsHT: { ...nextBase, phase: "monitoring" } }, updatedAt: nowIso };
+        await setQueueItem(matchId, next);
+        return json({ ok: true, skipped: true, reason: "max_entries", item: next });
+      }
+
+      if (isEntryLocked(entryLocksPruned, lockKey)) {
+        const next = { ...current, betfair: baseBetfair, strategy: { ...strategy, agent: "overGoalsHT", overGoalsHT: { ...nextBase, phase: "monitoring" } }, updatedAt: nowIso };
+        await setQueueItem(matchId, next);
+        return json({ ok: true, skipped: true, reason: "entry_locked", item: next });
+      }
+
+      const entryPrice = movePriceByTicks(bestPrice, entryOffsetTicks);
+      const result = await placeOrders({
+        adminToken: admin.adminToken,
+        marketId,
+        customerRef: mkStableCustomerRef("e", matchId, marketId, selectionId),
+        instructions: [
+          {
+            selectionId,
+            side: "BACK",
+            orderType: "LIMIT",
+            limitOrder: { size: stakeAbs, price: entryPrice, persistenceType: "LAPSE" },
+          },
+        ],
+      }).catch((e) => ({ __error: e instanceof Error ? e.message : String(e) }));
+
+      const betId = extractBetId(result);
+      const lockTtlMs = (betId ? entryLockTtlSeconds : entryLockPendingTtlSeconds) * 1000;
+      const locksUpdated = setEntryLock(entryLocksPruned, lockKey, {
+        matchId,
+        marketId,
+        selectionId,
+        side: "BACK",
+        tradeMode: "over_ht",
+        lockedAt: nowIso,
+        betId,
+        status: extractReportStatus(result),
+        expiresAtMs: nowMs + Math.max(1000, lockTtlMs),
+      });
+
+      const next = {
+        ...current,
+        betfair: baseBetfair,
+        strategy: {
+          ...strategy,
+          agent: "overGoalsHT",
+          overGoalsHT: {
+            ...nextBase,
+            entryLocks: locksUpdated,
+            phase: "entering",
+            entriesCount: entriesCount + 1,
+            entryMarketId: marketId,
+            selectionId,
+            entryPrice,
+            stakeAbs,
+            enteredAt: nowIso,
+            lastEntryAt: nowIso,
+            entryBetId: betId,
+            lastResult: (result as any)?.__error ? null : result ?? null,
+            lastEntryStatus: extractReportStatus(result),
+            lastEntryErrorCode: extractReportErrorCode(result),
+          },
+        },
+        updatedAt: nowIso,
+      };
+      await setQueueItem(matchId, next);
+      return json({ ok: true, item: next, entered: true, reason: "entering" });
+    }
+
     if (matchPath(path, "/automation/betfair/strategy/scalpingTicks/tick")) {
       const admin = requireAdminToken(body);
       if (!admin.ok) return json(admin, 401);
@@ -2148,14 +2703,14 @@ Deno.serve(async (req) => {
 
       const cfg = (body as any)?.config && typeof (body as any).config === "object" ? (body as any).config : {};
       const goalsSafe = typeof goals === "number" && Number.isFinite(goals) ? Math.max(0, Math.floor(goals)) : null;
-      const underLineCode = goalsSafe != null ? ouLineCodeFromGoals(goalsSafe) : 15;
-      const overLineCode = Math.max(5, underLineCode - 10);
+      const underLineCode = 15;
+      const overLineCode = 5;
 
       let ouOverErr: string | null = null;
       let ouUnderErr: string | null = null;
       const ouOverBetfair = await (async () => {
         try {
-          const raw = await resolveBetfairOverUnderMarket({ eventId, lineCode: overLineCode });
+          const raw = await resolveBetfairOverUnderMarket({ eventId, lineCode: overLineCode, adminToken: admin.adminToken });
           return slimOuMarket(raw);
         } catch (e) {
           ouOverErr = e instanceof Error ? e.message : String(e);
@@ -2164,7 +2719,7 @@ Deno.serve(async (req) => {
       })();
       const ouUnderBetfair = await (async () => {
         try {
-          const raw = await resolveBetfairOverUnderMarket({ eventId, lineCode: underLineCode });
+          const raw = await resolveBetfairOverUnderMarket({ eventId, lineCode: underLineCode, adminToken: admin.adminToken });
           return slimOuMarket(raw);
         } catch (e) {
           ouUnderErr = e instanceof Error ? e.message : String(e);
@@ -2190,6 +2745,32 @@ Deno.serve(async (req) => {
 
       const overReady = Boolean(overMarketId && Number.isFinite(overOverSel) && Number.isFinite(overUnderSel));
       const underReady = Boolean(underMarketId && Number.isFinite(underOverSel) && Number.isFinite(underUnderSel));
+
+      if (overMarketId && underMarketId && overMarketId === underMarketId) {
+        const next = {
+          ...current,
+          betfair: baseBetfair,
+          strategy: {
+            ...(((current as any)?.strategy && typeof (current as any).strategy === "object") ? (current as any).strategy : {}),
+            agent: "scalpingTicks",
+            scalpingTicks: {
+              ...((((current as any)?.strategy?.scalpingTicks && typeof (current as any).strategy.scalpingTicks === "object") ? (current as any).strategy.scalpingTicks : {})),
+              phase: "monitoring",
+              lastTickAt: new Date().toISOString(),
+              lineCodeOver: overLineCode,
+              lineCodeUnder: underLineCode,
+              marketOver: ouOverBetfair ?? null,
+              marketUnder: ouUnderBetfair ?? null,
+              ouMarketErrorOver: ouOverErr,
+              ouMarketErrorUnder: ouUnderErr,
+              ouMarketError: "Over/Under resolveu para o mesmo marketId (inconsistência).",
+            },
+          },
+          updatedAt: new Date().toISOString(),
+        };
+        await setQueueItem(matchId, next);
+        return json({ ok: true, skipped: true, reason: "ou_market_same_id", item: next });
+      }
 
       if (!overReady && !underReady) {
         const next = {
@@ -2481,9 +3062,10 @@ Deno.serve(async (req) => {
         };
       })();
 
-      let side = momentOver.trigger ? "over" : "under";
-      if (side === "over" && !overReady) side = underReady ? "under" : "over";
-      if (side === "under" && !underReady) side = overReady ? "over" : "under";
+      const sideSignal = momentOver.trigger ? "over" : "under";
+      let side = sideSignal;
+      if (side === "over" && !overReady) side = "over";
+      if (side === "under" && !underReady) side = "under";
 
       const marketId = side === "over" ? overMarketId : underMarketId;
       const marketStatus = (side === "over" ? overMarketStatus : underMarketStatus) || "";
@@ -2527,6 +3109,28 @@ Deno.serve(async (req) => {
           ? Math.abs(bestBack - lastBestBack) >= 0.25 || Math.abs((bestBack - lastBestBack) / Math.max(1.01, lastBestBack)) >= 0.12
           : false;
 
+      const prevAlertActive = Boolean(existing?.goalAlertActive ?? false);
+      const prevAlertOffAtMsRaw = Number((existing as any)?.alertOffAtMs);
+      const prevAlertOffAtMs = Number.isFinite(prevAlertOffAtMsRaw) && prevAlertOffAtMsRaw > 0 ? prevAlertOffAtMsRaw : null;
+
+      const alertActiveNow = Boolean(momentOver.trigger);
+      const wentOffNow = prevAlertActive && !alertActiveNow;
+      const alertOffAtMs = wentOffNow ? nowMs : prevAlertOffAtMs;
+
+      const minOffSecondsRaw = Number((cfg as any)?.alertEpisodeMinOffSeconds ?? 25);
+      const minOffMs =
+        (Number.isFinite(minOffSecondsRaw) ? Math.max(0, Math.min(300, Math.floor(minOffSecondsRaw))) : 25) * 1000;
+      const offAgeMs =
+        !prevAlertActive && alertActiveNow && alertOffAtMs != null && Number.isFinite(alertOffAtMs) && alertOffAtMs > 0
+          ? nowMs - alertOffAtMs
+          : Number.POSITIVE_INFINITY;
+      const isNewAlertEpisode = alertActiveNow && !prevAlertActive && (alertOffAtMs == null || offAgeMs > minOffMs);
+
+      const prevOverEntriesInAlert = Math.max(0, Math.floor(Number((existing as any)?.overEntriesInAlert ?? 0) || 0));
+      const prevAlertOverEntriesInAlert = Math.max(0, Math.floor(Number((existing as any)?.alertOverEntriesInAlert ?? 0) || 0));
+      const overEntriesInAlert = isNewAlertEpisode ? 0 : prevOverEntriesInAlert;
+      const alertOverEntriesInAlert = isNewAlertEpisode ? 0 : prevAlertOverEntriesInAlert;
+
       const baseState = {
         ...existing,
         entryLocks: entryLocksPruned,
@@ -2542,7 +3146,10 @@ Deno.serve(async (req) => {
         marketOver: ouOverBetfair ?? null,
         marketUnder: ouUnderBetfair ?? null,
         side,
-        goalAlertActive: Boolean(momentOver.trigger),
+        goalAlertActive: alertActiveNow,
+        alertOffAtMs: alertOffAtMs == null ? null : alertOffAtMs,
+        overEntriesInAlert,
+        alertOverEntriesInAlert,
         momentSnapAtMs: Number.isFinite(momentOver.nextSnapAtMs) ? momentOver.nextSnapAtMs : null,
         momentOverMatched: (momentOver as any)?.nextOverMatched ?? null,
         momentUnderMatched: (momentOver as any)?.nextUnderMatched ?? null,
@@ -2550,6 +3157,28 @@ Deno.serve(async (req) => {
         lastMomentOverScore: (momentOver as any)?.score ?? null,
         lastMomentOverThreshold: (momentOver as any)?.threshold ?? null,
       };
+
+      if (sideSignal === "over" && !overReady && (!phase || phase === "monitoring" || phase === "cooldown" || phase === "closed")) {
+        const next = {
+          ...current,
+          betfair: baseBetfair,
+          strategy: { ...strategy, agent: "scalpingTicks", scalpingTicks: { ...baseState, phase: phase || "monitoring" } },
+          updatedAt: nowIso,
+        };
+        await setQueueItem(matchId, next);
+        return json({ ok: true, skipped: true, reason: "over_market_not_ready", item: next });
+      }
+
+      if (sideSignal === "under" && !underReady && (!phase || phase === "monitoring" || phase === "cooldown" || phase === "closed")) {
+        const next = {
+          ...current,
+          betfair: baseBetfair,
+          strategy: { ...strategy, agent: "scalpingTicks", scalpingTicks: { ...baseState, phase: phase || "monitoring" } },
+          updatedAt: nowIso,
+        };
+        await setQueueItem(matchId, next);
+        return json({ ok: true, skipped: true, reason: "under_market_not_ready", item: next });
+      }
 
       let ouOrdersCache: any[] | null = null;
       const getOuOrders = async () => {
@@ -3300,16 +3929,33 @@ Deno.serve(async (req) => {
       }
 
       if (!phase || phase === "monitoring" || phase === "cooldown" || phase === "closed") {
-        const existingEntry = await findExistingBackEntry(
-          marketId,
-          selectionId,
-        );
+        const existingEntryOver = overReady ? await findExistingBackEntry(overMarketId, overOverSel) : null;
+        const existingEntryUnder = underReady ? await findExistingBackEntry(underMarketId, underUnderSel) : null;
+        const pickExisting = (a: any, b: any) => {
+          if (!a && !b) return null;
+          if (a && !b) return a;
+          if (!a && b) return b;
+          const atA = String(a?.placedAt ?? "").trim();
+          const atB = String(b?.placedAt ?? "").trim();
+          if (atA && atB) return atA.localeCompare(atB) >= 0 ? a : b;
+          return a ?? b;
+        };
+        const existingEntry = pickExisting(existingEntryOver, existingEntryUnder);
         if (existingEntry) {
+          const existingBetId = String(existingEntry?.betId ?? "").trim();
+          const adoptedSide =
+            existingEntryOver && String((existingEntryOver as any)?.betId ?? "").trim() === existingBetId
+              ? "over"
+              : "under";
+          const adoptedMarketId = adoptedSide === "over" ? overMarketId : underMarketId;
+          const adoptedSelectionId = adoptedSide === "over" ? overOverSel : underUnderSel;
+          const adoptedBestBack = adoptedSide === "over" ? overBack : underBack;
+          const spreadTicksUsed = adoptedSide === "over" ? overSpreadTicks : underSpreadTicks;
           const sizeMatched = Number(existingEntry.sizeMatched);
           const sizeRemaining = Number(existingEntry.sizeRemaining);
           const hasMatched = Number.isFinite(sizeMatched) && sizeMatched > 0;
           const tpExisting = hasMatched
-            ? await findExistingLayTp(marketId, selectionId)
+            ? await findExistingLayTp(adoptedMarketId, adoptedSelectionId)
             : null;
           const stakeFromOrders =
             Number.isFinite(sizeMatched) && sizeMatched > 0
@@ -3333,16 +3979,19 @@ Deno.serve(async (req) => {
                 ...baseState,
                 phase: hasMatched && takeProfit ? "entered" : "entering",
                 cycleCount,
-                entryMarketId: marketId,
-                entryLineCode: String(marketId ?? "").trim() === String(overMarketId ?? "").trim() ? overLineCode : underLineCode,
-                selectionId: selectionId,
+                ...(alertActiveNow && adoptedSide === "over"
+                  ? { overEntriesInAlert: Math.max(1, Math.floor(Number((baseState as any)?.overEntriesInAlert ?? 0) || 0)) }
+                  : {}),
+                entryMarketId: adoptedMarketId,
+                entryLineCode: adoptedSide === "over" ? overLineCode : underLineCode,
+                selectionId: adoptedSelectionId,
                 entryPrice:
                   (existingEntry.averagePriceMatched != null && existingEntry.averagePriceMatched > 1 ? existingEntry.averagePriceMatched : null) ??
                   existingEntry.price ??
-                  Number(existing?.entryPrice ?? bestBack),
+                  Number(existing?.entryPrice ?? adoptedBestBack),
                 targetPrice: takeProfit ? tpPrice : Number(existing?.targetPrice),
                 stakeAbs: stakeFromOrders,
-                spreadTicks,
+                spreadTicks: spreadTicksUsed,
                 enteredAt: String(existing?.enteredAt ?? nowIso),
                 lastEntryAt: nowIso,
                 entryBetId: existingEntry.betId,
@@ -3359,6 +4008,20 @@ Deno.serve(async (req) => {
           };
           await setQueueItem(matchId, next);
           return json({ ok: true, item: next, skipped: true, reason: "adopt_existing_entry" });
+        }
+
+        if (alertActiveNow && side === "over") {
+          const count = Number((baseState as any)?.overEntriesInAlert);
+          if (Number.isFinite(count) && count >= 3) {
+            const next = {
+              ...current,
+              betfair: baseBetfair,
+              strategy: { ...strategy, agent: "scalpingTicks", scalpingTicks: { ...baseState, phase: "monitoring" } },
+              updatedAt: nowIso,
+            };
+            await setQueueItem(matchId, next);
+            return json({ ok: true, skipped: true, reason: "over_entries_cap", item: next });
+          }
         }
 
         const locksNow = (baseState as any)?.entryLocks && typeof (baseState as any).entryLocks === "object" ? (baseState as any).entryLocks : {};
@@ -3422,6 +4085,9 @@ Deno.serve(async (req) => {
               entryLocks: locksUpdated,
               phase: "entering",
               cycleCount,
+              ...(alertActiveNow && side === "over"
+                ? { overEntriesInAlert: Math.max(0, Math.floor(Number((baseState as any)?.overEntriesInAlert ?? 0) || 0)) + 1 }
+                : {}),
               entryMarketId: marketId,
               entryLineCode: String(marketId ?? "").trim() === String(overMarketId ?? "").trim() ? overLineCode : underLineCode,
               selectionId,
@@ -3937,7 +4603,7 @@ Deno.serve(async (req) => {
           const hedgeCooldownUntilMsStored = Number(hedgeState?.cooldownUntilMs);
 
           const resolveHedge = async () => {
-            const raw = await resolveBetfairOverUnderMarket({ eventId, lineCode: hedgeLineCode });
+            const raw = await resolveBetfairOverUnderMarket({ eventId, lineCode: hedgeLineCode, adminToken: admin.adminToken });
             const slim = slimOuMarket(raw);
             const mid = String(slim?.marketId ?? "").trim();
             const selUnder = Number(slim?.runners?.underSelectionId);
@@ -4337,6 +5003,10 @@ Deno.serve(async (req) => {
         const alertIsCooling = alertPhase === "cooldown" && Number.isFinite(alertCooldownUntilMs0) && alertCooldownUntilMs0 > nowMs;
 
         let alertOverNext: any = alertOver0;
+        let alertOverEntriesInAlertNext = Math.max(
+          0,
+          Math.floor(Number((baseState as any)?.alertOverEntriesInAlert ?? 0) || 0),
+        );
         let entryLocksAfterAlert: any = (baseState as any).entryLocks;
         const locksNowGlobal = entryLocksAfterAlert && typeof entryLocksAfterAlert === "object" ? entryLocksAfterAlert : {};
         const alertMarketId = String((alertOver0 as any)?.entryMarketId ?? "").trim() || overMarketId;
@@ -4449,7 +5119,7 @@ Deno.serve(async (req) => {
           let uErr: string | null = null;
           const uMk = await (async () => {
             try {
-              const raw = await resolveBetfairOverUnderMarket({ eventId, lineCode: alertUnderLineCode });
+              const raw = await resolveBetfairOverUnderMarket({ eventId, lineCode: alertUnderLineCode, adminToken: admin.adminToken });
               return slimOuMarket(raw);
             } catch (e) {
               uErr = e instanceof Error ? e.message : String(e);
@@ -4580,8 +5250,11 @@ Deno.serve(async (req) => {
             const alertStakeAbs = Math.max(2, Math.min(protectCap, desiredProtectStakeAbs));
 
             if (!alertEntryBetId0) {
-              const adopted = await findExistingBackEntry(overMarketId, overOverSel);
-              if (adopted?.betId) {
+              if (alertOverEntriesInAlertNext >= 3) {
+              } else {
+                const adopted = await findExistingBackEntry(overMarketId, overOverSel);
+                if (adopted?.betId) {
+                  alertOverEntriesInAlertNext += 1;
                 const hasMatched = Number(adopted?.sizeMatched) > 0;
                 const tpExisting = hasMatched ? await findExistingLayTp(overMarketId, overOverSel) : null;
                 const takeProfit =
@@ -4605,7 +5278,8 @@ Deno.serve(async (req) => {
                   lastEntryErrorCode: null,
                   cooldownUntilMs: Number((alertOver0 as any)?.cooldownUntilMs) || null,
                 };
-              } else if (!isEntryLocked(locksNowGlobal, alertLockKey2)) {
+                } else if (!isEntryLocked(locksNowGlobal, alertLockKey2)) {
+                  alertOverEntriesInAlertNext += 1;
                 const result = await placeOrders({
                   adminToken: admin.adminToken,
                   marketId: overMarketId,
@@ -4648,6 +5322,7 @@ Deno.serve(async (req) => {
                   lastEntryStatus: extractReportStatus(result),
                   lastEntryErrorCode: extractReportErrorCode(result),
                 };
+                }
               }
             } else {
               let sizeMatched = 0;
@@ -4815,7 +5490,7 @@ Deno.serve(async (req) => {
           let uErr: string | null = null;
           const uMk = await (async () => {
             try {
-              const raw = await resolveBetfairOverUnderMarket({ eventId, lineCode: alertUnderLineCode });
+              const raw = await resolveBetfairOverUnderMarket({ eventId, lineCode: alertUnderLineCode, adminToken: admin.adminToken });
               return slimOuMarket(raw);
             } catch (e) {
               uErr = e instanceof Error ? e.message : String(e);
@@ -5024,7 +5699,7 @@ Deno.serve(async (req) => {
           }
         }
 
-        const baseState2 = { ...baseState, entryLocks: entryLocksAfterAlert, alertOver: alertOverNext, alertUnder: alertUnderNext };
+        const baseState2 = { ...baseState, entryLocks: entryLocksAfterAlert, alertOver: alertOverNext, alertUnder: alertUnderNext, alertOverEntriesInAlert: alertOverEntriesInAlertNext };
 
         if (tpBetId && (!lastTpCheckAtMs || !Number.isFinite(lastTpCheckAtMs) || nowMs - lastTpCheckAtMs > 4500)) {
           try {
@@ -5395,6 +6070,7 @@ Deno.serve(async (req) => {
         eventId,
         homeTeam: String(current?.homeTeam ?? ""),
         awayTeam: String(current?.awayTeam ?? ""),
+        adminToken: admin.adminToken,
       }).catch((e) => ({ __error: e instanceof Error ? e.message : String(e) }));
 
       const ahErr = (ahMarket as any)?.__error ? String((ahMarket as any).__error) : null;
@@ -6454,6 +7130,7 @@ Deno.serve(async (req) => {
       }
 
       const pnlRes = await betfairRpc({
+        adminToken: admin.adminToken,
         method: "SportsAPING/v1.0/listMarketProfitAndLoss",
         params: { marketIds: [marketId], includeSettledBets: false, includeBspBets: false, netOfCommission: true },
       });
@@ -6476,6 +7153,7 @@ Deno.serve(async (req) => {
       const maxBefore = valuesBefore.length ? valuesBefore.reduce((m: number, v: number) => (v > m ? v : m), valuesBefore[0]) : null;
 
       const bookRes = await betfairRpc({
+        adminToken: admin.adminToken,
         method: "SportsAPING/v1.0/listMarketBook",
         params: { marketIds: [marketId], priceProjection: { priceData: ["EX_BEST_OFFERS"], virtualise: true } },
       });
@@ -6658,6 +7336,7 @@ Deno.serve(async (req) => {
       }, 0);
 
       const pnlRes = await betfairRpc({
+        adminToken: admin.adminToken,
         method: "SportsAPING/v1.0/listMarketProfitAndLoss",
         params: { marketIds: [marketId], includeSettledBets: false, includeBspBets: false, netOfCommission: true },
       });

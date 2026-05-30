@@ -425,6 +425,22 @@ export class ApiFootballService {
         continue;
       }
     }
+
+    for (let i = 0; i < localStorage.length; i += 1) {
+      const key = localStorage.key(i);
+      if (!key || !key.startsWith('apiFootball_leagues_cache_v2_country_')) continue;
+      try {
+        const raw = localStorage.getItem(key);
+        if (!raw) continue;
+        const parsed = JSON.parse(raw) as { items?: any[] };
+        const items = Array.isArray(parsed?.items) ? parsed.items : [];
+        const found = items.find((l) => Number((l as any)?.id) === leagueId) ?? null;
+        const season = Number((found as any)?.season);
+        if (Number.isFinite(season) && season > 2000) return Math.floor(season);
+      } catch {
+        continue;
+      }
+    }
     return null;
   }
 

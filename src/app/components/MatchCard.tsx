@@ -486,6 +486,9 @@ export function MatchCard({
   const [agentMarketSummaries, setAgentMarketSummaries] = useState<AgentMarketSummary[] | null>(null);
   const [isLoadingAgentMarkets, setIsLoadingAgentMarkets] = useState(false);
   const [tick, setTick] = useState(0);
+  const [goalBlinkActive, setGoalBlinkActive] = useState(false);
+  const lastScoreKeyRef = useRef<string | null>(null);
+  const goalBlinkTimerRef = useRef<number | null>(null);
   const [formOpen, setFormOpen] = useState(false);
   const [betfairConfirmOpen, setBetfairConfirmOpen] = useState(false);
   const [removeConfirmOpen, setRemoveConfirmOpen] = useState(false);
@@ -695,6 +698,35 @@ export function MatchCard({
         ? footballMatch.score.fullTime.away
         : null;
 
+  useEffect(() => {
+    if (goalBlinkTimerRef.current != null) {
+      window.clearTimeout(goalBlinkTimerRef.current);
+      goalBlinkTimerRef.current = null;
+    }
+
+    if (!isLive) {
+      lastScoreKeyRef.current = null;
+      setGoalBlinkActive(false);
+      return;
+    }
+
+    if (!(typeof displayHomeScore === 'number' && typeof displayAwayScore === 'number')) return;
+    const nextKey = `${displayHomeScore}-${displayAwayScore}`;
+    const prevKey = lastScoreKeyRef.current;
+    lastScoreKeyRef.current = nextKey;
+    if (prevKey && prevKey !== nextKey) {
+      setGoalBlinkActive(true);
+      goalBlinkTimerRef.current = window.setTimeout(() => setGoalBlinkActive(false), 12_000);
+    }
+
+    return () => {
+      if (goalBlinkTimerRef.current != null) {
+        window.clearTimeout(goalBlinkTimerRef.current);
+        goalBlinkTimerRef.current = null;
+      }
+    };
+  }, [displayAwayScore, displayHomeScore, isLive]);
+
   const resultAvailable = isFinished && typeof displayHomeScore === 'number' && typeof displayAwayScore === 'number';
   const showKickoff = !isLive && !resultAvailable;
   const hasPrediction = Boolean(prediction);
@@ -728,6 +760,11 @@ export function MatchCard({
         ? Math.round(prediction.btts.confidence)
         : null;
 
+    const overHT =
+      (prediction as any)?.overHT?.prediction === 'over' && typeof (prediction as any)?.overHT?.confidence === 'number'
+        ? Math.round((prediction as any).overHT.confidence)
+        : null;
+
     const layHome = Math.max(0, 100 - probs.home);
     const layAway = Math.max(0, 100 - probs.away);
 
@@ -735,6 +772,7 @@ export function MatchCard({
       probs,
       over15,
       bttsYes,
+      overHT,
       layHome,
       layAway,
     };
@@ -830,6 +868,7 @@ export function MatchCard({
           scoreHome: typeof match.result?.home === 'number' ? match.result.home : null,
           scoreAway: typeof match.result?.away === 'number' ? match.result.away : null,
           prediction: prediction ?? null,
+          includeCorrectScore: true,
         }),
       });
       const raw = await res.text().catch(() => '');
@@ -1529,7 +1568,14 @@ export function MatchCard({
             </div>
           </div>
         ) : (
-          <div className="grid grid-cols-[1fr_3rem] gap-x-3 gap-y-3 items-center mb-4">
+          <div className="grid grid-cols-[1.25rem_1fr_3rem] gap-x-3 gap-y-3 items-center mb-4">
+            <div className="row-span-2 flex items-center justify-center">
+              {goalBlinkActive ? (
+                <div className="ia-goal-blink text-[18px] leading-none select-none" aria-label="Gol">
+                  ⚽
+                </div>
+              ) : null}
+            </div>
             <div className="flex items-center gap-2 min-w-0">
               <TeamLogo teamName={match.homeTeam} logoUrl={homeCrest} size="lg" showName={false} />
               <div className="font-medium text-lg truncate">{match.homeTeam}</div>
@@ -1571,6 +1617,11 @@ export function MatchCard({
             {voteSignals.over15 !== null ? (
               <Badge className="bg-blue-100 text-blue-800 border-blue-300 tabular-nums">
                 Over 1.5 {voteSignals.over15}%
+              </Badge>
+            ) : null}
+            {voteSignals.overHT !== null ? (
+              <Badge className="bg-fuchsia-100 text-fuchsia-800 border-fuchsia-300 tabular-nums">
+                HT Over 0.5 {voteSignals.overHT}%
               </Badge>
             ) : null}
             <Badge variant="outline" className="tabular-nums">

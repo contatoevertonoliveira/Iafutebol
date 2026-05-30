@@ -1,6 +1,6 @@
 import { Match, Prediction } from '../data/mockData';
 import { TeamLogo } from './TeamLogo';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Loader2, Trash2 } from 'lucide-react';
 import type { FootballMatch } from '../services/aiAgents';
 import { Badge } from './ui/badge';
@@ -457,6 +457,9 @@ export function MobileMatchCard({
 }: MobileMatchCardProps) {
   const isLive = match.status === 'live';
   const isFinished = match.status === 'finished';
+  const [goalBlinkActive, setGoalBlinkActive] = useState(false);
+  const lastScoreKeyRef = useRef<string | null>(null);
+  const goalBlinkTimerRef = useRef<number | null>(null);
   const [formOpen, setFormOpen] = useState(false);
   const [betfairConfirmOpen, setBetfairConfirmOpen] = useState(false);
   const [removeConfirmOpen, setRemoveConfirmOpen] = useState(false);
@@ -552,6 +555,7 @@ export function MobileMatchCard({
           scoreHome,
           scoreAway,
           prediction: prediction ?? null,
+          includeCorrectScore: true,
         }),
       });
       const raw = await res.text().catch(() => '');
@@ -707,6 +711,35 @@ export function MobileMatchCard({
         ? footballMatch.score.fullTime.away
         : null;
 
+  useEffect(() => {
+    if (goalBlinkTimerRef.current != null) {
+      window.clearTimeout(goalBlinkTimerRef.current);
+      goalBlinkTimerRef.current = null;
+    }
+
+    if (!isLive) {
+      lastScoreKeyRef.current = null;
+      setGoalBlinkActive(false);
+      return;
+    }
+
+    if (!(typeof scoreHome === 'number' && typeof scoreAway === 'number')) return;
+    const nextKey = `${scoreHome}-${scoreAway}`;
+    const prevKey = lastScoreKeyRef.current;
+    lastScoreKeyRef.current = nextKey;
+    if (prevKey && prevKey !== nextKey) {
+      setGoalBlinkActive(true);
+      goalBlinkTimerRef.current = window.setTimeout(() => setGoalBlinkActive(false), 12_000);
+    }
+
+    return () => {
+      if (goalBlinkTimerRef.current != null) {
+        window.clearTimeout(goalBlinkTimerRef.current);
+        goalBlinkTimerRef.current = null;
+      }
+    };
+  }, [isLive, scoreAway, scoreHome]);
+
   const liveMinute = (() => {
     if (!isLive) return null;
     if (typeof match.liveElapsed !== 'number') return null;
@@ -752,9 +785,13 @@ export function MobileMatchCard({
       prediction.btts?.prediction === 'yes' && typeof prediction.btts.confidence === 'number'
         ? Math.round(prediction.btts.confidence)
         : null;
+    const overHT =
+      (prediction as any)?.overHT?.prediction === 'over' && typeof (prediction as any)?.overHT?.confidence === 'number'
+        ? Math.round((prediction as any).overHT.confidence)
+        : null;
     const layHome = Math.max(0, 100 - prob.home);
     const layAway = Math.max(0, 100 - prob.away);
-    return { over15, bttsYes, layHome, layAway };
+    return { over15, bttsYes, overHT, layHome, layAway };
   })();
 
   const ahDisplay = useMemo(() => {
@@ -1067,7 +1104,10 @@ export function MobileMatchCard({
         <div className="grid grid-cols-3 items-center">
           <div className="flex flex-col items-center gap-2 min-w-0">
             <TeamLogo teamName={match.homeTeam} logoUrl={homeCrest} size="lg" showName={false} />
-            <div className="text-sm font-semibold truncate">{match.homeTeam}</div>
+            <div className="text-sm font-semibold truncate">
+              {goalBlinkActive ? <span className="ia-goal-blink mr-1 select-none">⚽</span> : null}
+              {match.homeTeam}
+            </div>
           </div>
 
           <div className="flex flex-col items-center justify-center">
@@ -1082,7 +1122,10 @@ export function MobileMatchCard({
 
           <div className="flex flex-col items-center gap-2 min-w-0">
             <TeamLogo teamName={match.awayTeam} logoUrl={awayCrest} size="lg" showName={false} />
-            <div className="text-sm font-semibold truncate">{match.awayTeam}</div>
+            <div className="text-sm font-semibold truncate">
+              {goalBlinkActive ? <span className="ia-goal-blink mr-1 select-none">⚽</span> : null}
+              {match.awayTeam}
+            </div>
           </div>
         </div>
 
@@ -1610,6 +1653,12 @@ export function MobileMatchCard({
                               OU {Number(prediction.overUnder.line).toFixed(1)}: {prediction.overUnder.prediction === 'over' ? 'Over' : 'Under'}{' '}
                               {Math.round(prediction.overUnder.confidence)}%
                             </div>
+                            {(prediction as any)?.overHT && typeof (prediction as any)?.overHT?.confidence === 'number' ? (
+                              <div className="text-[11px] font-semibold px-2 py-1 rounded-full border bg-fuchsia-100 text-fuchsia-800 border-fuchsia-200 tabular-nums">
+                                HT O0.5: {(prediction as any).overHT.prediction === 'over' ? 'Over' : 'Under'}{' '}
+                                {Math.round((prediction as any).overHT.confidence)}%
+                              </div>
+                            ) : null}
                             <div className="text-[11px] font-semibold px-2 py-1 rounded-full border bg-gray-100 text-gray-800 border-gray-200 tabular-nums">
                               BTTS: {prediction.btts.prediction === 'yes' ? 'Sim' : 'Não'} {Math.round(prediction.btts.confidence)}%
                             </div>

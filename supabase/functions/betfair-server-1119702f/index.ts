@@ -295,8 +295,20 @@ const betfairJsonRpcRaw = async (params: { method: string; params: any; sessionT
     body: JSON.stringify([{ jsonrpc: "2.0", id: 1, method, params: params.params ?? {} }]),
   });
 
-  const data = await res.json().catch(() => null);
-  if (!res.ok) throw new Error(`Betfair API falhou (HTTP ${res.status})`);
+  const text = await res.text().catch(() => "");
+  const data = (() => {
+    try {
+      return text ? JSON.parse(text) : null;
+    } catch {
+      return null;
+    }
+  })();
+  if (!res.ok) {
+    const isSessionInvalid = res.status === 401 || res.status === 403 || /INVALID_SESSION|NO_SESSION|SESSION.*INVALID/i.test(text);
+    const err = new Error(`Betfair API falhou (HTTP ${res.status})${text ? `: ${text.slice(0, 260)}` : ""}`) as any;
+    err.__betfairSessionInvalid = isSessionInvalid;
+    throw err;
+  }
   const first = Array.isArray(data) ? data[0] : data;
   if (first?.error) {
     const msg = first?.error?.message ? String(first.error.message) : JSON.stringify(first.error);

@@ -86,8 +86,30 @@ export interface FootballMatch {
   };
   preLive?: {
     fetchedAt: string;
-    homeLast?: { played: number; gfAvg: number | null; gaAvg: number | null; w: number; d: number; l: number };
-    awayLast?: { played: number; gfAvg: number | null; gaAvg: number | null; w: number; d: number; l: number };
+    homeLast?: {
+      played: number;
+      gfAvg: number | null;
+      gaAvg: number | null;
+      w: number;
+      d: number;
+      l: number;
+      htPlayed?: number;
+      htAnyGoal?: number;
+      htOver05Rate?: number | null;
+      htGoalsAvg?: number | null;
+    };
+    awayLast?: {
+      played: number;
+      gfAvg: number | null;
+      gaAvg: number | null;
+      w: number;
+      d: number;
+      l: number;
+      htPlayed?: number;
+      htAnyGoal?: number;
+      htOver05Rate?: number | null;
+      htGoalsAvg?: number | null;
+    };
     h2h?: { played: number; homeW: number; draw: number; awayW: number; goalsAvg: number | null };
   };
 }

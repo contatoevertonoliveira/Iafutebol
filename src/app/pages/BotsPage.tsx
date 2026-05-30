@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router';
-import { Bot, Copy, Settings as SettingsIcon, Trash2, Wrench } from 'lucide-react';
+import { Bot, Copy, Settings as SettingsIcon, Trash2, Wrench, MessageSquare } from 'lucide-react';
 import { toast } from 'sonner';
 import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
@@ -120,24 +120,103 @@ export default function BotsPage() {
   const [reqObjective, setReqObjective] = useState('');
   const [reqMarket, setReqMarket] = useState('Over/Under');
   const [reqBase, setReqBase] = useState<SystemBotKey | 'novo'>('scalpingTicks');
-  const [reqSafety, setReqSafety] = useState(
-    'Obrigatório: entryLocks persistidos + customerRef estável (<=32 chars), adoção de ordens existentes, stake via modo (% banca ou R$), persistir estado só após placeOrders OK.',
-  );
+   const [reqSafety, setReqSafety] = useState(
+     'Obrigatório: entryLocks persistidos + customerRef estável (<=32 chars), adoção de ordens existentes, stake via modo (% banca ou R$), persistir estado só após placeOrders OK.',
+   );
 
-  useEffect(() => {
-    const onCfg = () => setTick((v) => v + 1);
-    window.addEventListener('apiConfigChanged', onCfg);
-    return () => window.removeEventListener('apiConfigChanged', onCfg);
-  }, []);
+   // Chat state
+   const [messages, setMessages] = useState<Array<{role: 'user' | 'assistant', content: string}>>([]);
+   const [inputValue, setInputValue] = useState('');
+   const [loading, setLoading] = useState(false);
 
-  const copy = async (text: string) => {
-    try {
-      await navigator.clipboard.writeText(text);
-      toast.success('Copiado para a área de transferência');
-    } catch {
-      toast.error('Falha ao copiar');
-    }
-  };
+   useEffect(() => {
+     const onCfg = () => setTick((v) => v + 1);
+     window.addEventListener('apiConfigChanged', onCfg);
+     return () => window.removeEventListener('apiConfigChanged', onCfg);
+   }, []);
+
+   const copy = async (text: string) => {
+     try {
+       await navigator.clipboard.writeText(text);
+       toast.success('Copiado para a área de transferência');
+     } catch {
+       toast.error('Falha ao copiar');
+     }
+   };
+
+   const sendMessage = async () => {
+     if (!inputValue.trim() || loading) return;
+
+     const userMessage = inputValue;
+     setInputValue('');
+     setMessages(prev => [...prev, { role: 'user', content: userMessage }]);
+     setLoading(true);
+
+     try {
+       const config = loadApiConfig();
+       if (!config || !config.googleApiKey) {
+         throw new Error('Google API key not configured');
+       }
+
+       const apiKey = config.googleApiKey;
+       const model = config.googleModel || 'gemma-4-26b-a4b-it';
+
+       // Prepare the chat history in the format expected by the Google API
+       const history = messages.map(msg => ({
+         role: msg.role === 'user' ? 'user' : 'model',
+         parts: [{ text: msg.content }]
+       }));
+
+       // Add the current user message
+       history.push({
+         role: 'user',
+         parts: [{ text: userMessage }]
+       });
+
+       const response = await fetch(
+         `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+         {
+           method: 'POST',
+           headers: {
+             'Content-Type': 'application/json',
+           },
+           body: JSON.stringify({
+             contents: history,
+             generationConfig: {
+               temperature: 0.7,
+               topK: 40,
+               topP: 0.95,
+               maxOutputTokens: 1024,
+             },
+           })
+         }
+       );
+
+       if (!response.ok) {
+         throw new Error(`API error: ${response.status}`);
+       }
+
+       const data = await response.json();
+       let aiResponse = '';
+       if (data.candidates && data.candidates.length > 0) {
+         const candidate = data.candidates[0];
+         if (candidate.content && candidate.content.parts && candidate.content.parts.length > 0) {
+           aiResponse = candidate.content.parts[0].text || '';
+         }
+       }
+
+       if (!aiResponse) {
+         throw new Error('No response from AI');
+       }
+
+       setMessages(prev => [...prev, { role: 'assistant', content: aiResponse }]);
+     } catch (error: any) {
+       console.error('Error chatting with AI:', error);
+       toast.error('Falha ao comunicar com a IA: ' + error?.message || 'Erro desconhecido');
+     } finally {
+       setLoading(false);
+     }
+   };
 
   const buildBrief = (r: BotRequestV1) => {
     const base = r.baseBotKey === 'novo' ? 'Novo (do zero)' : r.baseBotKey;
@@ -224,10 +303,11 @@ export default function BotsPage() {
         </div>
       </div>
 
-      <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as any)}>
+       <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as any)}>
         <TabsList>
           <TabsTrigger value="catalog">Robôs do sistema</TabsTrigger>
           <TabsTrigger value="requests">Pedidos de novos robôs</TabsTrigger>
+          <TabsTrigger value="chat">Chat com IA</TabsTrigger>
         </TabsList>
 
         <TabsContent value="catalog">
@@ -371,8 +451,59 @@ export default function BotsPage() {
             </Card>
           </div>
         </TabsContent>
-      </Tabs>
-    </div>
-  );
-}
+         <TabsContent value="chat">
+           <Card className="p-6 space-y-4">
+             <div className="flex items-center gap-3">
+               <MessageSquare className="h-5 w-5" />
+               <h1 className="text-xl font-semibold">Chat com IA (Gemma 4)</h1>
+               {loading && <span className="animate-pulse">Conectando...</span>}
+             </div>
+             <div className="text-sm text-gray-600">
+               Converse com o modelo Gemma 4 do Google para obter ajuda com estratégias, dúvidas técnicas ou sugestões para seus robôs.
+             </div>
+             
+             {/* Chat messages */}
+             <div className="h-[400px] overflow-y-auto border rounded px-4 py-3 mb-4 space-y-4 bg-gray-50">
+               {messages.length === 0 ? (
+                 <div className="text-center py-8 text-gray-500">
+                   Comece a conversa enviando uma mensagem abaixo.
+                 </div>
+               ) : (
+                 <>
+                   {messages.map((msg, index) => (
+                     <div key={index} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'} max-w-[80%] ${msg.role === 'user' ? 'ml-auto' : 'mr-auto'}`}>
+                       <div className={`${msg.role === 'user' ? 'bg-blue-600 text-white' : 'bg-gray-200 text-gray-900'} rounded-lg px-4 py-2 max-w-xs break-words`}>
+                         {msg.content}
+                       </div>
+                     </div>
+                   ))}
+                 </>
+               )}
+             </div>
+             
+             {/* Input area */}
+             <div className="flex gap-2">
+               <textarea
+                 value={inputValue}
+                 onChange={(e) => setInputValue(e.target.value)}
+                 onKeyDown={(e) => {
+                   if (e.key === 'Enter' && !e.shiftKey) {
+                     e.preventDefault();
+                     sendMessage();
+                   }
+                 }}
+                 placeholder="Digite sua mensagem para a IA..."
+                 className="flex-1 min-h-[60px] rounded-md border border-gray-300 bg-white px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                 disabled={loading}
+               />
+               <Button onClick={sendMessage} disabled={loading} className="px-4 py-2">
+                 {loading ? 'Enviando...' : 'Enviar'}
+               </Button>
+             </div>
+           </Card>
+        </TabsContent>
+       </Tabs>
+     </div>
+   );
+ }
 

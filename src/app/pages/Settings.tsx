@@ -1401,6 +1401,7 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
                   const raw = (config.betfairRobotLimits && typeof config.betfairRobotLimits === 'object') ? config.betfairRobotLimits : {};
                   const ticks = (raw as any)?.scalpingTicks && typeof (raw as any).scalpingTicks === 'object' ? (raw as any).scalpingTicks : {};
                   const over = (raw as any)?.overGoalsLimit && typeof (raw as any).overGoalsLimit === 'object' ? (raw as any).overGoalsLimit : {};
+                  const overHT = (raw as any)?.overGoalsHT && typeof (raw as any).overGoalsHT === 'object' ? (raw as any).overGoalsHT : {};
                   const asian = (raw as any)?.asianHandicap && typeof (raw as any).asianHandicap === 'object' ? (raw as any).asianHandicap : {};
                   const correctScore = (raw as any)?.correctScore && typeof (raw as any).correctScore === 'object' ? (raw as any).correctScore : {};
                   const favoriteRescue =
@@ -1427,6 +1428,15 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
                     setLimits({
                       overGoalsLimit: {
                         ...(config.betfairRobotLimits?.overGoalsLimit ?? {}),
+                        ...(patch ?? {}),
+                      },
+                    });
+                  };
+
+                  const setOverHT = (patch: any) => {
+                    setLimits({
+                      overGoalsHT: {
+                        ...(((config.betfairRobotLimits as any)?.overGoalsHT ?? {}) as any),
                         ...(patch ?? {}),
                       },
                     });
@@ -1509,6 +1519,28 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
                   const ogStakeAbs = Number((over as any)?.stakeAbs);
                   const ogEntryOffsetTicks = Number(over?.entryOffsetTicks);
                   const ogSecondsToWaitMatch = Number(over?.secondsToWaitMatch);
+                  const ohtEnabled = Boolean((overHT as any)?.enabled ?? false);
+                  const ohtAutoEnabled = Boolean((overHT as any)?.autoEnabled ?? false);
+                  const ohtAutoMinConfidence = Number((overHT as any)?.autoMinConfidence);
+                  const ohtPreMinConfidence = Number((overHT as any)?.preMinConfidence);
+                  const ohtObserveMinMinute = Number((overHT as any)?.observeMinMinute);
+                  const ohtObserveMaxMinute = Number((overHT as any)?.observeMaxMinute);
+                  const ohtMaxMinute = Number((overHT as any)?.maxMinute);
+                  const ohtMinOdds = Number((overHT as any)?.minOdds);
+                  const ohtMaxEntries = Number((overHT as any)?.maxEntries);
+                  const ohtEntryOffsetTicks = Number((overHT as any)?.entryOffsetTicks);
+                  const ohtSecondsToWaitMatch = Number((overHT as any)?.secondsToWaitMatch);
+                  const ohtStakePct = Number((overHT as any)?.stakePct);
+                  const ohtStakeAbs = Number((overHT as any)?.stakeAbs);
+                  const ohtStakeModeRaw = String((overHT as any)?.stakeMode ?? '').trim().toLowerCase();
+                  const ohtStakeModeAbs =
+                    ohtStakeModeRaw === 'abs' ? true
+                      : ohtStakeModeRaw === 'pct' ? false
+                      : (Number.isFinite(ohtStakeAbs) && ohtStakeAbs > 0);
+                  const ohtMomentOverThreshold = Number((overHT as any)?.momentOverThreshold);
+                  const ohtMomentOverThresholdOffDelta = Number((overHT as any)?.momentOverThresholdOffDelta);
+                  const ohtMomentWindowMinSec = Number((overHT as any)?.momentWindowMinSec);
+                  const ohtMomentWindowMaxSec = Number((overHT as any)?.momentWindowMaxSec);
                   const ahTargetTicks = Number(asian?.targetTicks);
                   const ahMaxSpreadTicks = Number(asian?.maxSpreadTicks);
                   const ahMinMarketMatched = Number(asian?.minMarketMatched);
@@ -2989,6 +3021,301 @@ export default function Settings({ initialTab = 'apis', mode = 'default' }: Sett
                                 const n = Number(raw);
                                 const v = Number.isFinite(n) ? Math.max(1, Math.min(120, Math.floor(n))) : 10;
                                 setOver({ secondsToWaitMatch: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="rounded-lg border border-gray-200 bg-white p-3">
+                        <div className="text-sm font-semibold text-gray-900">Over Gol HT</div>
+                        <div className="text-xs text-gray-600 mt-1">Entrada no Over 0.5 no 1º tempo com base em histórico e alerta de gol.</div>
+
+                        <div className="mt-3 grid md:grid-cols-3 gap-3">
+                          <div className="md:col-span-3 flex items-center justify-between gap-3 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
+                            <div className="text-sm text-gray-700">Ativo</div>
+                            <Switch checked={ohtEnabled} onCheckedChange={(checked) => setOverHT({ enabled: checked })} />
+                          </div>
+
+                          <div className="md:col-span-3 flex items-center justify-between gap-3 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
+                            <div className="text-sm text-gray-700">Auto (Agente Universal)</div>
+                            <Switch checked={ohtAutoEnabled} onCheckedChange={(checked) => setOverHT({ autoEnabled: checked })} />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="oht_autoMinConfidence">Auto: confiança mín. (%)</Label>
+                            <Input
+                              id="oht_autoMinConfidence"
+                              inputMode="numeric"
+                              placeholder="Ex: 70"
+                              value={Number.isFinite(ohtAutoMinConfidence) ? String(Math.max(0, Math.min(95, Math.floor(ohtAutoMinConfidence)))) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(0, Math.min(95, Math.floor(n))) : 70;
+                                setOverHT({ autoMinConfidence: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="oht_preMinConfidence">Pré-live: confiança mín. (%)</Label>
+                            <Input
+                              id="oht_preMinConfidence"
+                              inputMode="numeric"
+                              placeholder="Ex: 75"
+                              value={Number.isFinite(ohtPreMinConfidence) ? String(Math.max(0, Math.min(95, Math.floor(ohtPreMinConfidence)))) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(0, Math.min(95, Math.floor(n))) : 75;
+                                setOverHT({ preMinConfidence: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="oht_maxMinute">Máx. minuto</Label>
+                            <Input
+                              id="oht_maxMinute"
+                              inputMode="numeric"
+                              placeholder="Ex: 46"
+                              value={Number.isFinite(ohtMaxMinute) ? String(Math.max(1, Math.min(60, Math.floor(ohtMaxMinute)))) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(1, Math.min(60, Math.floor(n))) : 46;
+                                setOverHT({ maxMinute: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="oht_observeMinMinute">Observar a partir (min)</Label>
+                            <Input
+                              id="oht_observeMinMinute"
+                              inputMode="numeric"
+                              placeholder="Ex: 10"
+                              value={Number.isFinite(ohtObserveMinMinute) ? String(Math.max(0, Math.min(45, Math.floor(ohtObserveMinMinute)))) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(0, Math.min(45, Math.floor(n))) : 10;
+                                setOverHT({ observeMinMinute: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="oht_observeMaxMinute">Observar até (min)</Label>
+                            <Input
+                              id="oht_observeMaxMinute"
+                              inputMode="numeric"
+                              placeholder="Ex: 15"
+                              value={Number.isFinite(ohtObserveMaxMinute) ? String(Math.max(0, Math.min(45, Math.floor(ohtObserveMaxMinute)))) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(0, Math.min(45, Math.floor(n))) : 15;
+                                setOverHT({ observeMaxMinute: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="oht_minOdds">Odd mínima</Label>
+                            <Input
+                              id="oht_minOdds"
+                              inputMode="decimal"
+                              placeholder="Ex: 1.25"
+                              value={Number.isFinite(ohtMinOdds) ? String(ohtMinOdds) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(1.01, Math.min(100, n)) : 1.25;
+                                setOverHT({ minOdds: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="oht_maxEntries">Máx. entradas</Label>
+                            <Input
+                              id="oht_maxEntries"
+                              inputMode="numeric"
+                              placeholder="Ex: 1"
+                              value={Number.isFinite(ohtMaxEntries) ? String(Math.max(0, Math.floor(ohtMaxEntries))) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(1, Math.min(10, Math.floor(n))) : 1;
+                                setOverHT({ maxEntries: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <div className="flex items-center justify-between">
+                              <Label htmlFor="oht_stake_value">Stake</Label>
+                              <div className="flex items-center gap-2">
+                                <div className="text-[11px] text-gray-600">% banca</div>
+                                <Switch
+                                  checked={ohtStakeModeAbs}
+                                  onCheckedChange={(checked) => {
+                                    const bankroll = Number(config.betfairBankroll ?? 0);
+                                    if (checked) {
+                                      const pct = Number(ohtStakePct);
+                                      const nextAbs =
+                                        Number.isFinite(ohtStakeAbs) && ohtStakeAbs > 0
+                                          ? Math.round(ohtStakeAbs * 100) / 100
+                                          : Number.isFinite(bankroll) && bankroll > 0 && Number.isFinite(pct) && pct > 0
+                                            ? Math.max(2, Math.round(((bankroll * pct) / 100) * 100) / 100)
+                                            : 2;
+                                      setOverHT({ stakeMode: 'abs', stakeAbs: nextAbs, stakePct: 0 });
+                                      return;
+                                    }
+                                    const abs = Number(ohtStakeAbs);
+                                    const nextPct =
+                                      Number.isFinite(ohtStakePct) && ohtStakePct > 0
+                                        ? Math.round(ohtStakePct * 10000) / 10000
+                                        : Number.isFinite(bankroll) && bankroll > 0 && Number.isFinite(abs) && abs > 0
+                                          ? Math.max(0, Math.round(((abs / bankroll) * 100) * 10000) / 10000)
+                                          : 1;
+                                    setOverHT({ stakeMode: 'pct', stakePct: nextPct, stakeAbs: 0 });
+                                  }}
+                                />
+                                <div className="text-[11px] text-gray-600">R$</div>
+                              </div>
+                            </div>
+                            <Input
+                              id="oht_stake_value"
+                              inputMode="decimal"
+                              placeholder={ohtStakeModeAbs ? 'Ex: 2' : 'Ex: 1'}
+                              value={
+                                ohtStakeModeAbs
+                                  ? (Number.isFinite(ohtStakeAbs) ? String(Math.round(ohtStakeAbs * 100) / 100) : '')
+                                  : (Number.isFinite(ohtStakePct) ? String(Math.round(ohtStakePct * 10000) / 10000) : '')
+                              }
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                if (ohtStakeModeAbs) {
+                                  const v = Number.isFinite(n) ? Math.max(0, Math.min(100000, Math.round(n * 100) / 100)) : 2;
+                                  setOverHT({ stakeMode: 'abs', stakeAbs: v, stakePct: 0 });
+                                  return;
+                                }
+                                const v = Number.isFinite(n) ? Math.max(0, Math.min(100, Math.round(n * 10000) / 10000)) : 1;
+                                setOverHT({ stakeMode: 'pct', stakePct: v, stakeAbs: 0 });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="oht_entryOffsetTicks">Ticks de entrada (±)</Label>
+                            <Input
+                              id="oht_entryOffsetTicks"
+                              inputMode="numeric"
+                              placeholder="Ex: 0"
+                              value={Number.isFinite(ohtEntryOffsetTicks) ? String(Math.max(-10, Math.min(10, Math.trunc(ohtEntryOffsetTicks)))) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(-10, Math.min(10, Math.trunc(n))) : 0;
+                                setOverHT({ entryOffsetTicks: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="oht_secondsToWaitMatch">Esperar corresponder (s)</Label>
+                            <Input
+                              id="oht_secondsToWaitMatch"
+                              inputMode="numeric"
+                              placeholder="Ex: 10"
+                              value={Number.isFinite(ohtSecondsToWaitMatch) ? String(Math.max(1, Math.min(120, Math.floor(ohtSecondsToWaitMatch)))) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(1, Math.min(120, Math.floor(n))) : 10;
+                                setOverHT({ secondsToWaitMatch: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="oht_momentOverThreshold">Alerta: threshold</Label>
+                            <Input
+                              id="oht_momentOverThreshold"
+                              inputMode="decimal"
+                              placeholder="Ex: 0.75"
+                              value={Number.isFinite(ohtMomentOverThreshold) ? String(ohtMomentOverThreshold) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(0.1, Math.min(2, n)) : 0.75;
+                                setOverHT({ momentOverThreshold: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="oht_momentOverThresholdOffDelta">Alerta OFF (delta)</Label>
+                            <Input
+                              id="oht_momentOverThresholdOffDelta"
+                              inputMode="decimal"
+                              placeholder="Ex: 0.15"
+                              value={Number.isFinite(ohtMomentOverThresholdOffDelta) ? String(ohtMomentOverThresholdOffDelta) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : 0.15;
+                                setOverHT({ momentOverThresholdOffDelta: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="oht_momentWindowMinSec">Janela mín. (s)</Label>
+                            <Input
+                              id="oht_momentWindowMinSec"
+                              inputMode="numeric"
+                              placeholder="Ex: 8"
+                              value={Number.isFinite(ohtMomentWindowMinSec) ? String(Math.max(1, Math.min(300, Math.floor(ohtMomentWindowMinSec)))) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(1, Math.min(300, Math.floor(n))) : 8;
+                                setOverHT({ momentWindowMinSec: v });
+                              }}
+                              className="mt-2"
+                            />
+                          </div>
+
+                          <div>
+                            <Label htmlFor="oht_momentWindowMaxSec">Janela máx. (s)</Label>
+                            <Input
+                              id="oht_momentWindowMaxSec"
+                              inputMode="numeric"
+                              placeholder="Ex: 180"
+                              value={Number.isFinite(ohtMomentWindowMaxSec) ? String(Math.max(2, Math.min(600, Math.floor(ohtMomentWindowMaxSec)))) : ''}
+                              onChange={(e) => {
+                                const raw = String(e.target.value ?? '').replace(',', '.');
+                                const n = Number(raw);
+                                const v = Number.isFinite(n) ? Math.max(2, Math.min(600, Math.floor(n))) : 180;
+                                setOverHT({ momentWindowMaxSec: v });
                               }}
                               className="mt-2"
                             />

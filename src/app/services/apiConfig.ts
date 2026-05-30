@@ -67,6 +67,25 @@ export interface ApiConfig {
       entryOffsetTicks?: number;
       secondsToWaitMatch?: number;
     };
+    overGoalsHT?: {
+      enabled?: boolean;
+      autoEnabled?: boolean;
+      autoMinConfidence?: number;
+      preMinConfidence?: number;
+      observeMinMinute?: number;
+      observeMaxMinute?: number;
+      maxMinute?: number;
+      minOdds?: number;
+      maxEntries?: number;
+      entryOffsetTicks?: number;
+      secondsToWaitMatch?: number;
+      stakePct?: number;
+      stakeAbs?: number;
+      momentOverThreshold?: number;
+      momentOverThresholdOffDelta?: number;
+      momentWindowMinSec?: number;
+      momentWindowMaxSec?: number;
+    };
     asianHandicap?: {
       targetTicks?: number;
       maxSpreadTicks?: number;
@@ -421,6 +440,25 @@ export function loadApiConfig(): ApiConfig | null {
           entryOffsetTicks: 2,
           secondsToWaitMatch: 10,
         },
+        overGoalsHT: {
+          enabled: false,
+          autoEnabled: false,
+          autoMinConfidence: 70,
+          preMinConfidence: 75,
+          observeMinMinute: 10,
+          observeMaxMinute: 15,
+          maxMinute: 46,
+          minOdds: 1.25,
+          maxEntries: 1,
+          entryOffsetTicks: 0,
+          secondsToWaitMatch: 10,
+          stakePct: 1,
+          stakeAbs: 2,
+          momentOverThreshold: 0.75,
+          momentOverThresholdOffDelta: 0.15,
+          momentWindowMinSec: 8,
+          momentWindowMaxSec: 180,
+        },
         asianHandicap: {
           targetTicks: 10,
           maxSpreadTicks: 2,
@@ -486,12 +524,14 @@ export function loadApiConfig(): ApiConfig | null {
         if (!raw || typeof raw !== 'object') return defaults.betfairRobotLimits;
         const st = raw?.scalpingTicks && typeof raw.scalpingTicks === 'object' ? raw.scalpingTicks : {};
         const og = raw?.overGoalsLimit && typeof raw.overGoalsLimit === 'object' ? raw.overGoalsLimit : {};
+        const oht = raw?.overGoalsHT && typeof raw.overGoalsHT === 'object' ? raw.overGoalsHT : {};
         const ah = raw?.asianHandicap && typeof raw.asianHandicap === 'object' ? raw.asianHandicap : {};
         const cs = raw?.correctScore && typeof raw.correctScore === 'object' ? raw.correctScore : {};
         const fr = raw?.favoriteRescue && typeof raw.favoriteRescue === 'object' ? raw.favoriteRescue : {};
         return {
           scalpingTicks: { ...(defaults.betfairRobotLimits?.scalpingTicks ?? {}), ...(st as any) },
           overGoalsLimit: { ...(defaults.betfairRobotLimits?.overGoalsLimit ?? {}), ...(og as any) },
+          overGoalsHT: { ...(defaults.betfairRobotLimits?.overGoalsHT ?? {}), ...(oht as any) },
           asianHandicap: { ...(defaults.betfairRobotLimits?.asianHandicap ?? {}), ...(ah as any) },
           correctScore: { ...(defaults.betfairRobotLimits?.correctScore ?? {}), ...(cs as any) },
           favoriteRescue: { ...(defaults.betfairRobotLimits?.favoriteRescue ?? {}), ...(fr as any) },
@@ -565,6 +605,25 @@ export function loadApiConfig(): ApiConfig | null {
       entryOffsetTicks: 2,
       secondsToWaitMatch: 10,
     },
+    overGoalsHT: {
+      enabled: false,
+      autoEnabled: false,
+      autoMinConfidence: 70,
+      preMinConfidence: 75,
+      observeMinMinute: 10,
+      observeMaxMinute: 15,
+      maxMinute: 46,
+      minOdds: 1.25,
+      maxEntries: 1,
+      entryOffsetTicks: 0,
+      secondsToWaitMatch: 10,
+      stakePct: 1,
+      stakeAbs: 2,
+      momentOverThreshold: 0.75,
+      momentOverThresholdOffDelta: 0.15,
+      momentWindowMinSec: 8,
+      momentWindowMaxSec: 180,
+    },
     asianHandicap: {
       targetTicks: 10,
       maxSpreadTicks: 2,
@@ -624,12 +683,14 @@ export function loadApiConfig(): ApiConfig | null {
       if (!raw || typeof raw !== 'object') return defaultsBetfairRobotLimits;
       const st = raw?.scalpingTicks && typeof raw.scalpingTicks === 'object' ? raw.scalpingTicks : {};
       const og = raw?.overGoalsLimit && typeof raw.overGoalsLimit === 'object' ? raw.overGoalsLimit : {};
+      const oht = raw?.overGoalsHT && typeof raw.overGoalsHT === 'object' ? raw.overGoalsHT : {};
       const ah = raw?.asianHandicap && typeof raw.asianHandicap === 'object' ? raw.asianHandicap : {};
       const cs = raw?.correctScore && typeof raw.correctScore === 'object' ? raw.correctScore : {};
       const fr = raw?.favoriteRescue && typeof raw.favoriteRescue === 'object' ? raw.favoriteRescue : {};
       return {
         scalpingTicks: { ...(defaultsBetfairRobotLimits.scalpingTicks ?? {}), ...(st as any) },
         overGoalsLimit: { ...(defaultsBetfairRobotLimits.overGoalsLimit ?? {}), ...(og as any) },
+        overGoalsHT: { ...(defaultsBetfairRobotLimits.overGoalsHT ?? {}), ...(oht as any) },
         asianHandicap: { ...(defaultsBetfairRobotLimits.asianHandicap ?? {}), ...(ah as any) },
         correctScore: { ...(defaultsBetfairRobotLimits.correctScore ?? {}), ...(cs as any) },
         favoriteRescue: { ...(defaultsBetfairRobotLimits.favoriteRescue ?? {}), ...(fr as any) },

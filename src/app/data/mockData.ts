@@ -43,6 +43,15 @@ export interface Prediction {
     prediction: 'yes' | 'no';
     confidence: number;
   };
+  overHT?: {
+    prediction: 'over' | 'under';
+    line: number;
+    confidence: number;
+    homeRatePct?: number | null;
+    awayRatePct?: number | null;
+    sampleHome?: number | null;
+    sampleAway?: number | null;
+  };
 }
 
 const baseMockDate = (() => {

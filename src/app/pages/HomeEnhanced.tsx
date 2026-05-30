@@ -110,6 +110,7 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
       'Content-Type': 'application/json',
       apikey: publicAnonKey,
       Authorization: `Bearer ${publicAnonKey}`,
+      'x-automation-token': publicAnonKey,
     };
   };
 
@@ -363,6 +364,20 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
       'apiFootball_leagues_cache_v1',
     ];
     for (const key of keys) {
+      try {
+        const raw = localStorage.getItem(key);
+        if (!raw) continue;
+        const parsed = JSON.parse(raw) as { fetchedAt?: string; items?: Array<{ id: number; name: string; country: string }> };
+        if (!parsed?.items || !Array.isArray(parsed.items)) continue;
+        return parsed.items;
+      } catch {
+        continue;
+      }
+    }
+
+    for (let i = 0; i < localStorage.length; i += 1) {
+      const key = localStorage.key(i);
+      if (!key || !key.startsWith('apiFootball_leagues_cache_v2_country_')) continue;
       try {
         const raw = localStorage.getItem(key);
         if (!raw) continue;
@@ -1157,11 +1172,37 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
     return p * o - 1;
   };
 
-  const consensusToPrediction = (matchId: string, consensus: AgentPrediction): Prediction => {
+  const consensusToPrediction = (matchId: string, consensus: AgentPrediction, match?: FootballMatch | null): Prediction => {
     const winnerConfidenceRaw = Number(consensus.winnerConfidence);
     const winnerConfidence = Number.isFinite(winnerConfidenceRaw) ? Math.round(winnerConfidenceRaw) : 0;
     const aiConfidenceRaw = Number(consensus.confidence);
     const aiConfidence = Number.isFinite(aiConfidenceRaw) ? Math.round(aiConfidenceRaw) : 0;
+    const overHT = (() => {
+      const home = (match as any)?.preLive?.homeLast ?? null;
+      const away = (match as any)?.preLive?.awayLast ?? null;
+      const homePlayed = Number(home?.htPlayed);
+      const awayPlayed = Number(away?.htPlayed);
+      const homeRate = Number(home?.htOver05Rate);
+      const awayRate = Number(away?.htOver05Rate);
+      const homeOk = Number.isFinite(homePlayed) && homePlayed > 0 && Number.isFinite(homeRate);
+      const awayOk = Number.isFinite(awayPlayed) && awayPlayed > 0 && Number.isFinite(awayRate);
+      if (!homeOk && !awayOk) return null;
+      const wHome = homeOk ? homePlayed : 0;
+      const wAway = awayOk ? awayPlayed : 0;
+      const denom = wHome + wAway;
+      const combinedRate = denom > 0 ? ((homeOk ? homeRate * wHome : 0) + (awayOk ? awayRate * wAway : 0)) / denom : (homeOk ? homeRate : awayRate);
+      const prob = Math.max(0, Math.min(1, combinedRate));
+      const confidence = Math.round(prob * 100);
+      return {
+        prediction: confidence >= 50 ? ('over' as const) : ('under' as const),
+        line: 0.5,
+        confidence,
+        homeRatePct: homeOk ? Math.round(homeRate * 100) : null,
+        awayRatePct: awayOk ? Math.round(awayRate * 100) : null,
+        sampleHome: homeOk ? homePlayed : null,
+        sampleAway: awayOk ? awayPlayed : null,
+      };
+    })();
     return {
       matchId,
       aiConfidence,
@@ -1196,6 +1237,7 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
         prediction: consensus.btts.prediction,
         confidence: Math.round(consensus.btts.confidence),
       },
+      ...(overHT ? { overHT } : {}),
     };
   };
 
@@ -1243,6 +1285,9 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
       let w = 0;
       let d = 0;
       let l = 0;
+      let htPlayed = 0;
+      let htAnyGoal = 0;
+      let htGoals = 0;
       for (const f of items) {
         const homeId = Number((f as any)?.teams?.home?.id);
         const awayId = Number((f as any)?.teams?.away?.id);
@@ -1261,6 +1306,15 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
         if (goalsFor > goalsAgainst) w += 1;
         else if (goalsFor < goalsAgainst) l += 1;
         else d += 1;
+
+        const htHome = typeof (f as any)?.score?.halftime?.home === 'number' ? (f as any).score.halftime.home : null;
+        const htAway = typeof (f as any)?.score?.halftime?.away === 'number' ? (f as any).score.halftime.away : null;
+        if (htHome != null && htAway != null) {
+          htPlayed += 1;
+          const t = Math.max(0, htHome) + Math.max(0, htAway);
+          htGoals += t;
+          if (t > 0) htAnyGoal += 1;
+        }
       }
       return {
         played,
@@ -1269,6 +1323,10 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
         w,
         d,
         l,
+        htPlayed,
+        htAnyGoal,
+        htOver05Rate: htPlayed > 0 ? Math.round((htAnyGoal / htPlayed) * 1000) / 1000 : null,
+        htGoalsAvg: htPlayed > 0 ? Math.round((htGoals / htPlayed) * 100) / 100 : null,
       };
     };
 
@@ -1368,7 +1426,7 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
       }
       store.items[key] = {
         createdAt: new Date().toISOString(),
-        prediction: consensusToPrediction(id, consensus),
+        prediction: consensusToPrediction(id, consensus, m),
       };
     }
 
@@ -1877,7 +1935,16 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
     const config = loadApiConfig();
     const disabledIds = new Set((config?.apiFootballDisabledLeagueIds ?? []).map(Number).filter(Number.isFinite));
     try {
-      const raw = localStorage.getItem('apiFootball_leagues_cache_v2') ?? localStorage.getItem('apiFootball_leagues_cache_v1');
+      const findCountryCacheRaw = () => {
+        for (let i = 0; i < localStorage.length; i += 1) {
+          const key = localStorage.key(i);
+          if (!key || !key.startsWith('apiFootball_leagues_cache_v2_country_')) continue;
+          const raw2 = localStorage.getItem(key);
+          if (raw2) return raw2;
+        }
+        return null;
+      };
+      const raw = localStorage.getItem('apiFootball_leagues_cache_v2') ?? localStorage.getItem('apiFootball_leagues_cache_v1') ?? findCountryCacheRaw();
       if (!raw) return { countries: [] as string[], leagues: [] as string[] };
       const parsed = JSON.parse(raw) as { fetchedAt: string; items: Array<{ id: number; name: string; country: string }> };
       const items = Array.isArray(parsed?.items) ? parsed.items : [];
@@ -2330,6 +2397,7 @@ export default function Home({ initialSelectedDate = 'today', favoritesOnly = fa
           scoreHome: typeof m.result?.home === 'number' ? m.result.home : null,
           scoreAway: typeof m.result?.away === 'number' ? m.result.away : null,
           prediction: pred ?? null,
+          includeCorrectScore: true,
         }),
       });
       const raw = await res.text().catch(() => '');
