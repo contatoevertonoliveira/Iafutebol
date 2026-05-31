@@ -117,14 +117,19 @@ if [ -d "$SUPABASE_DIR" ]; then
   fi
 
   if [ -n "$SUPACMD" ]; then
-    log "  Parando instância anterior..."
-    (cd "$SUPABASE_DIR" && $SUPACMD stop 2>/dev/null) || true
-    sleep 2
-    log "  Iniciando Supabase..."
-    if (cd "$SUPABASE_DIR" && $SUPACMD start 2>&1); then
-      ok "Supabase rodando! 🚀"
+    # Verifica se já tem containers rodando
+    if docker ps --filter "name=supabase_edge_runtime" --format "{{.Names}}" 2>/dev/null | grep -q supabase; then
+      ok "Supabase já está rodando! 🚀"
     else
-      warn "Supabase start falhou"
+      log "  Parando instância anterior..."
+      (cd "$SUPABASE_DIR" && $SUPACMD stop 2>/dev/null) || true
+      sleep 2
+      log "  Iniciando Supabase..."
+      if (cd "$SUPABASE_DIR" && $SUPACMD start 2>&1); then
+        ok "Supabase iniciado! 🚀"
+      else
+        warn "Supabase start falhou"
+      fi
     fi
   fi
 else

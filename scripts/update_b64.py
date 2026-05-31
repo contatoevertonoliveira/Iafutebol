@@ -43,17 +43,21 @@ def main():
     with open(index_path) as f:
         content = f.read()
 
-    # Substitui a linha _INLINE_B64
+    # Substitui o bloco _INLINE_B64 (pode ocupar várias linhas)
     import re
     new_content = re.sub(
-        r'^const _INLINE_B64 = ".*?";',
-        f'const _INLINE_B64 = "{b64}";',
+        r'const _INLINE_B64 = "[^"]*";',
+        'const _INLINE_B64 = "' + b64 + '";',
         content,
         count=1,
-        flags=re.MULTILINE
+        flags=re.DOTALL
     )
 
     if new_content == content:
+        # Pode ser que o base64 já esteja atualizado (certs não mudaram)
+        if 'INLINE_B64' in content:
+            print(f"✅ Base64 já atualizado! ({len(b64)} bytes, sem alterações)")
+            return
         print("ERRO: Não encontrou 'const _INLINE_B64' no index.ts", file=sys.stderr)
         sys.exit(1)
 
