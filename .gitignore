@@ -55,3 +55,6 @@ betfair-client.key
 betfair-client.csr
 certs/
 supabase/functions/*/secrets.env
+
+# Scripts Python (betfair local client)
+scripts/.env
