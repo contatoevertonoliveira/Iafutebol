@@ -53,3 +53,5 @@ utils/secrets/
 betfair-client.crt
 betfair-client.key
 betfair-client.csr
+certs/
+supabase/functions/*/secrets.env

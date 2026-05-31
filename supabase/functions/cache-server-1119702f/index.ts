@@ -50,11 +50,14 @@ const validateLeaguesCachePayload = (payload: any) => {
 const appConfigKey = () => `app:config:v1`;
 const appStateKey = (k: string) => `app:state:v1:${k}`;
 
-const allowedAppStateKeys = new Set([
-  "requested_fixtures_v1",
-  "favorite_matches_v1",
-  "dismissed_matches_v1",
-]);
+// Lista de chaves permitidas - agora inclui prefixo dudu_ para o ecossistema Iafutebol
+const isAllowedAppStateKey = (key: string): boolean => {
+  if (["requested_fixtures_v1", "favorite_matches_v1", "dismissed_matches_v1"].includes(key)) return true;
+  if (key.startsWith("dudu_")) return true;
+  if (key.startsWith("betfair_")) return true;
+  if (key.startsWith("app:dudu:")) return true;
+  return false;
+};
 
 const validateSmallJsonPayload = (payload: any, maxBytes = 200_000) => {
   try {
@@ -109,7 +112,7 @@ Deno.serve(async (req) => {
       const body = await readJson(req);
       const key = String((body as any)?.key ?? "").trim();
       if (!key) return json({ ok: false, error: "key obrigatório" }, 400);
-      if (!allowedAppStateKeys.has(key)) return json({ ok: false, error: "key não permitido" }, 400);
+      if (!isAllowedAppStateKey(key)) return json({ ok: false, error: "key n\u00e3o permitido" }, 400);
       const value = await kv.get(appStateKey(key));
       return json({ ok: true, value: value ?? null });
     } catch (error) {
@@ -123,7 +126,7 @@ Deno.serve(async (req) => {
       const body = await readJson(req);
       const key = String((body as any)?.key ?? "").trim();
       if (!key) return json({ ok: false, error: "key obrigatório" }, 400);
-      if (!allowedAppStateKeys.has(key)) return json({ ok: false, error: "key não permitido" }, 400);
+      if (!isAllowedAppStateKey(key)) return json({ ok: false, error: "key n\u00e3o permitido" }, 400);
       const value = (body as any)?.value ?? null;
       const validation = validateSmallJsonPayload(value, 450_000);
       if (!validation.ok) return json({ ok: false, error: validation.error }, 400);

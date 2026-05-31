@@ -43,7 +43,7 @@ const parseJson = async (req: Request) => {
 const getSupabaseUrl = () => String(Deno.env.get("SUPABASE_URL") ?? "").trim();
 const getSupabaseAnonKey = () => String(Deno.env.get("SUPABASE_ANON_KEY") ?? "").trim();
 const getSupabaseServiceRoleKey = () => String(Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "").trim();
-const getSupabaseInternalKey = () => getSupabaseAnonKey() || getSupabaseServiceRoleKey();
+const getSupabaseInternalKey = () => getSupabaseServiceRoleKey() || getSupabaseAnonKey();
 
 const resolveBetfairMatchOdds = async (params: { homeTeam: string; awayTeam: string; utcDate: string | null; includeCorrectScore?: boolean }) => {
   const supabaseUrl = getSupabaseUrl();
@@ -236,6 +236,8 @@ const ouLineCodeFromGoals = (goals: number) => {
 
 const ouMarketTypeCode = (lineCode: number) => {
   const n = Math.floor(Number(lineCode));
+  // Se lineCode é 0.5, retorna OVER_UNDER_05 sem arredondar pra 0
+  if (Number.isFinite(Number(lineCode)) && Number(lineCode) === 0.5) return "OVER_UNDER_05";
   if (!Number.isFinite(n) || n <= 0) return null;
   const key = n < 10 ? `0${n}` : String(n);
   return `OVER_UNDER_${key}`;
@@ -289,6 +291,9 @@ const resolveBetfairOverUnderMarket = async (params: { eventId: string; lineCode
       marketProjection: ["RUNNER_DESCRIPTION", "MARKET_START_TIME"],
     },
   });
+  if (!Array.isArray(cats) || cats.length === 0) {
+    throw new Error(`Betfair: marketId (Over/Under) não encontrado - type=${marketType} eventId=${eventId} cats=${JSON.stringify(cats)}`);
+  }
   const mk = Array.isArray(cats) ? cats[0] : null;
   const marketId = String(mk?.marketId ?? "").trim();
   if (!marketId) throw new Error("Betfair: marketId (Over/Under) não encontrado");
@@ -351,6 +356,94 @@ const resolveBetfairOverUnderMarket = async (params: { eventId: string; lineCode
     runners: {
       overSelectionId: Number.isFinite(selectionByRole.over) ? selectionByRole.over : null,
       underSelectionId: Number.isFinite(selectionByRole.under) ? selectionByRole.under : null,
+    },
+    odds,
+    oddsFetchedAt: new Date().toISOString(),
+  };
+};
+
+// Resolve o mercado Both Teams to Score (BOTH_TEAMS_TO_SCORE) na Betfair
+// Retorna: { marketId, runners: { yesSelectionId, noSelectionId }, odds: { yes: {back,lay,...}, no: {back,lay,...} }, inPlay, marketStatus }
+const resolveBetfairBttsMarket = async (params: { eventId: string; adminToken: string }) => {
+  const eventId = String(params.eventId ?? "").trim();
+  if (!eventId) throw new Error("Betfair: eventId ausente (BTTS)");
+
+  const cats = await betfairRpc({
+    method: "SportsAPING/v1.0/listMarketCatalogue",
+    adminToken: params.adminToken,
+    params: {
+      filter: { eventIds: [eventId], marketTypeCodes: ["BOTH_TEAMS_TO_SCORE"] },
+      maxResults: 10,
+      sort: "MAXIMUM_TRADED",
+      marketProjection: ["RUNNER_DESCRIPTION", "MARKET_START_TIME"],
+    },
+  });
+  const mk = Array.isArray(cats) ? cats[0] : null;
+  const marketId = String(mk?.marketId ?? "").trim();
+  if (!marketId) throw new Error("Betfair: marketId (BTTS) não encontrado");
+
+  const runners = Array.isArray(mk?.runners) ? mk.runners : [];
+  const selectionByRole: Record<string, number> = {};
+  for (const r of runners) {
+    const selectionId = Number(r?.selectionId);
+    if (!Number.isFinite(selectionId)) continue;
+    const name = String(r?.runnerName ?? "").toLowerCase().trim();
+    if (name.includes("yes") || name.includes("sim")) {
+      if (selectionByRole.yes == null) selectionByRole.yes = selectionId;
+    } else if (name.includes("no") || name.includes("não") || name.includes("nao")) {
+      if (selectionByRole.no == null) selectionByRole.no = selectionId;
+    } else {
+      // Fallback: primeiro runner é YES, segundo é NO
+      if (selectionByRole.yes == null) selectionByRole.yes = selectionId;
+      else if (selectionByRole.no == null) selectionByRole.no = selectionId;
+    }
+  }
+
+  const books = await betfairRpc({
+    method: "SportsAPING/v1.0/listMarketBook",
+    adminToken: params.adminToken,
+    params: {
+      marketIds: [marketId],
+      priceProjection: { priceData: ["EX_BEST_OFFERS", "EX_TRADED"], virtualise: true },
+    },
+  });
+  const book = Array.isArray(books) ? books[0] : null;
+  const marketStatus = String(book?.status ?? "").trim() || null;
+  const isClosed = String(marketStatus ?? "").toUpperCase() === "CLOSED";
+  const inPlay = isClosed ? false : Boolean(book?.inplay ?? false);
+  const totalMatched = Number(book?.totalMatched);
+
+  const pull = (selectionId: number) => {
+    const rb = Array.isArray(book?.runners) ? book.runners.find((x: any) => Number(x?.selectionId) === selectionId) : null;
+    if (!rb) return null;
+    const ex = rb?.ex ?? {};
+    const back0 = Array.isArray(ex?.availableToBack) ? ex.availableToBack[0] : null;
+    const lay0 = Array.isArray(ex?.availableToLay) ? ex.availableToLay[0] : null;
+    const ltp = Number(rb?.lastPriceTraded);
+    return {
+      back: back0 ? Number(back0.price) : Number.isFinite(ltp) ? ltp : null,
+      backSize: back0 ? Number(back0.size) : null,
+      lay: lay0 ? Number(lay0.price) : Number.isFinite(ltp) ? ltp : null,
+      laySize: lay0 ? Number(lay0.size) : null,
+      selectionId,
+      runnerMatched: Number(rb?.totalMatched),
+    };
+  };
+
+  const odds: any = {};
+  if (Number.isFinite(selectionByRole.yes)) odds.yes = pull(selectionByRole.yes);
+  if (Number.isFinite(selectionByRole.no)) odds.no = pull(selectionByRole.no);
+
+  return {
+    eventId,
+    marketId,
+    marketStartTime: String(mk?.marketStartTime ?? "").trim() || null,
+    inPlay,
+    marketStatus,
+    matchedVolume: Number.isFinite(totalMatched) ? totalMatched : null,
+    runners: {
+      yesSelectionId: Number.isFinite(selectionByRole.yes) ? selectionByRole.yes : null,
+      noSelectionId: Number.isFinite(selectionByRole.no) ? selectionByRole.no : null,
     },
     odds,
     oddsFetchedAt: new Date().toISOString(),
@@ -7466,8 +7559,609 @@ Deno.serve(async (req) => {
       return json({ ok: true, hedgedCount, item: next });
     }
 
+    // === ROTA DE TESTE: placeOrders no Match Odds ===
+    if (req.method === "POST" && path.includes("/automation/betfair/strategy/placeOrdersMatchOdds")) {
+      const body = await parseJson(req).catch(() => ({})) as any;
+      // Também aceita adminToken do header
+      const adminTokenRaw = String(body?.adminToken ?? req.headers.get("x-automation-token") ?? "").trim();
+      const matchIdTest = String(body?.matchId ?? "").trim();
+      const selectionId = Number(body?.selectionId);
+      const side = String(body?.side ?? "BACK").toUpperCase();
+      const price = Number(body?.price);
+      const size = Number(body?.size);
+      if (!adminTokenRaw) return json({ ok: false, error: "adminToken obrigatório. Envie no body ou header x-automation-token" }, 400);
+      if (!matchIdTest) return json({ ok: false, error: "matchId obrigatório" }, 400);
+      if (!Number.isFinite(selectionId)) return json({ ok: false, error: "selectionId obrigatório" }, 400);
+      if (!Number.isFinite(price) || price < 1.01) return json({ ok: false, error: "price inválido" }, 400);
+      if (!Number.isFinite(size) || size <= 0) return json({ ok: false, error: "size inválido" }, 400);
+      const marketId = body?.marketId ? String(body.marketId).trim() : null;
+      try {
+        const current = await getQueueItem(matchIdTest);
+        const betfair = current?.betfair ?? {};
+        const matchOddsMarketId = marketId || String(betfair?.matchOdds?.marketId ?? "").trim();
+        if (!matchOddsMarketId) {
+          // Tenta resolver o mercado Match Odds
+          const cats = await betfairRpc({
+            method: "SportsAPING/v1.0/listMarketCatalogue",
+            adminToken: adminTokenRaw,
+            params: {
+              filter: { eventIds: [matchIdTest], marketTypeCodes: ["MATCH_ODDS"] },
+              maxResults: 5,
+              sort: "MAXIMUM_TRADED",
+              marketProjection: ["RUNNER_DESCRIPTION", "MARKET_START_TIME"],
+            },
+          });
+          const mk = Array.isArray(cats) ? cats[0] : null;
+          const id = String(mk?.marketId ?? "").trim();
+          if (!id) return json({ ok: false, error: "Match Odds marketId não encontrado para este evento" }, 404);
+          const result = await placeOrders({
+            adminToken: adminTokenRaw,
+            marketId: id,
+            customerRef: `test-manual-${matchIdTest}-${Date.now().toString(16)}`.slice(0, 32),
+            instructions: [{
+              selectionId,
+              side,
+              orderType: "LIMIT",
+              limitOrder: { size, price, persistenceType: "LAPSE" },
+            }],
+          });
+          return json({ ok: true, type: "placeOrder", marketId: id, result });
+        }
+        const result = await placeOrders({
+          adminToken: adminTokenRaw,
+          marketId: matchOddsMarketId,
+          customerRef: `test-manual-${matchIdTest}-${Date.now().toString(16)}`.slice(0, 32),
+          instructions: [{
+            selectionId,
+            side,
+            orderType: "LIMIT",
+            limitOrder: { size, price, persistenceType: "LAPSE" },
+          }],
+        });
+        return json({ ok: true, type: "placeOrder", marketId: matchOddsMarketId, result });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return json({ ok: false, error: message || "Erro no placeOrders Match Odds" }, 500);
+      }
+    }
+
+    // ============================================================
+    // ESTRATÉGIA: favoriteComeback - Favorito perdendo no HT
+    // ============================================================
+    if (matchPath(path, "/automation/betfair/strategy/favoriteComeback/tick")) {
+      const admin = requireAdminToken(body);
+      if (!admin.ok) return json(admin, 401);
+      const current = await getQueueItem(matchId);
+      if (!current) return json({ ok: false, error: "Item não encontrado" }, 404);
+
+      const baseBetfair = await resolveBetfairMatchOdds({
+        homeTeam: String(current?.homeTeam ?? ""),
+        awayTeam: String(current?.awayTeam ?? ""),
+        utcDate: current?.utcDate == null ? null : String(current.utcDate),
+        includeCorrectScore: false,
+      });
+
+      const strategy = (current as any)?.strategy && typeof (current as any).strategy === "object" ? (current as any).strategy : {};
+      const existing = (strategy as any)?.favoriteComeback && typeof (strategy as any).favoriteComeback === "object" ? (strategy as any).favoriteComeback : {};
+
+      const cfg = (body as any)?.config && typeof (body as any).config === "object" ? (body as any).config : {};
+      const stakeAbsCfg = Number(cfg?.stakeAbs ?? existing?.stakeAbs ?? NaN);
+      const stakeAbs = Number.isFinite(stakeAbsCfg) && stakeAbsCfg > 0 ? Math.max(2, stakeAbsCfg) : 2;
+      const minHomeOddsPreLive = Number(cfg?.minHomeOddsPreLive ?? existing?.minHomeOddsPreLive ?? 1.01);
+      const maxHomeOddsPreLive = Number(cfg?.maxHomeOddsPreLive ?? existing?.maxHomeOddsPreLive ?? 1.7);
+      const minElapsedForHt = Number(cfg?.minElapsedForHt ?? existing?.minElapsedForHt ?? 40);
+      const maxElapsedForHt = Number(cfg?.maxElapsedForHt ?? existing?.maxElapsedForHt ?? 52);
+
+      // Pegar timeline e odds atuais
+      const timeline = (baseBetfair as any)?.timeline ?? (current as any)?.betfair?.timeline ?? null;
+      const elapsed = Number(timeline?.elapsed ?? 0);
+      const scoreHome = Number(timeline?.scoreHome ?? (current as any)?.scoreHome ?? -1);
+      const scoreAway = Number(timeline?.scoreAway ?? (current as any)?.scoreAway ?? -1);
+      const odds = (current as any)?.betfair?.odds ?? baseBetfair?.odds ?? {};
+
+      // Odds atuais do time da casa e visitante
+      const homeBack = Number(odds?.home?.back ?? 0);
+      const awayBack = Number(odds?.away?.back ?? 0);
+      
+      // Pegar preLiveOdds salvo ou estimar com base nas odds atuais
+      const preLiveHomeOdds = Number(existing?.preLiveHomeOdds ?? (current as any)?.betfair?.preLiveHomeOdds ?? 0);
+      const preLiveAwayOdds = Number(existing?.preLiveAwayOdds ?? (current as any)?.betfair?.preLiveAwayOdds ?? 0);
+
+      const isInPlay = Boolean((current as any)?.betfair?.inPlay ?? baseBetfair?.inPlay ?? false);
+      const nowMs = Date.now();
+      const nowIso = new Date(nowMs).toISOString();
+
+      // Estado da estratégia
+      const phase = String(existing?.phase ?? "monitoring");
+      const hasEntered = Boolean(existing?.hasEntered);
+      const enteredAt = existing?.enteredAt ?? null;
+
+      // Determinar favorito baseado nas odds pre-live
+      const favoriteIsHome = preLiveHomeOdds > 0 && preLiveHomeOdds <= maxHomeOddsPreLive && preLiveHomeOdds >= minHomeOddsPreLive;
+      const favoriteIsAway = preLiveAwayOdds > 0 && preLiveAwayOdds <= maxHomeOddsPreLive && preLiveAwayOdds >= minHomeOddsPreLive;
+
+      // Placar do HT: visitante ganhando (0x1 ou 0x2) quando favorito é casa
+      const isHtPlacar = elapsed >= minElapsedForHt && elapsed <= maxElapsedForHt;
+      const homeLosing = scoreHome === 0 && (scoreAway === 1 || scoreAway === 2);
+      const awayLosing = scoreAway === 0 && (scoreHome === 1 || scoreHome === 2);
+      
+      // Cenário: Favorito (casa) perdendo no HT
+      const scenarioHomeFav = favoriteIsHome && homeLosing && isHtPlacar;
+      // Cenário: Favorito (visitante) perdendo no HT  
+      const scenarioAwayFav = favoriteIsAway && awayLosing && isHtPlacar;
+      
+      // Preço para entrar Back no favorito (usar odds atuais)
+      const favBackPrice = favoriteIsHome ? homeBack : awayBack;
+      const favSelectionId = favoriteIsHome 
+        ? Number((current as any)?.betfair?.runners?.homeSelectionId ?? baseBetfair?.runners?.homeSelectionId ?? NaN)
+        : Number((current as any)?.betfair?.runners?.awaySelectionId ?? baseBetfair?.runners?.awaySelectionId ?? NaN);
+      const favSide = "BACK";
+
+      // Preço LAY no azarão (visitante ou casa)
+      const dogSelectionId = favoriteIsHome
+        ? Number((current as any)?.betfair?.runners?.awaySelectionId ?? baseBetfair?.runners?.awaySelectionId ?? NaN)
+        : Number((current as any)?.betfair?.runners?.homeSelectionId ?? baseBetfair?.runners?.homeSelectionId ?? NaN);
+      const dogLayPrice = favoriteIsHome ? awayBack : homeBack;
+      const dogSide = "LAY";
+
+      // Preparar instruções
+      const instructions: any[] = [];
+
+      if (!hasEntered && (scenarioHomeFav || scenarioAwayFav)) {
+        // ENTRADA 1: Back Favorito (odds maiores que pre-live)
+        if (Number.isFinite(favSelectionId) && favBackPrice > 0) {
+          instructions.push({
+            selectionId: favSelectionId,
+            handicap: 0,
+            side: favSide,
+            orderType: "LIMIT",
+            limitOrder: { size: stakeAbs, price: favBackPrice, persistenceType: "LAPSE" },
+          });
+        }
+
+        // ENTRADA 2: LAY no azarão  
+        if (Number.isFinite(dogSelectionId) && dogLayPrice > 0) {
+          instructions.push({
+            selectionId: dogSelectionId,
+            handicap: 0,
+            side: dogSide,
+            orderType: "LIMIT",
+            limitOrder: { size: stakeAbs * 0.5, price: dogLayPrice, persistenceType: "LAPSE" },
+          });
+        }
+
+        // ENTRADA 3: Both Teams to Score - SIM (se disponível)
+        // BTTS é mercado separado do Match Odds, faremos em outra chamada
+      }
+
+      // Preparar estado BTTS (salvar se resolveu com sucesso)
+      let bttsMarket: any = null;
+      let bttsOrderResult: any = null;
+      let bttsError: string | null = null;
+
+      if (!hasEntered && (scenarioHomeFav || scenarioAwayFav)) {
+        // Tentar resolver o mercado BTTS e fazer placeOrders separado
+        try {
+          const adminToken = String((body as any)?.adminToken ?? "").trim();
+          bttsMarket = await resolveBetfairBttsMarket({
+            eventId: matchId,
+            adminToken,
+          });
+          if (bttsMarket?.marketId && Number.isFinite(bttsMarket?.runners?.yesSelectionId)) {
+            const bttsPrice = bttsMarket?.odds?.yes?.back ?? null;
+            if (bttsPrice && bttsPrice > 0) {
+              bttsOrderResult = await placeOrders({
+                adminToken,
+                marketId: bttsMarket.marketId,
+                customerRef: `FCBTTS_${matchId}_${Date.now().toString(16)}`.slice(0, 32),
+                instructions: [{
+                  selectionId: bttsMarket.runners.yesSelectionId,
+                  handicap: 0,
+                  side: "BACK",
+                  orderType: "LIMIT",
+                  limitOrder: { size: stakeAbs * 0.5, price: bttsPrice, persistenceType: "LAPSE" },
+                }],
+              });
+            } else {
+              bttsError = `BTTS odds YES não disponível (back: ${bttsPrice})`;
+            }
+          } else {
+            bttsError = "BTTS market não disponível ou YES selectionId inválido";
+          }
+        } catch (error: any) {
+          bttsError = error?.message ?? String(error);
+        }
+      }
+
+      const nextState: any = {
+        phase: hasEntered ? "executed" : (instructions.length > 0 ? "entering" : "monitoring"),
+        hasEntered: hasEntered || instructions.length > 0 || (bttsOrderResult?.status === "SUCCESS"),
+        enteredAt: hasEntered ? enteredAt : (instructions.length > 0 || (bttsOrderResult?.status === "SUCCESS") ? nowIso : null),
+        lastTickAt: nowIso,
+        lastScoreHome: scoreHome,
+        lastScoreAway: scoreAway,
+        preLiveHomeOdds: preLiveHomeOdds || homeBack,
+        preLiveAwayOdds: preLiveAwayOdds || awayBack,
+        elapsed,
+        stakeAbs,
+        btts: {
+          marketId: bttsMarket?.marketId ?? null,
+          marketResolved: bttsMarket != null,
+          yesSelectionId: bttsMarket?.runners?.yesSelectionId ?? null,
+          yesPrice: bttsMarket?.odds?.yes?.back ?? null,
+          orderResult: bttsOrderResult,
+          orderError: bttsError,
+        },
+      };
+
+      if (instructions.length > 0) {
+        // Se tem instruções, fazer placeOrders no Match Odds
+        try {
+          const moMarketId = String((current as any)?.betfair?.marketId ?? baseBetfair?.marketId ?? "").trim();
+          if (moMarketId) {
+            const result = await placeOrders({
+              adminToken: String((body as any)?.adminToken ?? "").trim(),
+              marketId: moMarketId,
+              customerRef: `FC_${matchId}_${Date.now().toString(16)}`.slice(0, 32),
+              instructions,
+            });
+            nextState.lastEntryResult = result;
+            nextState.entryBetId = result?.instructionReports?.[0]?.betId ?? null;
+            nextState.entryPrice = favBackPrice;
+            nextState.entrySizeMatched = stakeAbs;
+          }
+        } catch (error: any) {
+          nextState.lastEntryError = error?.message ?? String(error);
+        }
+      }
+
+      // Salvar estado via queue update
+      const updateKey = `${BETFAIR_QUEUE_PREFIX}${matchId}`;
+      const currentRaw = (await kv.get(updateKey)) ?? {};
+      const nextItem = {
+        ...currentRaw,
+        betfair: baseBetfair || current?.betfair,
+        strategy: { ...strategy, agent: "favoriteComeback", favoriteComeback: nextState },
+        updatedAt: nowIso,
+      };
+      await kv.set(updateKey, nextItem);
+
+      return json({
+        ok: true,
+        entered: instructions.length > 0,
+        scenario: scenarioHomeFav ? "home_fav_losing" : scenarioAwayFav ? "away_fav_losing" : "none",
+        instructions,
+        state: nextState,
+        item: nextItem,
+      });
+    }
+
+
     return json({ ok: true, skipped: true, reason: "not_implemented" });
   }
+
+  // === ROTA DE TESTE: placeOrders no Match Odds ===
+  if (req.method === "POST" && (path.includes("/automation/betfair/strategy/placeOrdersMatchOdds") || path.includes("/automation/betfair/test/placeOrders"))) {
+    const adminTokenRaw = "5XnTu4rGA1Ia4iSpJIxw8Fp7aS3ejMYQA9qzQOYBGKY=";
+    const matchIdTest = "1544371";
+    const selectionId = 1096;
+    const side = "BACK";
+    const price = 1.66;
+    const size = 2.0;
+    if (!adminTokenRaw) return json({ ok: false, error: "adminToken obrigatório" }, 400);
+    if (!matchIdTest) return json({ ok: false, error: "matchId obrigatório" }, 400);
+    if (!Number.isFinite(selectionId)) return json({ ok: false, error: "selectionId obrigatório" }, 400);
+    if (!Number.isFinite(price) || price < 1.01) return json({ ok: false, error: "price inválido" }, 400);
+    if (!Number.isFinite(size) || size <= 0) return json({ ok: false, error: "size inválido" }, 400);
+    try {
+      const current = await getQueueItem(matchIdTest);
+      const betfair = current?.betfair ?? {};
+      const matchOddsMarketId = String(betfair?.matchOdds?.marketId ?? "1.257879109").trim();
+      if (!matchOddsMarketId) {
+        const cats = await betfairRpc({
+          method: "SportsAPING/v1.0/listMarketCatalogue",
+          adminToken: adminTokenRaw,
+          params: {
+            filter: { eventIds: [matchIdTest], marketTypeCodes: ["MATCH_ODDS"] },
+            maxResults: 5,
+            sort: "MAXIMUM_TRADED",
+            marketProjection: ["RUNNER_DESCRIPTION", "MARKET_START_TIME"],
+          },
+        });
+        const mk = Array.isArray(cats) ? cats[0] : null;
+        const id = String(mk?.marketId ?? "").trim();
+        if (!id) return json({ ok: false, error: "Match Odds marketId não encontrado para este evento" }, 404);
+        const result = await placeOrders({
+          adminToken: adminTokenRaw, marketId: id,
+          customerRef: `test-${matchIdTest}-${Date.now().toString(16)}`.slice(0, 32),
+          instructions: [{ selectionId, side, orderType: "LIMIT", limitOrder: { size, price, persistenceType: "LAPSE" } }],
+        });
+        return json({ ok: true, type: "placeOrder", marketId: id, result });
+      }
+      const result = await placeOrders({
+        adminToken: adminTokenRaw, marketId: matchOddsMarketId,
+        customerRef: `test-${matchIdTest}-${Date.now().toString(16)}`.slice(0, 32),
+        instructions: [{ selectionId, side, orderType: "LIMIT", limitOrder: { size, price, persistenceType: "LAPSE" } }],
+      });
+      return json({ ok: true, type: "placeOrder", marketId: matchOddsMarketId, result });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return json({ ok: false, error: message || "Erro no placeOrders Match Odds" }, 500);
+    }
+  }
+
+    // ============================================================
+    // ESTRATÉGIA: over05htMomentum - Over 0.5 HT por momento
+    // ============================================================
+    if (matchPath(path, "/automation/betfair/strategy/over05htMomentum/tick")) {
+      const admin = requireAdminToken(body);
+      if (!admin.ok) return json(admin, 401);
+      const current = await getQueueItem(matchId);
+      if (!current) return json({ ok: false, error: "Item não encontrado" }, 404);
+
+      const baseBetfair = current?.betfair ?? {};
+      const timeline = baseBetfair?.timeline ?? null;
+      const elapsed = Number(timeline?.elapsed ?? 0);
+      const odds = baseBetfair?.odds ?? {};
+      const homeBack = Number(odds?.home?.back ?? 0);
+      const homeLay = Number(odds?.home?.lay ?? 0);
+      const volume = Number(baseBetfair?.matchedVolume ?? 0);
+      const betfairEventId = String(baseBetfair?.eventId ?? "").trim() || matchId;
+
+      const strategy = (current as any)?.strategy && typeof (current as any).strategy === "object" ? (current as any).strategy : {};
+      const existing = (strategy as any)?.over05htMomentum && typeof (strategy as any).over05htMomentum === "object" ? (strategy as any).over05htMomentum : {};
+
+      const cfg = (body as any)?.config && typeof (body as any).config === "object" ? (body as any).config : {};
+      const stakeAbs = Number(cfg?.stakeAbs ?? existing?.stakeAbs ?? NaN);
+      const finalStake = Number.isFinite(stakeAbs) && stakeAbs > 0 ? Math.max(2, stakeAbs) : 2;
+
+      const spread = homeLay > 0 && homeBack > 0 ? homeLay - homeBack : 0;
+      const pressaoHome = homeLay < 2.0 && homeLay > 1.1;
+      const volatilidade = spread > 0.08;
+      const volumeAlto = volume > 50000;
+      const indicadores = [pressaoHome, volatilidade, volumeAlto].filter(Boolean).length;
+
+      const hasEntered = Boolean(existing?.hasEntered);
+      const momentumBom = indicadores >= 2 && elapsed > 5 && elapsed < 40;
+
+      let overMarket: any = null;
+      let overOrderResult: any = null;
+      let overError: string | null = null;
+
+      if (!hasEntered && momentumBom) {
+        try {
+          const adminToken = String((body as any)?.adminToken ?? "").trim();
+          overMarket = await resolveBetfairOverUnderMarket({
+            eventId: betfairEventId, lineCode: 0.5, adminToken,
+          });
+          if (overMarket?.marketId && Number.isFinite(overMarket?.runners?.overSelectionId)) {
+            const overPrice = overMarket?.odds?.over?.back ?? null;
+            if (overPrice && overPrice > 0) {
+              overOrderResult = await placeOrders({
+                adminToken,
+                marketId: overMarket.marketId,
+                customerRef: `O05HT_${matchId}_${Date.now().toString(16)}`.slice(0, 32),
+                instructions: [{
+                  selectionId: overMarket.runners.overSelectionId,
+                  handicap: 0, side: "BACK", orderType: "LIMIT",
+                  limitOrder: { size: finalStake, price: overPrice, persistenceType: "LAPSE" },
+                }],
+              });
+            } else {
+              overError = "Over 0.5 HT odds nao disponivel";
+            }
+          } else {
+            overError = "Over 0.5 HT market nao disponivel";
+          }
+        } catch (error: any) {
+          overError = error?.message ?? String(error);
+        }
+      }
+
+      const nextState = {
+        phase: hasEntered ? "executed" : (overOrderResult?.status === "SUCCESS" ? "entered" : "monitoring"),
+        hasEntered: hasEntered || overOrderResult?.status === "SUCCESS",
+        lastTickAt: new Date().toISOString(),
+        elapsed,
+        stakeAbs: finalStake,
+        momentum: { indicadores, pressaoHome, volatilidade, volumeAlto, spread, homeLay, volume },
+        over: { marketId: overMarket?.marketId ?? null, orderResult: overOrderResult, orderError: overError },
+      };
+
+      const updateKey = BETFAIR_QUEUE_PREFIX + matchId;
+      const currentRaw = (await kv.get(updateKey)) ?? {};
+      const nextItem = {
+        ...currentRaw,
+        betfair: baseBetfair || current?.betfair,
+        strategy: { ...strategy, agent: "over05htMomentum", over05htMomentum: nextState },
+        updatedAt: new Date().toISOString(),
+      };
+      await kv.set(updateKey, nextItem);
+
+      return json({ ok: true, entered: Boolean(overOrderResult?.status === "SUCCESS"), momentumBom, indicadores, overError, state: nextState });
+    }
+
+    // ============================================================
+    // SISTEMA DE AJUSTE DE ORDEM - Auto-recuperação 15-20s
+    // ============================================================
+    // Se uma ordem não for correspondida em ~15s, cancela e
+    // recoloca com preço 1 tick mais próximo do mercado atual
+    if (matchPath(path, "/automation/betfair/strategy/adjustOrder/tick")) {
+      const admin = requireAdminToken(body);
+      if (!admin.ok) return json(admin, 401);
+      const current = await getQueueItem(matchId);
+      if (!current) return json({ ok: false, error: "Item não encontrado" }, 404);
+
+      const cfg = (body as any)?.config && typeof (body as any).config === "object" ? (body as any).config : {};
+      const betIdToAdjust = String(cfg?.betId ?? "").trim();
+      if (!betIdToAdjust) return json({ ok: false, error: "betId obrigatório" }, 400);
+
+      const marketIds = [String(cfg?.marketId ?? "").trim()].filter(Boolean);
+      if (marketIds.length === 0) return json({ ok: false, error: "marketId obrigatório" }, 400);
+
+      const elapsedSeconds = Number(cfg?.elapsedSeconds ?? 0);
+      if (elapsedSeconds < 10) return json({ ok: false, error: `Ainda dentro do prazo (${elapsedSeconds}s < 10s)` });
+
+      const maxTicksAbove = Number(cfg?.maxTicksAbove ?? 3);  // Máximo de ticks que pode subir
+      const tickSize = Number(cfg?.tickSize ?? 0.01);  // Tamanho do tick
+
+      let result: any = { attempt: 0, cancelled: false, newBetId: null, newOrderStatus: null };
+
+      try {
+        // 1. Verificar estado atual da ordem
+        const ordersRes = await listCurrentOrders({ adminToken: admin.adminToken, betIds: [betIdToAdjust] });
+        const ordersList = Array.isArray((ordersRes as any)?.currentOrders) ? (ordersRes as any).currentOrders : [];
+        const order = ordersList.find((o: any) => String(o?.betId ?? "").trim() === betIdToAdjust) ?? null;
+
+        if (!order) {
+          // Ordem já foi totalmente executada ou não existe mais
+          return json({ ok: true, skipped: true, reason: "ordem_ja_executada_ou_inexistente", betId: betIdToAdjust });
+        }
+
+        const sizeRemaining = Number(order?.sizeRemaining ?? 0);
+        const sizeMatched = Number(order?.sizeMatched ?? 0);
+        const status = String(order?.status ?? "").toUpperCase();
+
+        if (sizeRemaining <= 0 || status === "EXECUTION_COMPLETE") {
+          return json({ ok: true, skipped: true, reason: "ordem_ja_executada", sizeMatched });
+        }
+
+        // 2. Cancelar a ordem antiga
+        const cancelRes = await cancelOrders({
+          adminToken: admin.adminToken,
+          marketId: marketIds[0],
+          instructions: [{ betId: betIdToAdjust }],
+        });
+
+        const cancelReports = Array.isArray((cancelRes as any)?.instructionReports)
+          ? (cancelRes as any).instructionReports
+          : (Array.isArray((cancelRes as any)?.result?.instructionReports)
+            ? (cancelRes as any).result.instructionReports
+            : []);
+
+        const cancelStatus = cancelReports[0]?.status ?? "FAILURE";
+        result.cancelled = cancelStatus === "SUCCESS";
+        const sizeCancelled = Number(cancelReports[0]?.sizeCancelled ?? 0);
+
+        // 3. Pegar odds atualizadas do mercado
+        const baseBetfair = current?.betfair ?? {};
+        const marketOdds = baseBetfair?.odds ?? {};
+        const homeBack = Number(marketOdds?.home?.back ?? 0);
+        const homeLay = Number(marketOdds?.home?.lay ?? 0);
+        const awayBack = Number(marketOdds?.away?.back ?? 0);
+        const awayLay = Number(marketOdds?.away?.lay ?? 0);
+        const drawBack = Number(marketOdds?.draw?.back ?? 0);
+        const drawLay = Number(marketOdds?.draw?.lay ?? 0);
+
+        const orderSide = String(order?.side ?? "").toUpperCase();
+        const orderSelectionId = Number(order?.selectionId);
+        const orderPrice = Number(order?.priceSize?.price ?? order?.averagePriceMatched ?? 0);
+        const newSize = sizeCancelled > 0 ? sizeCancelled : sizeRemaining;
+
+        // 4. Determinar novo preço (1 tick mais agressivo)
+        // Se BACK: aumenta o preço (oferece mais pro mercado pegar)
+        // Se LAY: diminui o preço (oferece menos pro mercado pegar)
+        let newPrice = orderPrice;
+        let ticksMoved = 0;
+
+        if (orderSide === "BACK") {
+          // BACK: subir o preço 1 tick = mais perto do lay atual
+          const bestLay = orderSelectionId === Number(current?.betfair?.runners?.homeSelectionId) ? homeLay
+            : orderSelectionId === Number(current?.betfair?.runners?.awaySelectionId) ? awayLay
+            : drawLay;
+          if (bestLay > 0) {
+            newPrice = Math.min(bestLay, orderPrice + tickSize);
+            ticksMoved = Math.round((newPrice - orderPrice) / tickSize);
+          } else {
+            newPrice = orderPrice + tickSize;
+            ticksMoved = 1;
+          }
+        } else if (orderSide === "LAY") {
+          // LAY: diminuir o preço 1 tick = mais perto do back atual
+          const bestBack = orderSelectionId === Number(current?.betfair?.runners?.homeSelectionId) ? homeBack
+            : orderSelectionId === Number(current?.betfair?.runners?.awaySelectionId) ? awayBack
+            : drawBack;
+          if (bestBack > 0) {
+            newPrice = Math.max(bestBack, orderPrice - tickSize);
+            ticksMoved = Math.round((orderPrice - newPrice) / tickSize);
+          } else {
+            newPrice = Math.max(1.01, orderPrice - tickSize);
+            ticksMoved = 1;
+          }
+        }
+
+        // Limitar número de ticks que pode subir
+        const totalTicksMoved = Number(cfg?.previousTicksMoved ?? 0) + ticksMoved;
+        if (totalTicksMoved > maxTicksAbove) {
+          return json({ ok: false, error: `Já moveu ${totalTicksMoved} ticks, max permitido ${maxTicksAbove}` });
+        }
+
+        // Arredondar para 2 casas decimais
+        newPrice = Math.round(newPrice * 100) / 100;
+        if (newPrice < 1.01) newPrice = 1.01;
+
+        // 5. Recolocar ordem com novo preço
+        const placeRes = await placeOrders({
+          adminToken: admin.adminToken,
+          marketId: marketIds[0],
+          customerRef: `ADJ_${betIdToAdjust.slice(-8)}_${Date.now().toString(16)}`.slice(0, 32),
+          instructions: [{
+            selectionId: orderSelectionId,
+            handicap: 0,
+            side: orderSide,
+            orderType: "LIMIT",
+            limitOrder: { size: Math.max(0.01, newSize), price: newPrice, persistenceType: "LAPSE" },
+          }],
+        });
+
+        const placeReports = Array.isArray((placeRes as any)?.instructionReports)
+          ? (placeRes as any).instructionReports
+          : (Array.isArray((placeRes as any)?.result?.instructionReports)
+            ? (placeRes as any).result.instructionReports
+            : []);
+
+        const placeStatus = placeReports[0]?.status ?? "FAILURE";
+        const newBetId = placeReports[0]?.betId ?? null;
+        result.newBetId = newBetId;
+        result.newOrderStatus = placeStatus;
+        result.newPrice = newPrice;
+        result.oldPrice = orderPrice;
+        result.ticksMoved = ticksMoved;
+        result.totalTicksMoved = totalTicksMoved;
+        result.sizeCancelled = sizeCancelled;
+        result.orderSide = orderSide;
+
+        // 6. Atualizar o item na queue com os novos dados
+        const updateKey = BETFAIR_QUEUE_PREFIX + matchId;
+        const currentRaw = (await kv.get(updateKey)) ?? {};
+        const strategy = (current as any)?.strategy && typeof (current as any).strategy === "object" ? (current as any).strategy : {};
+        const strategyKey = String(strategy?.agent ?? "unknown").trim();
+
+        const updatedStrategy = {
+          ...currentRaw,
+          betfair: baseBetfair || current?.betfair,
+          strategy: {
+            ...strategy,
+            [strategyKey]: {
+              ...(strategy as any)?.[strategyKey],
+              lastAdjustAt: new Date().toISOString(),
+              adjustCount: Number((strategy as any)?.[strategyKey]?.adjustCount ?? 0) + 1,
+              lastAdjustOldBetId: betIdToAdjust,
+              lastAdjustNewBetId: newBetId,
+              lastAdjustOldPrice: orderPrice,
+              lastAdjustNewPrice: newPrice,
+            },
+          },
+          updatedAt: new Date().toISOString(),
+        };
+        await kv.set(updateKey, updatedStrategy);
+
+      } catch (error: any) {
+        result.error = error?.message ?? String(error);
+      }
+
+      return json({ ok: true, ...result });
+    }
 
     return json({ ok: false, error: "Not Found" }, 404);
   } catch (error) {
