@@ -58,3 +58,6 @@ supabase/functions/*/secrets.env
 
 # Scripts Python (betfair local client)
 scripts/.env
+
+# Hermes data (memories backup)
+hermes-data/*.lock
